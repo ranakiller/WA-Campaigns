@@ -1,0 +1,190 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <title>WhatsApp Scheduler</title>
+  <link rel="stylesheet" href="popup.css" />
+</head>
+<body>
+  <header class="app-header">
+    <img src="icons/icon48.png" alt="" />
+    <div class="app-header-text">
+      <h1>WhatsApp Scheduler</h1>
+      <p class="subtitle">Your groups, your messages, your schedule.</p>
+    </div>
+    <button id="themeToggleBtn" class="icon-btn" title="Toggle appearance" aria-label="Toggle appearance">
+      <svg id="themeIcon" viewBox="0 0 24 24" width="18" height="18"><path fill="currentColor" d="M12 3a9 9 0 1 0 9 9c0-.46-.04-.92-.1-1.36a5.389 5.389 0 0 1-4.4 2.26 5.403 5.403 0 0 1-3.14-9.8c-.44-.06-.9-.1-1.36-.1Z"/></svg>
+    </button>
+  </header>
+
+  <nav class="tabs">
+    <button class="tab-btn active" data-tab="messages">Messages</button>
+    <button class="tab-btn" data-tab="lists">Lists</button>
+    <button class="tab-btn" data-tab="campaigns">Campaigns</button>
+    <button class="tab-btn" data-tab="log">Log</button>
+    <button class="tab-btn" data-tab="settings">Safety</button>
+  </nav>
+
+  <main>
+    <!-- MESSAGES -->
+    <section id="tab-messages" class="tab-panel active">
+      <h3>Save a message</h3>
+      <label>Label (for your own reference)</label>
+      <input id="msgLabel" type="text" placeholder="e.g. Weekly reminder" />
+
+      <div class="kind-toggle">
+        <button type="button" class="kind-btn active" data-kind="text">Text only</button>
+        <button type="button" class="kind-btn" data-kind="media">Image / Document</button>
+      </div>
+
+      <div id="mediaPicker" class="media-picker" style="display:none">
+        <input id="msgFile" type="file" accept="image/*,video/*,application/pdf,.doc,.docx,.xls,.xlsx,.ppt,.pptx,.zip" />
+        <div id="mediaPreview" class="media-preview"></div>
+      </div>
+
+      <label id="msgTextLabel">Message text</label>
+      <textarea id="msgText" placeholder="Write your message..." rows="3"></textarea>
+
+      <button id="saveMessageBtn" class="primary">Save message</button>
+      <button id="cancelEditMessageBtn" class="ghost" style="display:none">Cancel edit</button>
+
+      <h3>Saved messages</h3>
+      <ul id="messageList" class="item-list"></ul>
+    </section>
+
+    <!-- LISTS -->
+    <section id="tab-lists" class="tab-panel">
+      <p class="hint">Open <b>web.whatsapp.com</b> in a tab, then scan to pull every group and contact straight from WhatsApp's own chat list. Search, select, and save them as a list below.</p>
+      <button id="scanChatsBtn" class="primary">Scan open chats</button>
+      <div class="manual-add">
+        <input id="manualContactNumber" type="text" placeholder="Or add a contact by phone number, with country code" />
+        <button id="manualAddBtn">Add</button>
+      </div>
+      <p class="hint">Groups can't be added by typing a name — scan picks up every group automatically.</p>
+
+      <h3 id="listBuilderTitle">Build a list</h3>
+      <input id="listName" type="text" placeholder="List name, e.g. Family groups" />
+      <input id="listSearchInput" type="text" placeholder="Search fetched chats..." />
+      <div class="select-all-row">
+        <button id="selectAllBtn" class="small" type="button">Select all</button>
+        <button id="deselectAllBtn" class="small" type="button">Deselect all</button>
+        <span id="selectedCount" class="muted"></span>
+      </div>
+      <div id="listBuilderChecklist" class="checklist"></div>
+      <button id="saveListBtn" class="primary">Save list</button>
+      <button id="cancelEditListBtn" class="ghost" style="display:none">Cancel edit</button>
+
+      <h3>Saved lists</h3>
+      <ul id="listsList" class="item-list"></ul>
+    </section>
+
+    <!-- CAMPAIGNS -->
+    <section id="tab-campaigns" class="tab-panel">
+      <div id="consentGate" class="consent-gate" style="display:none">
+        <p class="hint warn">
+          This tool sends automated messages through WhatsApp Web, which is against WhatsApp's Terms
+          of Service even for your own groups/contacts. Automated sending can be flagged by WhatsApp's
+          spam detection and may lead to a temporary restriction or ban of your number. Please confirm
+          this is for your own groups/contacts only — not for messaging people who haven't agreed to
+          receive bulk messages from you.
+        </p>
+        <label class="checkbox-row">
+          <input id="consentCheckbox" type="checkbox" />
+          I understand the risk and will only use this on my own groups/contacts.
+        </label>
+        <button id="consentAcceptBtn" class="primary">Enable campaigns</button>
+      </div>
+
+      <div id="campaignsContent">
+        <h3>New campaign</h3>
+        <label>Campaign name</label>
+        <input id="campName" type="text" placeholder="e.g. Monday reminder" />
+
+        <label>Message</label>
+        <select id="campMessageSelect"></select>
+
+        <label>Send to (one or more lists)</label>
+        <div id="campListChecklist" class="checklist"></div>
+
+        <label>When</label>
+        <div class="when-row">
+          <select id="campScheduleType">
+            <option value="fixed">Every day at...</option>
+            <option value="once">One time on...</option>
+          </select>
+          <input id="campTimeFixed" type="time" value="09:00" />
+          <input id="campTimeOnce" type="datetime-local" style="display:none" />
+        </div>
+
+        <label>Sending mode</label>
+        <div class="radio-row">
+          <label><input type="radio" name="sendMode" value="paced" checked /> Paced — use the delay range below between every send (recommended)</label>
+          <label><input type="radio" name="sendMode" value="fast" /> Fast — short fixed gap only (~1-1.5s), higher volume in less time</label>
+        </div>
+
+        <label>Delay between messages (seconds)</label>
+        <div class="when-row">
+          <input id="campDelayMin" type="number" min="1" max="300" /> to
+          <input id="campDelayMax" type="number" min="1" max="300" />
+        </div>
+
+        <label>Delay before starting the next list (seconds)</label>
+        <div class="when-row">
+          <input id="campListDelayMin" type="number" min="1" max="600" /> to
+          <input id="campListDelayMax" type="number" min="1" max="600" />
+        </div>
+
+        <button id="addCampaignBtn" class="primary">Save campaign</button>
+        <button id="cancelEditCampaignBtn" class="ghost" style="display:none">Cancel edit</button>
+
+        <h3>Active campaigns</h3>
+        <ul id="campaignList" class="item-list"></ul>
+      </div>
+    </section>
+
+    <!-- LOG -->
+    <section id="tab-log" class="tab-panel">
+      <ul id="logList" class="item-list"></ul>
+    </section>
+
+    <!-- SETTINGS -->
+    <section id="tab-settings" class="tab-panel">
+      <p class="hint warn">
+        Fully automated sending can trigger WhatsApp's spam detection even for your own groups.
+        These settings add randomness so sends look less scripted. Lower risk isn't zero risk —
+        keep daily volume modest and prefer "Confirmed" sending mode.
+      </p>
+      <label class="checkbox-row">
+        <input id="consentCheckboxSettings" type="checkbox" />
+        I will only use this on my own groups/contacts (required to run campaigns).
+      </label>
+
+      <label>Jitter around scheduled time (± minutes)</label>
+      <input id="jitterMinutes" type="number" min="0" max="30" />
+
+      <label>Default delay between messages (seconds)</label>
+      <div class="when-row">
+        <input id="delayMin" type="number" min="1" max="300" /> to
+        <input id="delayMax" type="number" min="1" max="300" />
+      </div>
+
+      <label>Default delay before the next list (seconds)</label>
+      <div class="when-row">
+        <input id="listDelayMin" type="number" min="1" max="600" /> to
+        <input id="listDelayMax" type="number" min="1" max="600" />
+      </div>
+
+      <label>Appearance</label>
+      <select id="themeSelect">
+        <option value="system">Match system</option>
+        <option value="light">Light</option>
+        <option value="dark">Dark</option>
+      </select>
+
+      <button id="saveSettingsBtn" class="primary">Save</button>
+    </section>
+  </main>
+
+  <script src="popup.js"></script>
+</body>
+</html>

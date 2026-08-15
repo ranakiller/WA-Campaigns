@@ -1,0 +1,37 @@
+{
+  "manifest_version": 3,
+  "name": "WhatsApp Message Scheduler",
+  "version": "3.1.1",
+  "description": "Save lists of your own WhatsApp groups/contacts, build text/media message campaigns, and schedule them safely — driven by WhatsApp Web's own internal API (via WPPConnect/wa-js) instead of simulated clicks.",
+  "permissions": ["storage", "unlimitedStorage", "alarms", "tabs", "notifications"],
+  "host_permissions": ["https://web.whatsapp.com/*"],
+  "background": {
+    "service_worker": "background.js"
+  },
+  "content_scripts": [
+    {
+      "matches": ["https://web.whatsapp.com/*"],
+      "js": ["vendor/wppconnect-wa.js", "page-bridge.js"],
+      "world": "MAIN",
+      "run_at": "document_idle"
+    },
+    {
+      "matches": ["https://web.whatsapp.com/*"],
+      "js": ["content.js"],
+      "run_at": "document_idle"
+    }
+  ],
+  "action": {
+    "default_popup": "popup.html",
+    "default_icon": {
+      "16": "icons/icon16.png",
+      "48": "icons/icon48.png",
+      "128": "icons/icon128.png"
+    }
+  },
+  "icons": {
+    "16": "icons/icon16.png",
+    "48": "icons/icon48.png",
+    "128": "icons/icon128.png"
+  }
+}
