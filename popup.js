@@ -4,21 +4,58 @@ function call(action, payload = {}) {
   });
 }
 
-let STATE = { lists: [], messages: [], campaigns: [], log: [], settings: {} };
-let pendingMedia = null; // { dataUrl, filename, mimeType }
+let STATE = { fetchedChats: [], lists: [], messages: [], campaigns: [], log: [], settings: {} };
+// The message currently being composed/edited — an ordered sequence of
+// items, each independently text or media(+its own caption). Sent one after
+// another to each chat before the campaign moves on to the next chat.
+let composingItems = []; // { kind: 'text', text } | { kind: 'media', media, caption }
 let editingMessageId = null;
 let editingListId = null;
 let editingCampaignId = null;
 
-// Session-only cache of chats seen via scan/manual-add this popup session —
-// there's no persistent "pool"; scan, pick, and save straight into a list.
-let chatSource = new Map(); // waId -> { waId, name, type }
+// Chats seen via scan/manual-add. Backed by chrome.storage (STATE.fetchedChats)
+// so they survive the popup closing — refresh() merges storage into this map
+// on every load; "Clear fetched" is the only thing that empties it.
+let chatSource = new Map(); // waId -> { waId, name, type, number }
 let selectedWaIds = new Set();
 let listSearchQuery = '';
+
+const EXPORT_ICON_SVG =
+  '<svg viewBox="0 0 24 24" width="14" height="14"><path fill="currentColor" d="M5 3a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2V5a2 2 0 0 0-2-2H5Zm0 2h5v4H5V5Zm7 0h7v4h-7V5ZM5 11h5v3H5v-3Zm7 0h7v3h-7v-3ZM5 16h5v3H5v-3Zm7 0h7v3h-7v-3Z"/></svg>';
+const EDIT_ICON_SVG =
+  '<svg viewBox="0 0 24 24" width="14" height="14"><path fill="currentColor" d="M3 17.25V21h3.75L17.81 9.94l-3.75-3.75L3 17.25ZM20.71 7.04a1 1 0 0 0 0-1.41l-2.34-2.34a1 1 0 0 0-1.41 0l-1.83 1.83 3.75 3.75 1.83-1.83Z"/></svg>';
+const DELETE_ICON_SVG =
+  '<svg viewBox="0 0 24 24" width="14" height="14"><path fill="currentColor" d="M6 19a2 2 0 0 0 2 2h8a2 2 0 0 0 2-2V7H6v12ZM19 4h-3.5l-1-1h-5l-1 1H5v2h14V4Z"/></svg>';
+const PAUSE_ICON_SVG = '<svg viewBox="0 0 24 24" width="14" height="14"><path fill="currentColor" d="M6 5h4v14H6zm8 0h4v14h-4z"/></svg>';
+const PLAY_ICON_SVG = '<svg viewBox="0 0 24 24" width="14" height="14"><path fill="currentColor" d="M8 5v14l11-7z"/></svg>';
+const RUN_NOW_ICON_SVG =
+  '<svg viewBox="0 0 24 24" width="14" height="14"><path fill="currentColor" d="M7 2v11h3v9l7-12h-4l4-8z"/></svg>';
+
+function downloadCsv(filename, chats) {
+  const escapeCsv = (v) => {
+    const s = String(v ?? '');
+    return /[",\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
+  };
+  const header = ['Name', 'Type', 'ID / Number'];
+  const rows = (chats || []).map((c) => [c.name, c.type, c.type === 'contact' ? c.number || c.waId : c.waId]);
+  const csv = [header, ...rows].map((r) => r.map(escapeCsv).join(',')).join('\r\n');
+  const blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = filename;
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+  URL.revokeObjectURL(url);
+}
 
 async function refresh() {
   const res = await call('getState');
   if (res.ok) STATE = res.state;
+  for (const c of STATE.fetchedChats || []) {
+    chatSource.set(c.waId, c);
+  }
   applyTheme();
   renderMessages();
   renderListBuilder();
@@ -67,86 +104,197 @@ document.querySelectorAll('.tab-btn').forEach((btn) => {
     document.querySelectorAll('.tab-panel').forEach((p) => p.classList.remove('active'));
     btn.classList.add('active');
     document.getElementById(`tab-${btn.dataset.tab}`).classList.add('active');
+    chrome.storage.local.set({ lastTab: btn.dataset.tab });
   });
+});
+
+chrome.storage.local.get(['lastTab'], (data) => {
+  if (data.lastTab) {
+    const btn = document.querySelector(`.tab-btn[data-tab="${data.lastTab}"]`);
+    if (btn) btn.click();
+  }
 });
 
 // ============ MESSAGES ============
+// A message is an ordered list of items (composingItems while being built).
+// The paperclip attaches a file as its own item immediately (caption edited
+// inline afterward); the + button adds the current textarea content as a
+// separate text item. Nothing is "the" message until Save is pressed.
 
-document.querySelectorAll('.kind-btn').forEach((btn) => {
-  btn.addEventListener('click', () => {
-    document.querySelectorAll('.kind-btn').forEach((b) => b.classList.remove('active'));
-    btn.classList.add('active');
-    const isMedia = btn.dataset.kind === 'media';
-    document.getElementById('mediaPicker').style.display = isMedia ? '' : 'none';
-    document.getElementById('msgTextLabel').textContent = isMedia ? 'Caption (optional)' : 'Message text';
+let openSendPanelMessageId = null; // only one "send now" panel open at a time
+
+// The in-progress compose form (label, text box, staged items) is a popup
+// UI concern, not core app data — same pattern as lastTab — so it's read
+// and written directly via chrome.storage.local rather than round-tripping
+// through background.js. Without this, closing the popup (which destroys
+// its JS state entirely) would silently discard an unsaved draft.
+function saveDraft() {
+  chrome.storage.local.set({
+    messageDraft: {
+      label: document.getElementById('msgLabel').value,
+      text: document.getElementById('msgText').value,
+      items: composingItems,
+      editingMessageId
+    }
   });
+}
+
+function clearDraft() {
+  chrome.storage.local.remove('messageDraft');
+}
+
+function restoreDraft() {
+  chrome.storage.local.get(['messageDraft'], (data) => {
+    const draft = data.messageDraft;
+    if (!draft) return;
+    const hasContent = (draft.items && draft.items.length > 0) || draft.label || draft.text;
+    if (!hasContent) return;
+    document.getElementById('msgLabel').value = draft.label || '';
+    document.getElementById('msgText').value = draft.text || '';
+    composingItems = draft.items || [];
+    editingMessageId = draft.editingMessageId || null;
+    renderComposingItems();
+    document.getElementById('saveMessageBtn').textContent = editingMessageId ? 'Update message' : 'Save message';
+    document.getElementById('cancelEditMessageBtn').style.display = editingMessageId ? '' : 'none';
+  });
+}
+
+document.getElementById('attachToggleBtn').addEventListener('click', () => {
+  document.getElementById('msgFile').click();
 });
 
-function currentKind() {
-  return document.querySelector('.kind-btn.active').dataset.kind;
-}
-function setKind(kind) {
-  document.querySelectorAll('.kind-btn').forEach((b) => b.classList.toggle('active', b.dataset.kind === kind));
-  document.getElementById('mediaPicker').style.display = kind === 'media' ? '' : 'none';
-  document.getElementById('msgTextLabel').textContent = kind === 'media' ? 'Caption (optional)' : 'Message text';
+function readFileAsDataUrl(file) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(reader.result);
+    reader.onerror = () => reject(reader.error);
+    reader.readAsDataURL(file);
+  });
 }
 
-document.getElementById('msgFile').addEventListener('change', (e) => {
-  const file = e.target.files[0];
-  if (!file) return;
-  if (file.size > 15 * 1024 * 1024) {
-    alert('That file is larger than 15MB — WhatsApp Web may reject it.');
+document.getElementById('msgFile').addEventListener('change', async (e) => {
+  const files = Array.from(e.target.files || []);
+  if (files.length === 0) return;
+  for (const file of files) {
+    if (file.size > 15 * 1024 * 1024) {
+      alert(`"${file.name}" is larger than 15MB — WhatsApp Web may reject it.`);
+    }
   }
-  const reader = new FileReader();
-  reader.onload = () => {
-    pendingMedia = { dataUrl: reader.result, filename: file.name, mimeType: file.type };
-    renderMediaPreview();
-  };
-  reader.readAsDataURL(file);
+  const dataUrls = await Promise.all(files.map(readFileAsDataUrl));
+  files.forEach((file, i) => {
+    composingItems.push({
+      kind: 'media',
+      media: { dataUrl: dataUrls[i], filename: file.name, mimeType: file.type },
+      caption: ''
+    });
+  });
+  document.getElementById('msgFile').value = '';
+  renderComposingItems();
+  saveDraft();
 });
 
-function renderMediaPreview() {
-  const box = document.getElementById('mediaPreview');
-  if (!pendingMedia) {
-    box.innerHTML = '';
+document.getElementById('addTextItemBtn').addEventListener('click', () => {
+  const textarea = document.getElementById('msgText');
+  const text = textarea.value.trim();
+  if (!text) return;
+  composingItems.push({ kind: 'text', text });
+  textarea.value = '';
+  renderComposingItems();
+  saveDraft();
+});
+
+document.getElementById('msgLabel').addEventListener('input', saveDraft);
+document.getElementById('msgText').addEventListener('input', saveDraft);
+
+function renderComposingItems() {
+  document.getElementById('composingCount').textContent = String(composingItems.length);
+  const box = document.getElementById('composingItems');
+  if (composingItems.length === 0) {
+    box.innerHTML = '<span class="hint">No items yet — write text and tap + or attach a file.</span>';
     return;
   }
-  if (pendingMedia.mimeType && pendingMedia.mimeType.startsWith('image/')) {
-    box.innerHTML = `<img src="${pendingMedia.dataUrl}" alt="" />`;
-  } else {
-    box.innerHTML = `<div class="file-chip">📄 ${escapeHtml(pendingMedia.filename)}</div>`;
-  }
+  box.innerHTML = composingItems
+    .map((item, i) => {
+      const icon = item.kind === 'media' ? '📎' : '📝';
+      const preview =
+        item.kind === 'media'
+          ? escapeHtml(item.media.filename)
+          : escapeHtml(item.text.slice(0, 80));
+      const captionField =
+        item.kind === 'media'
+          ? `<input type="text" class="caption-input" data-idx="${i}" placeholder="Caption (optional)" value="${escapeHtml(item.caption || '')}" />`
+          : '';
+      return `<div class="composing-item">
+        <span class="composing-item-icon">${icon}</span>
+        <div class="composing-item-body">
+          <div class="composing-item-preview">${preview}</div>
+          ${captionField}
+        </div>
+        <div class="composing-item-actions">
+          <button type="button" data-act="up" data-idx="${i}" title="Move up">▲</button>
+          <button type="button" data-act="down" data-idx="${i}" title="Move down">▼</button>
+          <button type="button" data-act="remove" data-idx="${i}" title="Remove">✕</button>
+        </div>
+      </div>`;
+    })
+    .join('');
+
+  box.querySelectorAll('.caption-input').forEach((input) => {
+    input.addEventListener('input', (e) => {
+      composingItems[Number(e.target.dataset.idx)].caption = e.target.value;
+      saveDraft();
+    });
+  });
+  box.querySelectorAll('[data-act="remove"]').forEach((btn) => {
+    btn.addEventListener('click', () => {
+      composingItems.splice(Number(btn.dataset.idx), 1);
+      renderComposingItems();
+      saveDraft();
+    });
+  });
+  box.querySelectorAll('[data-act="up"]').forEach((btn) => {
+    btn.addEventListener('click', () => {
+      const i = Number(btn.dataset.idx);
+      if (i === 0) return;
+      [composingItems[i - 1], composingItems[i]] = [composingItems[i], composingItems[i - 1]];
+      renderComposingItems();
+      saveDraft();
+    });
+  });
+  box.querySelectorAll('[data-act="down"]').forEach((btn) => {
+    btn.addEventListener('click', () => {
+      const i = Number(btn.dataset.idx);
+      if (i === composingItems.length - 1) return;
+      [composingItems[i], composingItems[i + 1]] = [composingItems[i + 1], composingItems[i]];
+      renderComposingItems();
+      saveDraft();
+    });
+  });
 }
 
 function resetMessageForm() {
   editingMessageId = null;
-  pendingMedia = null;
+  composingItems = [];
   document.getElementById('msgLabel').value = '';
   document.getElementById('msgText').value = '';
   document.getElementById('msgFile').value = '';
-  setKind('text');
-  renderMediaPreview();
+  renderComposingItems();
   document.getElementById('saveMessageBtn').textContent = 'Save message';
   document.getElementById('cancelEditMessageBtn').style.display = 'none';
+  clearDraft();
 }
 
 document.getElementById('cancelEditMessageBtn').addEventListener('click', resetMessageForm);
 
 document.getElementById('saveMessageBtn').addEventListener('click', async () => {
-  const kind = currentKind();
-  const text = document.getElementById('msgText').value.trim();
   const label = document.getElementById('msgLabel').value.trim();
-
-  if (kind === 'text' && !text) {
-    alert('Write a message first.');
+  if (composingItems.length === 0) {
+    alert('Add at least one text or attachment item first.');
     return;
   }
-  if (kind === 'media' && !pendingMedia) {
-    alert('Choose a file to attach.');
-    return;
-  }
-  const name = label || (kind === 'media' ? pendingMedia.filename : text.slice(0, 30));
-  const message = { id: editingMessageId, name, kind, text, media: kind === 'media' ? pendingMedia : null };
+  const first = composingItems[0];
+  const name = label || (first.kind === 'media' ? first.media.filename : first.text.slice(0, 30));
+  const message = { id: editingMessageId, name, items: composingItems };
   await call('saveMessage', { message });
   resetMessageForm();
   refresh();
@@ -160,28 +308,50 @@ function renderMessages() {
   }
   for (const m of STATE.messages) {
     const li = document.createElement('li');
-    const preview =
-      m.kind === 'media'
-        ? `📎 ${escapeHtml(m.media ? m.media.filename : 'attachment')}${m.text ? ' — ' + escapeHtml(m.text.slice(0, 60)) : ''}`
-        : escapeHtml(m.text.slice(0, 80));
+    const items = m.items || [];
+    const first = items[0];
+    const firstPreview = first
+      ? first.kind === 'media'
+        ? `📎 ${escapeHtml(first.media ? first.media.filename : 'attachment')}`
+        : escapeHtml((first.text || '').slice(0, 60))
+      : '(empty)';
+    const preview = items.length > 1 ? `${firstPreview} <span class="muted">+${items.length - 1} more item(s)</span>` : firstPreview;
     const lastSent = m.lastSentAt ? `Last sent ${new Date(m.lastSentAt).toLocaleString()}` : 'Never sent';
-    li.innerHTML = `<div class="item-text">
+    li.innerHTML = `<div class="item-row">
+      <div class="item-text">
         <b>${escapeHtml(m.name)}</b><br/>${preview}<br/>
         <span class="log-time">${lastSent}</span>
       </div>
       <div class="item-actions">
-        <button class="small" data-act="edit">Edit</button>
-        <button class="small danger" data-act="del">Delete</button>
-      </div>`;
+        <button class="icon-btn small-icon-btn" data-act="send" type="button" title="Send now">
+          <svg viewBox="0 0 24 24" width="14" height="14"><path fill="currentColor" d="M2 21l21-9L2 3v7l15 2-15 2z"/></svg>
+        </button>
+        <button class="icon-btn small-icon-btn" data-act="edit" type="button" title="Edit">${EDIT_ICON_SVG}</button>
+        <button class="icon-btn small-icon-btn danger" data-act="del" type="button" title="Delete">${DELETE_ICON_SVG}</button>
+      </div>
+    </div>`;
+
+    if (openSendPanelMessageId === m.id) {
+      li.appendChild(buildSendPanel(m));
+    }
+
+    li.querySelector('[data-act="send"]').addEventListener('click', () => {
+      if (!STATE.settings.consentAccepted) {
+        alert('Accept the consent checkbox on the Campaigns or Safety tab first — sending is gated behind it, even for a one-off send.');
+        return;
+      }
+      openSendPanelMessageId = openSendPanelMessageId === m.id ? null : m.id;
+      renderMessages();
+    });
     li.querySelector('[data-act="edit"]').addEventListener('click', () => {
       editingMessageId = m.id;
       document.getElementById('msgLabel').value = m.name;
-      document.getElementById('msgText').value = m.text || '';
-      setKind(m.kind);
-      pendingMedia = m.media || null;
-      renderMediaPreview();
+      document.getElementById('msgText').value = '';
+      composingItems = (m.items || []).map((item) => ({ ...item })); // clone so cancel doesn't mutate the saved copy
+      renderComposingItems();
       document.getElementById('saveMessageBtn').textContent = 'Update message';
       document.getElementById('cancelEditMessageBtn').style.display = '';
+      saveDraft();
       document.querySelector('[data-tab="messages"]').click();
     });
     li.querySelector('[data-act="del"]').addEventListener('click', async () => {
@@ -192,27 +362,81 @@ function renderMessages() {
   }
 }
 
+// Lightweight "send this saved message now" picker — reuses saved lists
+// (built in the Lists tab) instead of duplicating any list-building UI here.
+function buildSendPanel(message) {
+  const panel = document.createElement('div');
+  panel.className = 'send-panel';
+  if (STATE.lists.length === 0) {
+    panel.innerHTML = '<p class="hint">Build a list in the Lists tab first.</p>';
+    return panel;
+  }
+  panel.innerHTML = `
+    <div class="checklist">
+      ${STATE.lists
+        .map((l) => `<label><input type="checkbox" class="send-list-check" value="${l.id}" /> ${escapeHtml(l.name)} <span class="muted">(${(l.members || []).length})</span></label>`)
+        .join('')}
+    </div>
+    <div class="send-panel-actions">
+      <button class="primary" type="button" data-act="confirmSend">Send now</button>
+      <button class="ghost small-inline" type="button" data-act="cancelSend">Cancel</button>
+    </div>
+    <p class="hint">Sends immediately using your Paced delay settings (Safety tab).</p>
+  `;
+  panel.querySelector('[data-act="cancelSend"]').addEventListener('click', () => {
+    openSendPanelMessageId = null;
+    renderMessages();
+  });
+  panel.querySelector('[data-act="confirmSend"]').addEventListener('click', async () => {
+    const listIds = Array.from(panel.querySelectorAll('.send-list-check:checked')).map((cb) => cb.value);
+    if (listIds.length === 0) {
+      alert('Pick at least one list.');
+      return;
+    }
+    await call('sendNow', { messageId: message.id, listIds });
+    openSendPanelMessageId = null;
+    alert('Sending started — check the Log tab for progress.');
+    document.querySelector('[data-tab="log"]').click();
+  });
+  return panel;
+}
+
 // ============ LISTS ============
-// No persistent "pool" — scan/add feeds a session-only chatSource map, the
-// user searches/selects straight out of that, and a list stores its member
+// Scan/add feeds the persistent chatSource (see refresh()); the user
+// searches/selects straight out of that, and a list stores its member
 // chats inline (waId/name/type) so it's self-contained once saved.
+
+let scanScope = 'groups';
+document.querySelectorAll('#scanScopeToggle .kind-btn').forEach((btn) => {
+  btn.addEventListener('click', () => {
+    document.querySelectorAll('#scanScopeToggle .kind-btn').forEach((b) => b.classList.remove('active'));
+    btn.classList.add('active');
+    scanScope = btn.dataset.scope;
+    document.getElementById('chatsContactFilter').style.display = scanScope === 'chats' ? '' : 'none';
+  });
+});
 
 document.getElementById('scanChatsBtn').addEventListener('click', async () => {
   const btn = document.getElementById('scanChatsBtn');
   btn.disabled = true;
   btn.textContent = 'Scanning...';
-  const res = await call('listOpenChats');
+  const payload = { scope: scanScope };
+  if (scanScope === 'chats') payload.contactFilter = document.getElementById('chatsContactFilter').value;
+  const res = await call('listOpenChats', payload);
   btn.disabled = false;
-  btn.textContent = 'Scan open chats';
+  btn.textContent = 'Scan';
   if (!res.ok) {
     alert(res.error || 'Could not scan chats.');
     return;
   }
-  for (const c of res.chats || []) {
+  const chats = res.chats || [];
+  for (const c of chats) {
     if (c.waId) chatSource.set(c.waId, c);
   }
-  if ((res.chats || []).length === 0) {
+  if (chats.length === 0) {
     alert('No chats found — is web.whatsapp.com open and logged in?');
+  } else {
+    await call('saveFetchedChats', { chats });
   }
   renderListBuilder();
 });
@@ -231,8 +455,26 @@ document.getElementById('manualAddBtn').addEventListener('click', async () => {
   }
   chatSource.set(res.contact.waId, res.contact);
   selectedWaIds.add(res.contact.waId); // explicitly added, so pre-select it
+  await call('saveFetchedChats', { chats: [res.contact] });
   input.value = '';
   renderListBuilder();
+});
+
+document.getElementById('clearFetchedBtn').addEventListener('click', async () => {
+  if (!confirm('Clear the fetched chats list? Saved lists are not affected.')) return;
+  await call('clearFetchedChats');
+  chatSource = new Map();
+  selectedWaIds = new Set();
+  renderListBuilder();
+});
+
+document.getElementById('exportFetchedBtn').addEventListener('click', () => {
+  const chats = Array.from(chatSource.values());
+  if (chats.length === 0) {
+    alert('Nothing fetched yet to export.');
+    return;
+  }
+  downloadCsv('whatsapp-fetched-chats.csv', chats);
 });
 
 document.getElementById('listSearchInput').addEventListener('input', (e) => {
@@ -242,7 +484,9 @@ document.getElementById('listSearchInput').addEventListener('input', (e) => {
 
 function filteredChatSource() {
   const all = Array.from(chatSource.values());
-  const filtered = listSearchQuery ? all.filter((c) => c.name.toLowerCase().includes(listSearchQuery)) : all;
+  const filtered = listSearchQuery
+    ? all.filter((c) => c.name.toLowerCase().includes(listSearchQuery) || (c.number && c.number.includes(listSearchQuery)))
+    : all;
   return filtered.sort((a, b) => a.name.localeCompare(b.name));
 }
 
@@ -260,10 +504,11 @@ function renderListBuilder() {
   const visible = filteredChatSource();
   box.innerHTML =
     visible
-      .map(
-        (c) =>
-          `<label><input type="checkbox" class="list-builder-check" value="${escapeHtml(c.waId)}" ${selectedWaIds.has(c.waId) ? 'checked' : ''}/> ${escapeHtml(c.name)} <span class="badge badge-${c.type}">${c.type}</span></label>`
-      )
+      .map((c) => {
+        const numberSuffix = c.number ? ` <span class="muted">(${escapeHtml(c.number)})</span>` : '';
+        const unsavedBadge = c.isSavedContact === false ? ' <span class="badge badge-unsaved">not saved</span>' : '';
+        return `<label><input type="checkbox" class="list-builder-check" value="${escapeHtml(c.waId)}" ${selectedWaIds.has(c.waId) ? 'checked' : ''}/> ${escapeHtml(c.name)}${numberSuffix} <span class="badge badge-${c.type}">${c.type}</span>${unsavedBadge}</label>`;
+      })
       .join('') || '<span class="hint">Scan or add a contact above first.</span>';
   box.querySelectorAll('.list-builder-check').forEach((cb) => {
     cb.addEventListener('change', () => {
@@ -314,14 +559,17 @@ function renderLists() {
     const members = l.members || [];
     const names = members.map((m) => m.name);
     const li = document.createElement('li');
-    li.innerHTML = `<div class="item-text">
+    li.innerHTML = `<div class="item-row">
+      <div class="item-text">
         <b>${escapeHtml(l.name)}</b> <span class="muted">(${members.length})</span><br/>
         <span class="log-time">${escapeHtml(names.slice(0, 4).join(', '))}${names.length > 4 ? '…' : ''}</span>
       </div>
       <div class="item-actions">
-        <button class="small" data-act="edit">Edit</button>
-        <button class="small danger" data-act="del">Delete</button>
-      </div>`;
+        <button class="icon-btn small-icon-btn" data-act="edit" type="button" title="Edit">${EDIT_ICON_SVG}</button>
+        <button class="icon-btn small-icon-btn" data-act="export" type="button" title="Export to CSV">${EXPORT_ICON_SVG}</button>
+        <button class="icon-btn small-icon-btn danger" data-act="del" type="button" title="Delete">${DELETE_ICON_SVG}</button>
+      </div>
+    </div>`;
     li.querySelector('[data-act="edit"]').addEventListener('click', () => {
       editingListId = l.id;
       selectedWaIds = new Set(members.map((m) => m.waId));
@@ -334,6 +582,9 @@ function renderLists() {
       document.getElementById('cancelEditListBtn').style.display = '';
       renderListBuilder();
       document.querySelector('[data-tab="lists"]').click();
+    });
+    li.querySelector('[data-act="export"]').addEventListener('click', () => {
+      downloadCsv(`${l.name.replace(/[^a-z0-9]+/gi, '_') || 'list'}.csv`, members);
     });
     li.querySelector('[data-act="del"]').addEventListener('click', async () => {
       if (!confirm(`Delete list "${l.name}"? Campaigns using it will have it removed from their targets.`)) return;
@@ -355,21 +606,94 @@ document.getElementById('consentAcceptBtn').addEventListener('click', async () =
   refresh();
 });
 
-document.getElementById('campScheduleType').addEventListener('change', (e) => {
-  const isFixed = e.target.value === 'fixed';
-  document.getElementById('campTimeFixed').style.display = isFixed ? '' : 'none';
-  document.getElementById('campTimeOnce').style.display = isFixed ? 'none' : '';
+// Staged schedule data for the campaign currently being built/edited —
+// same "chips" pattern as composing message items.
+let campScheduleType = 'times';
+let campTimes = [];
+let campDatetimes = [];
+
+function setCampScheduleType(type) {
+  campScheduleType = type;
+  document.querySelectorAll('#campScheduleTypeToggle .kind-btn').forEach((b) => b.classList.toggle('active', b.dataset.scheduleType === type));
+  document.getElementById('campTimesPanel').style.display = type === 'times' ? '' : 'none';
+  document.getElementById('campIntervalPanel').style.display = type === 'interval' ? '' : 'none';
+  document.getElementById('campOncePanel').style.display = type === 'once' ? '' : 'none';
+}
+
+document.querySelectorAll('#campScheduleTypeToggle .kind-btn').forEach((btn) => {
+  btn.addEventListener('click', () => setCampScheduleType(btn.dataset.scheduleType));
+});
+
+function renderCampTimesList() {
+  const box = document.getElementById('campTimesList');
+  box.innerHTML = campTimes.length
+    ? campTimes.map((t, i) => `<span class="chip">${escapeHtml(t)}<button type="button" data-idx="${i}">✕</button></span>`).join('')
+    : '<span class="hint">No times added yet.</span>';
+  box.querySelectorAll('button').forEach((btn) => {
+    btn.addEventListener('click', () => {
+      campTimes.splice(Number(btn.dataset.idx), 1);
+      renderCampTimesList();
+    });
+  });
+}
+
+document.getElementById('addTimeBtn').addEventListener('click', () => {
+  const input = document.getElementById('campTimeInput');
+  if (!input.value || campTimes.includes(input.value)) return;
+  campTimes.push(input.value);
+  campTimes.sort();
+  renderCampTimesList();
+});
+
+function renderCampDatetimesList() {
+  const box = document.getElementById('campDatetimesList');
+  box.innerHTML = campDatetimes.length
+    ? campDatetimes
+        .map((dt, i) => `<span class="chip">${escapeHtml(new Date(dt).toLocaleString())}<button type="button" data-idx="${i}">✕</button></span>`)
+        .join('')
+    : '<span class="hint">No dates added yet.</span>';
+  box.querySelectorAll('button').forEach((btn) => {
+    btn.addEventListener('click', () => {
+      campDatetimes.splice(Number(btn.dataset.idx), 1);
+      renderCampDatetimesList();
+    });
+  });
+}
+
+document.getElementById('addDatetimeBtn').addEventListener('click', () => {
+  const input = document.getElementById('campDatetimeInput');
+  if (!input.value) return;
+  campDatetimes.push(input.value);
+  campDatetimes.sort();
+  renderCampDatetimesList();
+});
+
+function setDelayFieldsDisabled(disabled) {
+  ['campDelayMin', 'campDelayMax', 'campListDelayMin', 'campListDelayMax'].forEach((id) => {
+    document.getElementById(id).disabled = disabled;
+  });
+}
+document.getElementById('campUseDefaultDelay').addEventListener('change', (e) => {
+  setDelayFieldsDisabled(e.target.checked);
 });
 
 function resetCampaignForm() {
   editingCampaignId = null;
   document.getElementById('campName').value = '';
-  document.getElementById('campScheduleType').value = 'fixed';
-  document.getElementById('campTimeFixed').value = '09:00';
-  document.getElementById('campTimeFixed').style.display = '';
-  document.getElementById('campTimeOnce').value = '';
-  document.getElementById('campTimeOnce').style.display = 'none';
-  document.querySelector('input[name="sendMode"][value="paced"]').checked = true;
+  campTimes = [];
+  campDatetimes = [];
+  renderCampTimesList();
+  renderCampDatetimesList();
+  setCampScheduleType('times');
+  document.getElementById('campTimeInput').value = '09:00';
+  document.getElementById('campDatetimeInput').value = '';
+  document.getElementById('campIntervalValue').value = 1;
+  document.getElementById('campIntervalUnit').value = 'hours';
+  document.getElementById('campTimesPerDay').value = '';
+  document.getElementById('campWindowStart').value = '';
+  document.getElementById('campWindowEnd').value = '';
+  document.getElementById('campUseDefaultDelay').checked = true;
+  setDelayFieldsDisabled(true);
   const s = STATE.settings;
   const [dMin, dMax] = s.defaultDelayBetweenMsMs || [20000, 45000];
   const [lMin, lMax] = s.defaultDelayBetweenListsMs || [30000, 60000];
@@ -385,9 +709,17 @@ document.getElementById('cancelEditCampaignBtn').addEventListener('click', reset
 
 function renderCampaignForm() {
   const sel = document.getElementById('campMessageSelect');
+  // Rebuilding <select>'s options resets the browser's selection to the
+  // first one unless explicitly restored — this ran on every refresh()
+  // (e.g. any storage change elsewhere), silently discarding whatever the
+  // user had picked.
+  const desiredMessageId = editingCampaignId
+    ? (STATE.campaigns.find((c) => c.id === editingCampaignId) || {}).messageId
+    : sel.value;
   sel.innerHTML =
     STATE.messages.map((m) => `<option value="${m.id}">${escapeHtml(m.name)}</option>`).join('') ||
     '<option value="">No messages saved</option>';
+  if (desiredMessageId) sel.value = desiredMessageId;
 
   const checklist = document.getElementById('campListChecklist');
   const checkedIds = editingCampaignId
@@ -412,21 +744,20 @@ document.getElementById('addCampaignBtn').addEventListener('click', async () => 
   const name = document.getElementById('campName').value.trim();
   const messageId = document.getElementById('campMessageSelect').value;
   const listIds = Array.from(document.querySelectorAll('.camp-list-check:checked')).map((cb) => cb.value);
-  const scheduleType = document.getElementById('campScheduleType').value;
-  const sendMode = document.querySelector('input[name="sendMode"]:checked').value;
 
   if (!name) { alert('Give this campaign a name.'); return; }
   if (!messageId) { alert('Pick a saved message.'); return; }
   if (listIds.length === 0) { alert('Pick at least one list.'); return; }
 
+  const useDefaultDelay = document.getElementById('campUseDefaultDelay').checked;
   const campaign = {
     id: editingCampaignId,
     name,
     messageId,
     listIds,
-    scheduleType,
-    sendMode,
+    scheduleType: campScheduleType,
     enabled: true,
+    useDefaultDelay,
     delayBetweenMsMs: [
       secToMs(document.getElementById('campDelayMin').value, 20000),
       secToMs(document.getElementById('campDelayMax').value, 45000)
@@ -436,17 +767,48 @@ document.getElementById('addCampaignBtn').addEventListener('click', async () => 
       secToMs(document.getElementById('campListDelayMax').value, 60000)
     ]
   };
-  if (scheduleType === 'fixed') {
-    campaign.time = document.getElementById('campTimeFixed').value || '09:00';
-  } else {
-    const dt = document.getElementById('campTimeOnce').value;
-    if (!dt) { alert('Pick a date/time.'); return; }
-    campaign.datetime = dt;
+
+  if (campScheduleType === 'times') {
+    if (campTimes.length === 0) { alert('Add at least one daily time.'); return; }
+    campaign.times = campTimes.slice();
+  } else if (campScheduleType === 'interval') {
+    const timesPerDay = Number(document.getElementById('campTimesPerDay').value);
+    if (timesPerDay > 0) {
+      campaign.intervalMinutes = Math.round(1440 / timesPerDay);
+    } else {
+      const value = Number(document.getElementById('campIntervalValue').value) || 1;
+      const unit = document.getElementById('campIntervalUnit').value;
+      campaign.intervalMinutes = unit === 'hours' ? value * 60 : value;
+    }
+    campaign.windowStart = document.getElementById('campWindowStart').value || null;
+    campaign.windowEnd = document.getElementById('campWindowEnd').value || null;
+  } else if (campScheduleType === 'once') {
+    if (campDatetimes.length === 0) { alert('Add at least one date/time.'); return; }
+    campaign.datetimes = campDatetimes.slice();
   }
+
   await call('saveCampaign', { campaign });
   resetCampaignForm();
   refresh();
 });
+
+function scheduleSummary(c) {
+  if (c.scheduleType === 'times') {
+    const times = c.times || [];
+    return times.length ? `daily at ${times.join(', ')}` : 'no times set';
+  }
+  if (c.scheduleType === 'interval') {
+    const minutes = c.intervalMinutes || 60;
+    const everyText = minutes % 60 === 0 ? `every ${minutes / 60}h` : `every ${minutes}m`;
+    const windowText = c.windowStart && c.windowEnd ? ` (${c.windowStart}–${c.windowEnd})` : '';
+    return `${everyText}${windowText}`;
+  }
+  if (c.scheduleType === 'once') {
+    const pending = (c.datetimes || []).filter(Boolean);
+    return pending.length ? `${pending.length} one-time run(s) pending` : 'no runs pending';
+  }
+  return 'unscheduled';
+}
 
 function renderCampaignList() {
   const ul = document.getElementById('campaignList');
@@ -457,27 +819,46 @@ function renderCampaignList() {
   for (const c of STATE.campaigns) {
     const msg = STATE.messages.find((m) => m.id === c.messageId);
     const listNames = STATE.lists.filter((l) => c.listIds.includes(l.id)).map((l) => l.name);
-    const whenText = c.scheduleType === 'fixed' ? `every day at ${c.time}` : `once at ${new Date(c.datetime).toLocaleString()}`;
     const li = document.createElement('li');
-    li.innerHTML = `<div class="item-text">
+    li.innerHTML = `<div class="item-row">
+      <div class="item-text">
         <b>${escapeHtml(c.name)}</b><br/>
         ${msg ? escapeHtml(msg.name) : '(deleted message)'} → ${escapeHtml(listNames.join(', ') || '(no lists)')}<br/>
-        <span class="log-time">${whenText} · ${c.sendMode} · ${c.enabled ? 'enabled' : 'paused'}</span>
+        <span class="log-time">${escapeHtml(scheduleSummary(c))} · ${c.enabled ? 'enabled' : 'paused'}</span>
       </div>
       <div class="item-actions">
-        <button class="small" data-act="edit">Edit</button>
-        <button class="small" data-act="toggle">${c.enabled ? 'Pause' : 'Resume'}</button>
-        <button class="small" data-act="run">Run now</button>
-        <button class="small danger" data-act="del">Delete</button>
-      </div>`;
+        <button class="icon-btn small-icon-btn" data-act="edit" type="button" title="Edit">${EDIT_ICON_SVG}</button>
+        <button class="icon-btn small-icon-btn" data-act="toggle" type="button" title="${c.enabled ? 'Pause' : 'Resume'}">${c.enabled ? PAUSE_ICON_SVG : PLAY_ICON_SVG}</button>
+        <button class="icon-btn small-icon-btn" data-act="run" type="button" title="Run now">${RUN_NOW_ICON_SVG}</button>
+        <button class="icon-btn small-icon-btn danger" data-act="del" type="button" title="Delete">${DELETE_ICON_SVG}</button>
+      </div>
+    </div>`;
     li.querySelector('[data-act="edit"]').addEventListener('click', () => {
       editingCampaignId = c.id;
       document.getElementById('campName').value = c.name;
-      document.getElementById('campScheduleType').value = c.scheduleType;
-      document.getElementById('campScheduleType').dispatchEvent(new Event('change'));
-      if (c.scheduleType === 'fixed') document.getElementById('campTimeFixed').value = c.time;
-      else document.getElementById('campTimeOnce').value = c.datetime;
-      document.querySelector(`input[name="sendMode"][value="${c.sendMode}"]`).checked = true;
+      setCampScheduleType(c.scheduleType || 'times');
+      campTimes = (c.times || []).slice();
+      campDatetimes = (c.datetimes || []).filter(Boolean).slice();
+      renderCampTimesList();
+      renderCampDatetimesList();
+      document.getElementById('campTimeInput').value = '09:00';
+      document.getElementById('campDatetimeInput').value = '';
+      if (c.scheduleType === 'interval') {
+        const minutes = c.intervalMinutes || 60;
+        if (minutes % 60 === 0) {
+          document.getElementById('campIntervalValue').value = minutes / 60;
+          document.getElementById('campIntervalUnit').value = 'hours';
+        } else {
+          document.getElementById('campIntervalValue').value = minutes;
+          document.getElementById('campIntervalUnit').value = 'minutes';
+        }
+        document.getElementById('campTimesPerDay').value = '';
+        document.getElementById('campWindowStart').value = c.windowStart || '';
+        document.getElementById('campWindowEnd').value = c.windowEnd || '';
+      }
+      const useDefaultDelay = c.useDefaultDelay !== false;
+      document.getElementById('campUseDefaultDelay').checked = useDefaultDelay;
+      setDelayFieldsDisabled(useDefaultDelay);
       const [dMin, dMax] = c.delayBetweenMsMs || [20000, 45000];
       const [lMin, lMax] = c.delayBetweenListsMs || [30000, 60000];
       document.getElementById('campDelayMin').value = Math.round(dMin / 1000);
@@ -507,6 +888,12 @@ function renderCampaignList() {
 }
 
 // ============ LOG ============
+document.getElementById('clearLogBtn').addEventListener('click', async () => {
+  if (!confirm('Clear the entire activity log?')) return;
+  await call('clearLog');
+  refresh();
+});
+
 function renderLog() {
   const ul = document.getElementById('logList');
   ul.innerHTML = '';
@@ -560,4 +947,19 @@ document.getElementById('saveSettingsBtn').addEventListener('click', async () =>
   refresh();
 });
 
+// background.js writes log entries (and other state) directly to
+// chrome.storage while a campaign runs, with the popup possibly still open
+// on the Log tab — without this, nothing tells the popup that happened and
+// it looks frozen until closed and reopened. Draft-only writes are excluded
+// since those happen on every keystroke while composing a message and are
+// already reflected live in the form — a full refresh() on each one would
+// make typing feel laggy for no benefit.
+chrome.storage.onChanged.addListener((changes, area) => {
+  if (area !== 'local') return;
+  const keys = Object.keys(changes);
+  if (keys.length === 1 && keys[0] === 'messageDraft') return;
+  refresh();
+});
+
+restoreDraft();
 refresh();

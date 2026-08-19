@@ -37,7 +37,7 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
         const result = await bridgeRequest('ping', {}, 8000);
         sendResponse({ ok: true, ...result });
       } else if (msg.action === 'listChats') {
-        const chats = await bridgeRequest('listChats', {}, 20000);
+        const chats = await bridgeRequest('listChats', { scope: msg.scope, contactFilter: msg.contactFilter }, 20000);
         sendResponse({ ok: true, chats });
       } else if (msg.action === 'findContactByNumber') {
         const contact = await bridgeRequest('findContactByNumber', { number: msg.number }, 15000);

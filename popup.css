@@ -101,6 +101,109 @@ body {
 }
 .icon-btn:hover { background: rgba(255, 255, 255, 0.28); }
 
+.row-with-action { display: flex; align-items: center; gap: 6px; margin: 8px 0 2px; }
+.row-with-action .muted { font-size: 11px; font-weight: 600; margin-right: auto; }
+.small-icon-btn {
+  background: var(--bg-hover);
+  color: var(--accent);
+  width: 30px;
+  height: 30px;
+}
+.small-icon-btn:hover { background: var(--border); }
+.small-icon-btn.danger { background: var(--danger-bg); color: var(--danger-fg); }
+.small-icon-btn.danger:hover { filter: brightness(0.92); }
+button.ghost.small-inline { padding: 4px 8px; margin: 0; font-size: 11px; }
+
+/* A label row with one or more icon-button actions docked to its right —
+   e.g. "Add a text item" with the +/attach buttons alongside it, instead of
+   the buttons floating inside the field itself. */
+.field-row-with-actions {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-top: 4px;
+}
+.field-row-with-actions label { margin: 0; }
+.field-row-icons { display: flex; gap: 6px; }
+
+/* Staged items for the message currently being composed/edited. */
+.composing-list {
+  max-height: 180px;
+  overflow-y: auto;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 6px 8px;
+  margin: 4px 0 10px;
+  background: var(--bg-panel);
+}
+.composing-item {
+  display: flex;
+  align-items: flex-start;
+  gap: 6px;
+  padding: 5px 0;
+  border-bottom: 1px solid var(--border);
+}
+.composing-item:last-child { border-bottom: none; }
+.composing-item-icon { flex-shrink: 0; margin-top: 2px; }
+.composing-item-body { flex: 1; min-width: 0; font-size: 12px; color: var(--text-primary); }
+.composing-item-preview { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; word-break: break-word; }
+.composing-item-body .caption-input {
+  width: 100%;
+  margin: 3px 0 0;
+  padding: 3px 6px;
+  font-size: 11px;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  background: var(--bg-input);
+  color: var(--text-primary);
+}
+.composing-item-actions { display: flex; gap: 2px; flex-shrink: 0; }
+.composing-item-actions button {
+  border: none;
+  background: var(--bg-hover);
+  color: var(--text-secondary);
+  border-radius: 4px;
+  width: 20px;
+  height: 20px;
+  font-size: 10px;
+  line-height: 1;
+  cursor: pointer;
+}
+.composing-item-actions button:hover { background: var(--border); }
+
+/* Chips for added daily times / one-off datetimes in the Campaigns form. */
+.chip-list { display: flex; flex-wrap: wrap; gap: 6px; margin: 4px 0 10px; }
+.chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  background: var(--bg-hover);
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  padding: 4px 6px 4px 10px;
+  font-size: 11px;
+  color: var(--text-primary);
+}
+.chip button {
+  border: none;
+  background: none;
+  color: var(--text-secondary);
+  cursor: pointer;
+  font-size: 12px;
+  line-height: 1;
+  padding: 2px;
+}
+.chip button:hover { color: var(--danger-fg); }
+
+/* Inline "send this saved message now" panel under a message row. */
+.send-panel {
+  margin-top: 8px;
+  padding-top: 8px;
+  border-top: 1px dashed var(--border);
+}
+.send-panel-actions { display: flex; gap: 6px; margin-top: 6px; }
+.send-panel-actions button.primary { padding: 6px 10px; font-size: 11px; }
+
 /* ---------- tabs ---------- */
 .tabs {
   display: flex;
@@ -165,6 +268,11 @@ select:focus {
   border-color: var(--accent-bright);
 }
 
+input:disabled, textarea:disabled, select:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
 label { font-size: 11px; font-weight: 600; color: var(--text-secondary); display: block; }
 
 .checkbox-row {
@@ -177,18 +285,6 @@ label { font-size: 11px; font-weight: 600; color: var(--text-secondary); display
   margin: 8px 0;
 }
 .checkbox-row input { width: auto; margin: 0; }
-
-.radio-row { margin: 6px 0 10px; }
-.radio-row label {
-  display: flex;
-  align-items: flex-start;
-  gap: 8px;
-  font-weight: 400;
-  font-size: 12px;
-  color: var(--text-primary);
-  padding: 4px 0;
-}
-.radio-row input { margin-top: 2px; width: auto; }
 
 /* ---------- buttons ---------- */
 button { font-family: inherit; }
@@ -228,17 +324,9 @@ button.ghost {
 }
 .kind-btn.active { border-color: var(--accent-bright); color: var(--accent); font-weight: 600; background: var(--bg-hover); }
 
-.media-picker { margin-bottom: 6px; }
-.media-preview img { max-width: 100%; max-height: 140px; border-radius: 8px; display: block; margin-top: 4px; }
-.file-chip {
-  display: inline-block;
-  background: var(--bg-hover);
-  border: 1px solid var(--border);
-  border-radius: 8px;
-  padding: 6px 10px;
-  font-size: 12px;
-  margin-top: 4px;
-}
+#scanScopeToggle.kind-toggle { gap: 4px; }
+#scanScopeToggle .kind-btn { padding: 7px 2px; font-size: 10px; }
+
 
 /* ---------- lists / items ---------- */
 .item-list { list-style: none; padding: 0; margin: 8px 0 0; }
@@ -248,15 +336,12 @@ button.ghost {
   border-radius: 8px;
   padding: 9px 10px;
   margin-bottom: 6px;
-  display: flex;
-  justify-content: space-between;
-  align-items: flex-start;
-  gap: 6px;
   box-shadow: var(--shadow);
 }
+.item-list .item-row { display: flex; justify-content: space-between; align-items: flex-start; gap: 6px; }
 .item-list .item-text { flex: 1; font-size: 12px; word-break: break-word; color: var(--text-primary); }
-.item-list .item-actions { display: flex; flex-wrap: wrap; gap: 4px; flex-shrink: 0; justify-content: flex-end; max-width: 110px; }
-.item-list button.small {
+.item-list .item-actions { display: flex; flex-wrap: wrap; gap: 4px; flex-shrink: 0; justify-content: flex-end; max-width: 130px; }
+button.small {
   border: none;
   background: var(--bg-hover);
   color: var(--text-primary);
@@ -265,8 +350,8 @@ button.ghost {
   cursor: pointer;
   font-size: 11px;
 }
-.item-list button.small:hover { filter: brightness(0.95); }
-.item-list button.danger { background: var(--danger-bg); color: var(--danger-fg); }
+button.small:hover { filter: brightness(0.95); }
+button.danger { background: var(--danger-bg); color: var(--danger-fg); }
 .item-list select.type-select.small { width: auto; margin: 0; padding: 3px 4px; font-size: 11px; }
 
 .muted { color: var(--text-secondary); font-weight: 400; }
@@ -284,6 +369,7 @@ button.ghost {
 .badge-group { background: rgba(0, 128, 105, 0.15); color: var(--accent); }
 .badge-contact { background: rgba(102, 119, 129, 0.15); color: var(--text-secondary); }
 .badge-community { background: rgba(139, 92, 246, 0.15); color: #8b5cf6; }
+.badge-unsaved { background: var(--warn-bg); color: var(--warn-fg); }
 
 /* ---------- hints / consent ---------- */
 .hint { font-size: 11px; color: var(--text-secondary); background: var(--bg-panel); border: 1px solid var(--border); padding: 8px 10px; border-radius: 8px; }

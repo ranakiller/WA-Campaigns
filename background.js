@@ -12,8 +12,41 @@ const DEFAULT_SETTINGS = {
 
 // ---------- storage helpers ----------
 
+// A saved message used to be a single {kind, text, media} — now it's a named
+// sequence of items (each independently text, or media with its own
+// caption), sent one after another to a chat before moving to the next.
+// Older stored messages are normalized to the new shape on read so nothing
+// needs a one-time migration step.
+function migrateMessage(m) {
+  if (Array.isArray(m.items)) return m;
+  const item =
+    m.kind === 'media' && m.media
+      ? { kind: 'media', media: m.media, caption: m.text || '' }
+      : { kind: 'text', text: m.text || '' };
+  return { ...m, items: [item] };
+}
+
+// Campaigns used to have one schedule slot (a single daily time, or a
+// single one-off datetime) and a Paced/Fast sendMode. Now a campaign can
+// have multiple daily times, a repeating interval, or multiple one-off
+// datetimes, and delay is either "use the Safety-tab defaults" or fully
+// custom — older stored campaigns are normalized to the new shape on read.
+function migrateCampaign(c) {
+  let next = c;
+  if (next.scheduleType === 'fixed') {
+    next = { ...next, scheduleType: 'times', times: next.time ? [next.time] : [] };
+  } else if (next.scheduleType === 'once' && next.datetime && !next.datetimes) {
+    next = { ...next, datetimes: [next.datetime] };
+  }
+  if (next.useDefaultDelay === undefined) {
+    next = { ...next, useDefaultDelay: !next.delayBetweenMsMs };
+  }
+  return next;
+}
+
 async function getState() {
   const data = await chrome.storage.local.get([
+    'fetchedChats',
     'lists',
     'messages',
     'campaigns',
@@ -21,9 +54,10 @@ async function getState() {
     'settings'
   ]);
   return {
+    fetchedChats: data.fetchedChats || [],
     lists: data.lists || [],
-    messages: data.messages || [],
-    campaigns: data.campaigns || [],
+    messages: (data.messages || []).map(migrateMessage),
+    campaigns: (data.campaigns || []).map(migrateCampaign),
     log: data.log || [],
     settings: { ...DEFAULT_SETTINGS, ...(data.settings || {}) }
   };
@@ -96,14 +130,7 @@ function randomBetween([min, max]) {
   return min + Math.random() * (max - min);
 }
 
-// 'paced' uses the campaign's configured delay range between sends (the
-// safety-oriented default); 'fast' uses a short fixed gap, just enough to
-// avoid firing sends literally back-to-back. Sends themselves are always
-// awaited via WPP's own send functions — there's no separate "confirmation"
-// step anymore, the promise resolving *is* the confirmation.
-const FAST_MODE_DELAY_MS = [800, 1500];
-
-async function sendOneMessage(waId, message) {
+async function sendOneItem(waId, item) {
   const tab = await ensureWaTab();
   const ready = await pingContentScript(tab.id);
   if (!ready) {
@@ -112,10 +139,10 @@ async function sendOneMessage(waId, message) {
     );
   }
   let res;
-  if (message.kind === 'media' && message.media) {
-    res = await sendToTab(tab.id, { action: 'sendMedia', waId, media: message.media, caption: message.text || '' }, 45000);
+  if (item.kind === 'media' && item.media) {
+    res = await sendToTab(tab.id, { action: 'sendMedia', waId, media: item.media, caption: item.caption || '' }, 45000);
   } else {
-    res = await sendToTab(tab.id, { action: 'sendMessage', waId, text: message.text }, 30000);
+    res = await sendToTab(tab.id, { action: 'sendMessage', waId, text: item.text }, 30000);
   }
   if (!res || !res.ok) {
     throw new Error((res && res.error) || 'Unknown send failure.');
@@ -128,6 +155,11 @@ async function runCampaign(campaign) {
   const message = messages.find((m) => m.id === campaign.messageId);
   if (!message) {
     await appendLog({ campaignId: campaign.id, campaignName: campaign.name, status: 'error', detail: 'Message no longer exists.' });
+    return;
+  }
+  const items = message.items || [];
+  if (items.length === 0) {
+    await appendLog({ campaignId: campaign.id, campaignName: campaign.name, status: 'error', detail: 'Message has no content.' });
     return;
   }
   const targetLists = lists.filter((l) => campaign.listIds.includes(l.id));
@@ -143,17 +175,29 @@ async function runCampaign(campaign) {
     const list = targetLists[li];
     const targets = list.members || [];
 
-    for (let i = 0; i < targets.length; i++) {
-      const target = targets[i];
+    // Flatten (chat × item) into one queue so pacing is uniform whether
+    // consecutive sends are to different chats or multiple items landing
+    // in the same chat — e.g. 10 images to one group get the same
+    // between-send delay as sends to 10 different chats would.
+    const queue = [];
+    for (const target of targets) {
+      items.forEach((item, itemIndex) => queue.push({ target, item, itemIndex }));
+    }
+
+    for (let i = 0; i < queue.length; i++) {
+      const { target, item, itemIndex } = queue[i];
+      const itemLabel = items.length > 1 ? ` (item ${itemIndex + 1}/${items.length})` : '';
+      let sent = false;
       try {
-        await sendOneMessage(target.waId, message);
+        await sendOneItem(target.waId, item);
+        sent = true;
         totalSent++;
         await appendLog({
           campaignId: campaign.id,
           campaignName: campaign.name,
           chatName: target.name,
           status: 'success',
-          detail: `Sent: "${(message.text || '[media]').slice(0, 60)}"`
+          detail: `Sent${itemLabel}: "${(item.text || item.caption || '[media]').slice(0, 60)}"`
         });
       } catch (err) {
         totalFailed++;
@@ -162,17 +206,19 @@ async function runCampaign(campaign) {
           campaignName: campaign.name,
           chatName: target.name,
           status: 'error',
-          detail: String(err.message || err)
+          detail: `${String(err.message || err)}${itemLabel}`
         });
       }
-      if (i < targets.length - 1) {
-        const delayRange = campaign.sendMode === 'fast' ? FAST_MODE_DELAY_MS : campaign.delayBetweenMsMs || settings.defaultDelayBetweenMsMs;
+      // Only pace after a real send — a skipped/failed attempt didn't put
+      // anything on the wire, so there's nothing to space out.
+      if (sent && i < queue.length - 1) {
+        const delayRange = campaign.useDefaultDelay ? settings.defaultDelayBetweenMsMs : campaign.delayBetweenMsMs || settings.defaultDelayBetweenMsMs;
         await new Promise((r) => setTimeout(r, randomBetween(delayRange)));
       }
     }
 
     if (li < targetLists.length - 1) {
-      const delayRange = campaign.delayBetweenListsMs || settings.defaultDelayBetweenListsMs;
+      const delayRange = campaign.useDefaultDelay ? settings.defaultDelayBetweenListsMs : campaign.delayBetweenListsMs || settings.defaultDelayBetweenListsMs;
       await new Promise((r) => setTimeout(r, randomBetween(delayRange)));
     }
   }
@@ -190,15 +236,29 @@ async function runCampaign(campaign) {
 }
 
 // ---------- alarm scheduling ----------
+// A campaign's schedule is one of:
+//   'times'    — one or more daily HH:MM times (e.g. 9am, 1pm, 6pm) — each
+//                gets its own recurring alarm, individually rescheduled for
+//                the next day right after it fires.
+//   'interval' — repeats every N minutes via chrome.alarms' native
+//                periodInMinutes, optionally only within a daily active-hours
+//                window (checked when the alarm fires, since the alarms API
+//                itself has no notion of "only between 9am and 9pm").
+//   'once'     — one or more specific one-off datetimes; each fires once and
+//                is then tombstoned (set to null, keeping array indices
+//                stable for any other still-pending entries).
 
-function alarmIdForFixed(campaignId) {
-  return `fixed:${campaignId}`;
+function alarmIdForTime(campaignId, idx) {
+  return `times:${campaignId}:${idx}`;
 }
-function alarmIdForOnce(campaignId) {
-  return `once:${campaignId}`;
+function alarmIdForInterval(campaignId) {
+  return `interval:${campaignId}`;
+}
+function alarmIdForOnce(campaignId, idx) {
+  return `once:${campaignId}:${idx}`;
 }
 
-function nextFixedTimeMs(hhmm, jitterMinutes) {
+function nextDailyTimeMs(hhmm, jitterMinutes) {
   const [h, m] = hhmm.split(':').map(Number);
   const now = new Date();
   const target = new Date(now.getFullYear(), now.getMonth(), now.getDate(), h, m, 0, 0);
@@ -209,18 +269,49 @@ function nextFixedTimeMs(hhmm, jitterMinutes) {
   return target.getTime() + jitterMs;
 }
 
+// Does "now" fall inside the campaign's active-hours window? A window
+// wrapping past midnight (e.g. 22:00–06:00) is handled too. No window
+// configured means "always active".
+function isWithinActiveWindow(campaign) {
+  if (!campaign.windowStart || !campaign.windowEnd) return true;
+  const now = new Date();
+  const nowMinutes = now.getHours() * 60 + now.getMinutes();
+  const [sh, sm] = campaign.windowStart.split(':').map(Number);
+  const [eh, em] = campaign.windowEnd.split(':').map(Number);
+  const startMinutes = sh * 60 + sm;
+  const endMinutes = eh * 60 + em;
+  if (startMinutes <= endMinutes) return nowMinutes >= startMinutes && nowMinutes <= endMinutes;
+  return nowMinutes >= startMinutes || nowMinutes <= endMinutes;
+}
+
+async function clearCampaignAlarms(campaignId) {
+  const all = await chrome.alarms.getAll();
+  await Promise.all(
+    all.filter((a) => a.name.split(':')[1] === campaignId).map((a) => chrome.alarms.clear(a.name))
+  );
+}
+
 async function scheduleCampaignAlarm(campaign) {
   const { settings } = await getState();
+  await clearCampaignAlarms(campaign.id);
   if (!campaign.enabled) return;
 
-  if (campaign.scheduleType === 'fixed') {
-    const when = nextFixedTimeMs(campaign.time, settings.jitterMinutes);
-    chrome.alarms.create(alarmIdForFixed(campaign.id), { when });
+  if (campaign.scheduleType === 'times') {
+    (campaign.times || []).forEach((time, idx) => {
+      const when = nextDailyTimeMs(time, settings.jitterMinutes);
+      chrome.alarms.create(alarmIdForTime(campaign.id, idx), { when });
+    });
+  } else if (campaign.scheduleType === 'interval') {
+    const periodInMinutes = Math.max(1, Math.round(campaign.intervalMinutes) || 60);
+    chrome.alarms.create(alarmIdForInterval(campaign.id), { delayInMinutes: periodInMinutes, periodInMinutes });
   } else if (campaign.scheduleType === 'once') {
-    const when = new Date(campaign.datetime).getTime();
-    if (when > Date.now()) {
-      chrome.alarms.create(alarmIdForOnce(campaign.id), { when });
-    }
+    (campaign.datetimes || []).forEach((dt, idx) => {
+      if (!dt) return; // tombstoned (already fired)
+      const when = new Date(dt).getTime();
+      if (when > Date.now()) {
+        chrome.alarms.create(alarmIdForOnce(campaign.id, idx), { when });
+      }
+    });
   }
 }
 
@@ -234,20 +325,36 @@ async function rebuildAllAlarms() {
 
 chrome.alarms.onAlarm.addListener(async (alarm) => {
   const { campaigns } = await getState();
-  const [kind, campaignId] = alarm.name.split(':');
+  const [kind, campaignId, idxStr] = alarm.name.split(':');
   const campaign = campaigns.find((c) => c.id === campaignId);
   if (!campaign) return;
 
+  if (kind === 'interval' && !isWithinActiveWindow(campaign)) {
+    return; // outside the configured hours — the alarm just fires again next period
+  }
+
   await runCampaign(campaign);
 
-  if (kind === 'fixed') {
-    // Reschedule tomorrow (fresh jitter each day).
-    await scheduleCampaignAlarm(campaign);
+  if (kind === 'times') {
+    const idx = Number(idxStr);
+    const time = (campaign.times || [])[idx];
+    if (time) {
+      const { settings } = await getState();
+      chrome.alarms.create(alarmIdForTime(campaign.id, idx), { when: nextDailyTimeMs(time, settings.jitterMinutes) });
+    }
   } else if (kind === 'once') {
+    const idx = Number(idxStr);
     const { campaigns: current } = await getState();
-    const updated = current.map((c) => (c.id === campaign.id ? { ...c, enabled: false, lastRun: Date.now() } : c));
+    const updated = current.map((c) => {
+      if (c.id !== campaign.id) return c;
+      const datetimes = (c.datetimes || []).slice();
+      datetimes[idx] = null; // tombstone — keeps other pending entries' indices stable
+      const stillPending = datetimes.some(Boolean);
+      return { ...c, datetimes, enabled: stillPending, lastRun: Date.now() };
+    });
     await setState({ campaigns: updated });
   }
+  // 'interval' alarms repeat on their own via periodInMinutes — nothing to reschedule.
 });
 
 chrome.runtime.onInstalled.addListener(() => rebuildAllAlarms());
@@ -264,9 +371,7 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
           break;
         }
 
-        // ---- fetching chats (no persistent pool — the popup holds these
-        // in memory for the session and saves the picked ones straight into
-        // a list's `members`) ----
+        // ---- fetching chats ----
         case 'listOpenChats': {
           const tab = await findWaTab();
           if (!tab) {
@@ -278,7 +383,11 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
             sendResponse({ ok: false, error: 'WhatsApp Web tab is not ready yet.' });
             break;
           }
-          const res = await sendToTab(tab.id, { action: 'listChats' }, 20000);
+          const res = await sendToTab(
+            tab.id,
+            { action: 'listChats', scope: msg.scope, contactFilter: msg.contactFilter },
+            25000
+          );
           sendResponse(res);
           break;
         }
@@ -297,6 +406,25 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
           sendResponse(res);
           break;
         }
+
+        // ---- fetched chats persist (until explicitly cleared) so a popup
+        // close/reopen doesn't lose a scan you haven't saved into a list yet ----
+        case 'saveFetchedChats': {
+          const { fetchedChats } = await getState();
+          const byId = new Map(fetchedChats.map((c) => [c.waId, c]));
+          for (const c of msg.chats || []) {
+            if (c.waId) byId.set(c.waId, c); // overwrite so name/number/type stay current
+          }
+          await setState({ fetchedChats: Array.from(byId.values()) });
+          sendResponse({ ok: true });
+          break;
+        }
+        case 'clearFetchedChats': {
+          await setState({ fetchedChats: [] });
+          sendResponse({ ok: true });
+          break;
+        }
+
         // ---- lists ----
         case 'saveList': {
           const { lists } = await getState();
@@ -370,8 +498,7 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
         }
         case 'deleteCampaign': {
           const { campaigns } = await getState();
-          await chrome.alarms.clear(alarmIdForFixed(msg.id));
-          await chrome.alarms.clear(alarmIdForOnce(msg.id));
+          await clearCampaignAlarms(msg.id);
           await setState({ campaigns: campaigns.filter((c) => c.id !== msg.id) });
           sendResponse({ ok: true });
           break;
@@ -380,13 +507,9 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
           const { campaigns } = await getState();
           const next = campaigns.map((c) => (c.id === msg.id ? { ...c, enabled: msg.enabled } : c));
           await setState({ campaigns: next });
-          if (msg.enabled) {
-            const campaign = next.find((c) => c.id === msg.id);
-            await scheduleCampaignAlarm(campaign);
-          } else {
-            await chrome.alarms.clear(alarmIdForFixed(msg.id));
-            await chrome.alarms.clear(alarmIdForOnce(msg.id));
-          }
+          // scheduleCampaignAlarm always clears existing alarms first, then
+          // reschedules only if enabled — covers both toggle directions.
+          await scheduleCampaignAlarm(next.find((c) => c.id === msg.id));
           sendResponse({ ok: true });
           break;
         }
@@ -398,6 +521,39 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
             break;
           }
           runCampaign(campaign); // fire and forget; log will update
+          sendResponse({ ok: true });
+          break;
+        }
+
+        // One-off send from the Messages tab — reuses runCampaign with a
+        // transient, unpersisted campaign object so it gets the same
+        // delay/logging/notification behavior without being saved/scheduled.
+        case 'sendNow': {
+          const { messages, settings } = await getState();
+          const message = messages.find((m) => m.id === msg.messageId);
+          if (!message) {
+            sendResponse({ ok: false, error: 'Message not found.' });
+            break;
+          }
+          if (!msg.listIds || msg.listIds.length === 0) {
+            sendResponse({ ok: false, error: 'Pick at least one list.' });
+            break;
+          }
+          runCampaign({
+            id: `adhoc-${uid()}`,
+            name: `Manual send: ${message.name}`,
+            messageId: message.id,
+            listIds: msg.listIds,
+            useDefaultDelay: true,
+            delayBetweenMsMs: settings.defaultDelayBetweenMsMs,
+            delayBetweenListsMs: settings.defaultDelayBetweenListsMs
+          });
+          sendResponse({ ok: true });
+          break;
+        }
+
+        case 'clearLog': {
+          await setState({ log: [] });
           sendResponse({ ok: true });
           break;
         }

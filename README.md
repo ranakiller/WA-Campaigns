@@ -41,31 +41,62 @@ store review, for the same ToS reasons noted above).
 
 ## What it does
 
-- **Messages tab** — save a library of message drafts: plain text, or an
-  image/document with an optional caption. Edit or delete any saved message;
-  each one tracks when it was last sent.
-- **Lists tab** — open web.whatsapp.com in a normal tab, click "Scan open
-  chats" to pull *every* group and contact directly from WhatsApp's own chat
-  list (exact group/contact tagging, not a guess), or add an individual
-  contact by phone number. Search the fetched chats, use Select all/Deselect
-  all to work through them quickly, and save your picks as a **named list**
-  — e.g. "Family groups", "Work team", "Customers". There's no separate
-  "pool" step: scan, pick, save. Build as many lists as you like, and
-  editing one re-shows its saved members even without rescanning.
+- **Messages tab** — a saved message is an ordered sequence of **items**:
+  add a text item (write it, tap **+**), or attach one or more images/
+  documents in a single browse — each becomes its own item with its own
+  caption (e.g. 10 airline package images, each with a different caption,
+  all under one saved message). Reorder or remove items before saving. When
+  sent, every item goes to a chat one after another (with the same pacing as
+  sending to a new chat) before moving on to the next chat — no need to run
+  separate messages/campaigns manually. Each saved message also has a
+  **Send** icon to fire it off immediately at one or more saved lists,
+  without setting up a full scheduled campaign. Edit or delete any saved
+  message; each tracks when it was last sent. The compose form is also a
+  **persistent draft** — an unsaved label/text/items survives closing the
+  popup and picks back up next time you open it, until you Save or Cancel.
+- **Lists tab** — open web.whatsapp.com in a normal tab, choose **Groups**,
+  **Contacts**, **Communities**, **Chats**, or **All**, then click **Scan**:
+  - Groups comes from every group you're a member of.
+  - Contacts comes from your actual WhatsApp contacts (the synced phone
+    address book), not just people you happen to already have a chat open
+    with. Contact entries show the phone number alongside the name.
+  - Communities comes from the community wrapper chats themselves (see
+    "Known limitations" for how these relate to their announcement group,
+    which shows up under Groups instead).
+  - Chats comes from your individual (1:1) conversations, whether or not the
+    other person is a saved contact — useful for reaching people who've
+    messaged you but were never saved. A filter next to the scan buttons
+    narrows it to **saved contacts only** or **non-contacts only**; unsaved
+    entries also carry a "not saved" badge in the results.
+  Fetched chats **persist** until you explicitly clear them (**Clear
+  fetched**) — closing the popup doesn't lose a scan you haven't saved into
+  a list yet. Search the fetched chats, use Select all/Deselect all to work
+  through them quickly, and save your picks as a **named list** — e.g.
+  "Family groups", "Work team", "Customers". You can also add an individual
+  contact by phone number. Build as many lists as you like, and editing one
+  re-shows its saved members even without rescanning. The small grid icon
+  next to "Fetched chats" (and next to each saved list) **exports to CSV**
+  — Name / Type / ID-or-number columns, opens fine in Excel.
 - **Campaigns tab** — pick a saved message, pick one or more saved lists,
-  and choose either "every day at HH:MM" or "one time on [date/time]". Choose
-  a sending mode:
-  - **Paced** — applies the configured delay range between every send.
-  - **Fast** — a short fixed gap only (~1–1.5s), for higher volume in less
-    time (higher risk — see above).
-  Set the delay range between messages, and (if a campaign targets multiple
-  lists) the delay before starting the next list. Pause/resume, run
-  immediately, or delete any campaign.
+  and choose **When**:
+  - **Daily time(s)** — add one or more HH:MM times; the campaign runs at
+    every one of them, every day (e.g. 9am, 1pm, 6pm).
+  - **Repeat interval** — runs every N minutes/hours, or set "N times a
+    day" instead and it works out the evenly-spaced interval for you.
+    Optionally restrict it to active hours (e.g. only between 9am–9pm) so
+    it doesn't fire in the middle of the night.
+  - **One-time (multiple)** — add one or more specific date/times; each
+    runs once, independently, then drops off the list.
+  Delay defaults to the Safety tab's settings — untick **Use default delay**
+  to set a custom delay range (between messages, and before starting the
+  next list) just for this campaign. Pause/resume, run immediately, or
+  delete any campaign.
 - **Log tab** — history of what was sent, when, to which chat, and whether
-  it succeeded or failed.
+  it succeeded or failed. **Clear log** wipes it.
 - **Safety tab** — the consent checkbox, jitter (± minutes around a fixed
   scheduled time), default delay ranges, and a light/dark/system appearance
   toggle matching WhatsApp Web's own theme.
+- The popup reopens on whichever tab you last had open.
 
 ## How it works technically
 
@@ -102,10 +133,10 @@ internal data/functions instead of the rendered page.
   logging results) by real WhatsApp chat ID (`waId`, e.g. `1234567890@c.us`
   or `123-456@g.us`) — not by display-name text, so two chats that happen to
   share a name can never be confused with each other.
-- Everything (messages incl. media, lists, chat pool, campaigns, logs,
-  settings) is stored locally via `chrome.storage.local` (with the
-  `unlimitedStorage` permission, since saved images/documents can be a few
-  MB) — nothing leaves your machine, there's no external server.
+- Everything (messages incl. media, fetched chats, lists, campaigns, logs,
+  settings, last-open tab) is stored locally via `chrome.storage.local`
+  (with the `unlimitedStorage` permission, since saved images/documents can
+  be a few MB) — nothing leaves your machine, there's no external server.
 
 ## Requirements
 
@@ -132,11 +163,10 @@ internal data/functions instead of the rendered page.
    tab, accept the consent checkbox on the Campaigns tab, then create a
    campaign.
 
-**Upgrading from an older version of this extension:** the Lists tab no
-longer keeps a separate "chat pool" — scanning feeds straight into the list
-you're building/editing, and lists saved before this version won't carry
-their members forward correctly. Rebuild any existing lists once: **Scan
-open chats**, search/select, and re-save each list (one-time cleanup).
+**Upgrading from an older version of this extension:** lists saved before
+this version won't carry their members forward correctly. Rebuild any
+existing lists once: **Scan**, search/select, and re-save each list
+(one-time cleanup).
 
 ## Known limitations
 
@@ -156,9 +186,40 @@ open chats**, search/select, and re-save each list (one-time cleanup).
 - Media caption support depends on `WPP.chat.sendFileMessage`'s own
   `caption` option — very large files may be slow or rejected by WhatsApp's
   own upload limits, same as sending manually.
-- A WhatsApp **Community** shows up as two entries with the same name when
-  scanning — the community itself and its default announcement group are
-  separate chats underneath. Scanning tags the community wrapper as
-  "community" (not "group") specifically so this is visible instead of
-  looking like a duplicate — pick whichever one (or both) you actually mean
-  to message.
+- On accounts where a chat's local encryption session hasn't been fully
+  established yet (seen right after linking WhatsApp Web on a new browser),
+  WhatsApp Web's own internal code can throw `Cannot read properties of
+  null (reading 'rotateKey')` — a Signal Protocol session issue on
+  WhatsApp's end, not something this extension causes. Scanning works
+  around it by skipping metadata this extension doesn't need in the first
+  place (`ignoreGroupMetadata`); sending recovers from it reactively — if a
+  send hits this specific error, it opens the chat once
+  (`WPP.chat.openChatBottom`, mirroring a human clicking into it, which
+  appears to be what actually establishes the session) and retries that one
+  send, rather than doing it before every send and slowing all of them down
+  for a problem most sends never hit.
+- A WhatsApp **Community** is implemented as a special group (the community
+  wrapper) paired with a same-named announcement group underneath it. They're
+  kept on separate scan scopes on purpose — the community wrapper only shows
+  up under **Communities**, its announcement group only under **Groups** —
+  so you can pick either or both without one silently masking the other as a
+  same-named duplicate. WhatsApp itself refuses a direct message to the
+  community wrapper (only its announcement group can receive one) but its
+  rejection error names the correct group id — sends aimed at a Community
+  are automatically retried against that announcement group instead of just
+  failing, so adding a Community to a list still works as expected.
+- **Admin-only groups**: WhatsApp doesn't error when a non-admin sends into
+  a group with "Only admins can send messages" turned on (which includes
+  every community announcement group by definition) — it just silently
+  resolves without delivering anything, which used to show as a false
+  "success" here too. This is checked before sending; if you're not an
+  admin there, it's logged as an error and skipped rather than wasting a
+  send that was never going to land.
+- **Contacts** scope can be slow with a very large address book, since it
+  reads your full synced WhatsApp contact list rather than just chats you
+  already have open — Groups-only scans stay fast either way.
+- Each contact can have both a phone-number identity (`@c.us`) and a
+  privacy "LID" identity (`@lid`, WhatsApp's mechanism for masking a
+  number from other people in shared groups) — the LID twin is filtered out
+  of the Contacts scan so the same person doesn't show up twice under an
+  identical name.

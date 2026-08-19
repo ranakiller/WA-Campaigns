@@ -29,23 +29,28 @@
     <!-- MESSAGES -->
     <section id="tab-messages" class="tab-panel active">
       <h3>Save a message</h3>
-      <label>Label (for your own reference)</label>
+      <label for="msgLabel">Label (for your own reference)</label>
       <input id="msgLabel" type="text" placeholder="e.g. Weekly reminder" />
 
-      <div class="kind-toggle">
-        <button type="button" class="kind-btn active" data-kind="text">Text only</button>
-        <button type="button" class="kind-btn" data-kind="media">Image / Document</button>
+      <div class="field-row-with-actions">
+        <label for="msgText">Add a text item</label>
+        <div class="field-row-icons">
+          <button id="addTextItemBtn" class="icon-btn small-icon-btn" type="button" title="Add as a text item">
+            <svg viewBox="0 0 24 24" width="18" height="18"><path fill="currentColor" d="M19 13h-6v6h-2v-6H5v-2h6V5h2v6h6z"/></svg>
+          </button>
+          <button id="attachToggleBtn" class="icon-btn small-icon-btn" type="button" title="Attach image or document as its own item">
+            <svg viewBox="0 0 24 24" width="18" height="18"><path fill="currentColor" d="M16.5 6.5v9a4 4 0 0 1-8 0v-9a2.5 2.5 0 0 1 5 0v8a1 1 0 0 1-2 0v-8H10v8a2.5 2.5 0 0 0 5 0v-9a4 4 0 0 0-8 0v9.5a5.5 5.5 0 0 0 11 0V6.5Z"/></svg>
+          </button>
+        </div>
       </div>
+      <textarea id="msgText" placeholder="Write a text item, then tap +..." rows="3"></textarea>
+      <input id="msgFile" type="file" multiple style="display:none" accept="image/*,video/*,application/pdf,.doc,.docx,.xls,.xlsx,.ppt,.pptx,.zip" />
 
-      <div id="mediaPicker" class="media-picker" style="display:none">
-        <input id="msgFile" type="file" accept="image/*,video/*,application/pdf,.doc,.docx,.xls,.xlsx,.ppt,.pptx,.zip" />
-        <div id="mediaPreview" class="media-preview"></div>
-      </div>
+      <label>Items in this message (<span id="composingCount">0</span>) — sent one after another to each chat</label>
+      <div id="composingItems" class="composing-list"></div>
 
-      <label id="msgTextLabel">Message text</label>
-      <textarea id="msgText" placeholder="Write your message..." rows="3"></textarea>
+      <button id="saveMessageBtn" class="primary" type="button">Save message</button>
 
-      <button id="saveMessageBtn" class="primary">Save message</button>
       <button id="cancelEditMessageBtn" class="ghost" style="display:none">Cancel edit</button>
 
       <h3>Saved messages</h3>
@@ -54,8 +59,20 @@
 
     <!-- LISTS -->
     <section id="tab-lists" class="tab-panel">
-      <p class="hint">Open <b>web.whatsapp.com</b> in a tab, then scan to pull every group and contact straight from WhatsApp's own chat list. Search, select, and save them as a list below.</p>
-      <button id="scanChatsBtn" class="primary">Scan open chats</button>
+      <p class="hint">Open <b>web.whatsapp.com</b> in a tab, then scan to pull chats straight from WhatsApp. Search, select, and save them as a list below.</p>
+      <div class="kind-toggle" id="scanScopeToggle">
+        <button type="button" class="kind-btn active" data-scope="groups">Groups</button>
+        <button type="button" class="kind-btn" data-scope="contacts">Contacts</button>
+        <button type="button" class="kind-btn" data-scope="communities">Communities</button>
+        <button type="button" class="kind-btn" data-scope="chats">Chats</button>
+        <button type="button" class="kind-btn" data-scope="all">All</button>
+      </div>
+      <select id="chatsContactFilter" style="display:none">
+        <option value="all">All chats</option>
+        <option value="contacts">Saved contacts only</option>
+        <option value="noncontacts">Non-contacts only</option>
+      </select>
+      <button id="scanChatsBtn" class="primary">Scan</button>
       <div class="manual-add">
         <input id="manualContactNumber" type="text" placeholder="Or add a contact by phone number, with country code" />
         <button id="manualAddBtn">Add</button>
@@ -63,6 +80,13 @@
       <p class="hint">Groups can't be added by typing a name — scan picks up every group automatically.</p>
 
       <h3 id="listBuilderTitle">Build a list</h3>
+      <div class="row-with-action">
+        <span class="muted">Fetched chats</span>
+        <button id="exportFetchedBtn" class="icon-btn small-icon-btn" type="button" title="Export fetched chats to CSV">
+          <svg viewBox="0 0 24 24" width="14" height="14"><path fill="currentColor" d="M5 3a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2V5a2 2 0 0 0-2-2H5Zm0 2h5v4H5V5Zm7 0h7v4h-7V5ZM5 11h5v3H5v-3Zm7 0h7v3h-7v-3ZM5 16h5v3H5v-3Zm7 0h7v3h-7v-3Z"/></svg>
+        </button>
+        <button id="clearFetchedBtn" class="ghost small-inline" type="button">Clear fetched</button>
+      </div>
       <input id="listName" type="text" placeholder="List name, e.g. Family groups" />
       <input id="listSearchInput" type="text" placeholder="Search fetched chats..." />
       <div class="select-all-row">
@@ -107,31 +131,67 @@
         <div id="campListChecklist" class="checklist"></div>
 
         <label>When</label>
-        <div class="when-row">
-          <select id="campScheduleType">
-            <option value="fixed">Every day at...</option>
-            <option value="once">One time on...</option>
-          </select>
-          <input id="campTimeFixed" type="time" value="09:00" />
-          <input id="campTimeOnce" type="datetime-local" style="display:none" />
+        <div class="kind-toggle" id="campScheduleTypeToggle">
+          <button type="button" class="kind-btn active" data-schedule-type="times">Daily time(s)</button>
+          <button type="button" class="kind-btn" data-schedule-type="interval">Repeat interval</button>
+          <button type="button" class="kind-btn" data-schedule-type="once">Specific date(s)</button>
         </div>
 
-        <label>Sending mode</label>
-        <div class="radio-row">
-          <label><input type="radio" name="sendMode" value="paced" checked /> Paced — use the delay range below between every send (recommended)</label>
-          <label><input type="radio" name="sendMode" value="fast" /> Fast — short fixed gap only (~1-1.5s), higher volume in less time</label>
+        <div id="campTimesPanel">
+          <p class="hint">Repeats every day, forever, at each time you add — e.g. add 9:00 AM and 6:00 PM to run twice daily.</p>
+          <div class="when-row">
+            <input id="campTimeInput" type="time" value="09:00" />
+            <button id="addTimeBtn" class="small" type="button">+ Add time</button>
+          </div>
+          <div id="campTimesList" class="chip-list"></div>
         </div>
+
+        <div id="campIntervalPanel" style="display:none">
+          <label>Repeat every</label>
+          <div class="when-row">
+            <input id="campIntervalValue" type="number" min="1" value="1" />
+            <select id="campIntervalUnit">
+              <option value="minutes">Minutes</option>
+              <option value="hours" selected>Hours</option>
+            </select>
+          </div>
+
+          <label>Or: times per day instead (overrides "Repeat every" above)</label>
+          <p class="hint">Say how many runs you want today and the spacing is worked out for you — e.g. 5 times a day = one run roughly every 4h48m, evenly spread out.</p>
+          <input id="campTimesPerDay" type="number" min="0" placeholder="e.g. 5 — leave blank to use the interval above" />
+
+          <label>Active hours (optional)</label>
+          <p class="hint">Without this, the interval above runs around the clock, including overnight. Set a window (e.g. 9:00 AM–9:00 PM) to keep runs inside business hours — a tick outside it is silently skipped, not sent late.</p>
+          <div class="when-row">
+            <input id="campWindowStart" type="time" /> to
+            <input id="campWindowEnd" type="time" />
+          </div>
+        </div>
+
+        <div id="campOncePanel" style="display:none">
+          <p class="hint">Each date/time you add fires exactly once, then it's done — nothing repeats. Add several for a handful of one-off runs on this campaign without recreating it each time.</p>
+          <div class="when-row">
+            <input id="campDatetimeInput" type="datetime-local" />
+            <button id="addDatetimeBtn" class="small" type="button">+ Add</button>
+          </div>
+          <div id="campDatetimesList" class="chip-list"></div>
+        </div>
+
+        <label class="checkbox-row">
+          <input id="campUseDefaultDelay" type="checkbox" checked />
+          Use default delay from Safety settings
+        </label>
 
         <label>Delay between messages (seconds)</label>
         <div class="when-row">
-          <input id="campDelayMin" type="number" min="1" max="300" /> to
-          <input id="campDelayMax" type="number" min="1" max="300" />
+          <input id="campDelayMin" type="number" min="1" max="300" disabled /> to
+          <input id="campDelayMax" type="number" min="1" max="300" disabled />
         </div>
 
         <label>Delay before starting the next list (seconds)</label>
         <div class="when-row">
-          <input id="campListDelayMin" type="number" min="1" max="600" /> to
-          <input id="campListDelayMax" type="number" min="1" max="600" />
+          <input id="campListDelayMin" type="number" min="1" max="600" disabled /> to
+          <input id="campListDelayMax" type="number" min="1" max="600" disabled />
         </div>
 
         <button id="addCampaignBtn" class="primary">Save campaign</button>
@@ -144,6 +204,7 @@
 
     <!-- LOG -->
     <section id="tab-log" class="tab-panel">
+      <button id="clearLogBtn" class="ghost">Clear log</button>
       <ul id="logList" class="item-list"></ul>
     </section>
 
@@ -152,7 +213,7 @@
       <p class="hint warn">
         Fully automated sending can trigger WhatsApp's spam detection even for your own groups.
         These settings add randomness so sends look less scripted. Lower risk isn't zero risk —
-        keep daily volume modest and prefer "Confirmed" sending mode.
+        keep daily volume modest and prefer "Paced" sending mode.
       </p>
       <label class="checkbox-row">
         <input id="consentCheckboxSettings" type="checkbox" />
