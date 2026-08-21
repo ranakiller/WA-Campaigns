@@ -155,6 +155,23 @@ function widToString(wid) {
   return wid._serialized || (typeof wid.toString === 'function' ? wid.toString() : String(wid));
 }
 
+// Both this and findGroupByWaId below need the real per-group metadata
+// (.announce, .parentGroup) to do their job, so unlike the scan-time
+// fetchGroups/fetchCommunities they can't just pass ignoreGroupMetadata to
+// dodge a broken group elsewhere in the account — the fix here is making
+// sure that failure only disables the *enhancement* (community redirect /
+// admin-only check) instead of blocking the send that triggered it. This
+// was the actual bug behind sends failing on every item: chat.list()
+// crashing here happened *before* the try/catch that has the rotateKey
+// retry logic even ran, so that recovery path was never reached.
+async function listGroupsWithMetadata() {
+  try {
+    return await window.WPP.chat.list({ onlyGroups: true });
+  } catch (e) {
+    return null; // signals "couldn't resolve — skip the enhancement, don't block the send"
+  }
+}
+
 async function resolveCommunitySendTarget(waId) {
   let chat = null;
   try {
@@ -167,7 +184,8 @@ async function resolveCommunitySendTarget(waId) {
   }
   if (!chat || !chat.isParentGroup) return waId; // not a community wrapper — send as-is
 
-  const groups = await window.WPP.chat.list({ onlyGroups: true });
+  const groups = await listGroupsWithMetadata();
+  if (!groups) return waId; // couldn't check — send to the original id as-is
   const announceGroup = groups.find((g) => {
     const meta = g.groupMetadata;
     if (!meta || !meta.announce) return false;
@@ -177,7 +195,8 @@ async function resolveCommunitySendTarget(waId) {
 }
 
 async function findGroupByWaId(waId) {
-  const groups = await window.WPP.chat.list({ onlyGroups: true });
+  const groups = await listGroupsWithMetadata();
+  if (!groups) return null;
   return groups.find((g) => g.id && g.id._serialized === waId) || null;
 }
 

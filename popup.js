@@ -4,7 +4,25 @@ function call(action, payload = {}) {
   });
 }
 
-let STATE = { fetchedChats: [], lists: [], messages: [], campaigns: [], log: [], settings: {} };
+let STATE = { fetchedChats: [], lists: [], messages: [], campaigns: [], log: [], settings: {}, activeRuns: {} };
+// Which "send now" run (a background.js activeRuns id) belongs to which
+// saved message, so the send panel can show that message's own progress
+// bar instead of a generic one — populated when sendNow() returns its runId.
+// Persisted (same pattern as lastTab) so closing/reopening the popup
+// mid-send doesn't lose track of it. assignedAt gives a short grace window
+// right after sending, before background.js has necessarily written the
+// run's storage record yet — without it there's no way to tell "not
+// created yet" apart from "long finished and pruned", so a fresh mapping
+// could get wiped before the real data ever arrives.
+const messageRunIds = new Map(); // messageId -> { runId, assignedAt }
+function saveMessageRunIds() {
+  chrome.storage.local.set({ messageRunIds: Object.fromEntries(messageRunIds) });
+}
+chrome.storage.local.get(['messageRunIds'], (data) => {
+  for (const [msgId, entry] of Object.entries(data.messageRunIds || {})) {
+    if (entry && entry.runId) messageRunIds.set(msgId, entry);
+  }
+});
 // The message currently being composed/edited — an ordered sequence of
 // items, each independently text or media(+its own caption). Sent one after
 // another to each chat before the campaign moves on to the next chat.
@@ -30,6 +48,34 @@ const PAUSE_ICON_SVG = '<svg viewBox="0 0 24 24" width="14" height="14"><path fi
 const PLAY_ICON_SVG = '<svg viewBox="0 0 24 24" width="14" height="14"><path fill="currentColor" d="M8 5v14l11-7z"/></svg>';
 const RUN_NOW_ICON_SVG =
   '<svg viewBox="0 0 24 24" width="14" height="14"><path fill="currentColor" d="M7 2v11h3v9l7-12h-4l4-8z"/></svg>';
+
+function renderProgressBlock(run) {
+  const doneCount = run.sent + run.failed;
+  const pct = run.total > 0 ? Math.round((doneCount / run.total) * 100) : 0;
+  const fillClass = run.failed > 0 ? 'progress-fill has-failures' : 'progress-fill';
+  const status = run.done
+    ? `<span class="progress-label done">Finished — ${run.sent} sent${run.failed ? `, ${run.failed} failed` : ''}</span>`
+    : `<span class="progress-label">${run.paused ? 'Paused — ' : ''}${doneCount}/${run.total} (${pct}%) — ${run.sent} sent${run.failed ? `, ${run.failed} failed` : ''}, ${run.total - doneCount} pending</span>`;
+  // Pause/resume is wired via a delegated document-level click listener
+  // (see below) rather than per-render, since this HTML is inserted via
+  // innerHTML from two different places (message send panel, campaign row).
+  const pauseBtn = !run.done
+    ? `<button class="icon-btn small-icon-btn progress-pause-btn" type="button" data-run-id="${run.id}" title="${run.paused ? 'Resume' : 'Pause'}">${run.paused ? PLAY_ICON_SVG : PAUSE_ICON_SVG}</button>`
+    : '';
+  return `<div class="progress-block">
+    <div class="progress-bar-row">
+      <div class="progress-bar"><div class="${fillClass}" style="width:${pct}%"></div></div>
+      ${pauseBtn}
+    </div>
+    ${status}
+  </div>`;
+}
+
+document.addEventListener('click', async (e) => {
+  const btn = e.target.closest('.progress-pause-btn');
+  if (!btn) return;
+  await call('togglePauseRun', { runId: btn.dataset.runId });
+});
 
 function downloadCsv(filename, chats) {
   const escapeCsv = (v) => {
@@ -57,6 +103,7 @@ async function refresh() {
     chatSource.set(c.waId, c);
   }
   applyTheme();
+  renderMasterToggle();
   renderMessages();
   renderListBuilder();
   renderLists();
@@ -94,6 +141,26 @@ document.getElementById('themeToggleBtn').addEventListener('click', async () => 
   const current = STATE.settings.theme || 'system';
   const next = order[(order.indexOf(current) + 1) % order.length];
   await call('saveSettings', { settings: { theme: next } });
+  refresh();
+});
+
+// ---------- master on/off switch ----------
+// Instant kill switch: off blocks any new send from starting and stops a
+// run already in progress (background.js checks this before every single
+// item, not just at the start of a campaign).
+function renderMasterToggle() {
+  const enabled = STATE.settings.masterEnabled !== false;
+  document.getElementById('masterToggleBtn').classList.toggle('off', !enabled);
+  document.getElementById('masterToggleBtn').title = enabled ? 'Turn the extension off' : 'Turn the extension on';
+  document.getElementById('masterOffBanner').style.display = enabled ? 'none' : '';
+}
+
+document.getElementById('masterToggleBtn').addEventListener('click', async () => {
+  const enabled = STATE.settings.masterEnabled !== false;
+  if (enabled) {
+    if (!confirm('Turn the extension off? This immediately stops any campaign or send in progress.')) return;
+  }
+  await call('saveSettings', { settings: { masterEnabled: !enabled } });
   refresh();
 });
 
@@ -331,7 +398,11 @@ function renderMessages() {
       </div>
     </div>`;
 
-    if (openSendPanelMessageId === m.id) {
+    // Auto-show the panel whenever this message has a tracked run — not
+    // just when the user manually toggled it open — so a live send's
+    // progress/pause button is visible without having to remember which
+    // message you sent and re-click its Send icon to find out.
+    if (openSendPanelMessageId === m.id || messageRunIds.has(m.id)) {
       li.appendChild(buildSendPanel(m));
     }
 
@@ -364,9 +435,47 @@ function renderMessages() {
 
 // Lightweight "send this saved message now" picker — reuses saved lists
 // (built in the Lists tab) instead of duplicating any list-building UI here.
+// Once a send is running, this panel switches to showing its live progress
+// (the storage.onChanged listener triggers refresh()/renderMessages() on
+// every count update, so no polling is needed here).
 function buildSendPanel(message) {
   const panel = document.createElement('div');
   panel.className = 'send-panel';
+
+  const entry = messageRunIds.get(message.id);
+  const runId = entry && entry.runId;
+  const run = runId ? STATE.activeRuns[runId] : null;
+  if (runId && !run) {
+    // Right after sendNow() responds, background.js hasn't necessarily
+    // written the run's progress record yet — that happens a moment later,
+    // inside runCampaign. Give it a few seconds' grace (well over how long
+    // that actually takes) before assuming this is instead a long-finished
+    // run background.js already pruned, so a fresh mapping doesn't get
+    // wiped out before the real data ever arrives.
+    if (Date.now() - (entry.assignedAt || 0) < 8000) {
+      panel.innerHTML = '<p class="hint">Starting…</p>';
+      return panel;
+    }
+    messageRunIds.delete(message.id);
+    saveMessageRunIds();
+  }
+  if (run) {
+    panel.innerHTML = `
+      ${renderProgressBlock(run)}
+      ${run.done ? '<button class="ghost small-inline" type="button" data-act="closeSend">Close</button>' : '<p class="hint">Sending — this updates live.</p>'}
+    `;
+    const closeBtn = panel.querySelector('[data-act="closeSend"]');
+    if (closeBtn) {
+      closeBtn.addEventListener('click', () => {
+        messageRunIds.delete(message.id);
+        saveMessageRunIds();
+        openSendPanelMessageId = null;
+        renderMessages();
+      });
+    }
+    return panel;
+  }
+
   if (STATE.lists.length === 0) {
     panel.innerHTML = '<p class="hint">Build a list in the Lists tab first.</p>';
     return panel;
@@ -384,6 +493,8 @@ function buildSendPanel(message) {
     <p class="hint">Sends immediately using your Paced delay settings (Safety tab).</p>
   `;
   panel.querySelector('[data-act="cancelSend"]').addEventListener('click', () => {
+    messageRunIds.delete(message.id);
+    saveMessageRunIds();
     openSendPanelMessageId = null;
     renderMessages();
   });
@@ -393,10 +504,12 @@ function buildSendPanel(message) {
       alert('Pick at least one list.');
       return;
     }
-    await call('sendNow', { messageId: message.id, listIds });
-    openSendPanelMessageId = null;
-    alert('Sending started — check the Log tab for progress.');
-    document.querySelector('[data-tab="log"]').click();
+    const res = await call('sendNow', { messageId: message.id, listIds });
+    if (res.ok && res.runId) {
+      messageRunIds.set(message.id, { runId: res.runId, assignedAt: Date.now() });
+      saveMessageRunIds();
+    }
+    renderMessages();
   });
   return panel;
 }
@@ -832,7 +945,8 @@ function renderCampaignList() {
         <button class="icon-btn small-icon-btn" data-act="run" type="button" title="Run now">${RUN_NOW_ICON_SVG}</button>
         <button class="icon-btn small-icon-btn danger" data-act="del" type="button" title="Delete">${DELETE_ICON_SVG}</button>
       </div>
-    </div>`;
+    </div>
+    ${STATE.activeRuns[c.id] ? renderProgressBlock(STATE.activeRuns[c.id]) : ''}`;
     li.querySelector('[data-act="edit"]').addEventListener('click', () => {
       editingCampaignId = c.id;
       document.getElementById('campName').value = c.name;

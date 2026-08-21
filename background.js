@@ -7,7 +7,8 @@ const DEFAULT_SETTINGS = {
   defaultDelayBetweenMsMs: [20000, 45000], // human-ish gap between consecutive sends
   defaultDelayBetweenListsMs: [30000, 60000], // gap before starting the next list in a campaign
   consentAccepted: false,
-  theme: 'system' // 'system' | 'light' | 'dark'
+  theme: 'system', // 'system' | 'light' | 'dark'
+  masterEnabled: true // instant kill switch — off blocks new sends and stops any run in progress
 };
 
 // ---------- storage helpers ----------
@@ -51,7 +52,8 @@ async function getState() {
     'messages',
     'campaigns',
     'log',
-    'settings'
+    'settings',
+    'activeRuns'
   ]);
   return {
     fetchedChats: data.fetchedChats || [],
@@ -59,7 +61,8 @@ async function getState() {
     messages: (data.messages || []).map(migrateMessage),
     campaigns: (data.campaigns || []).map(migrateCampaign),
     log: data.log || [],
-    settings: { ...DEFAULT_SETTINGS, ...(data.settings || {}) }
+    settings: { ...DEFAULT_SETTINGS, ...(data.settings || {}) },
+    activeRuns: data.activeRuns || {}
   };
 }
 
@@ -130,6 +133,52 @@ function randomBetween([min, max]) {
   return min + Math.random() * (max - min);
 }
 
+// Live progress for a running campaign or "send now", read by the popup via
+// STATE.activeRuns (chrome.storage.onChanged already makes the popup
+// re-render on every change, so no polling is needed on that end). Keyed by
+// campaign id — for an ad-hoc send that's the transient `adhoc-...` id
+// generated for that one run, returned to the popup so it can look itself up.
+async function startActiveRun(runId, name, total) {
+  const { activeRuns } = await getState();
+  const pruned = {};
+  for (const [id, run] of Object.entries(activeRuns)) {
+    // Sweep out old finished runs opportunistically so storage doesn't
+    // accumulate them — no dedicated cleanup job needed.
+    if (!run.done || Date.now() - (run.finishedAt || 0) < 60000) pruned[id] = run;
+  }
+  pruned[runId] = { id: runId, name, total, sent: 0, failed: 0, done: false, startedAt: Date.now() };
+  await setState({ activeRuns: pruned });
+}
+
+async function bumpActiveRun(runId, field) {
+  const { activeRuns } = await getState();
+  const run = activeRuns[runId];
+  if (!run) return;
+  await setState({ activeRuns: { ...activeRuns, [runId]: { ...run, [field]: run[field] + 1 } } });
+}
+
+async function finishActiveRun(runId) {
+  const { activeRuns } = await getState();
+  const run = activeRuns[runId];
+  if (!run) return;
+  await setState({ activeRuns: { ...activeRuns, [runId]: { ...run, done: true, finishedAt: Date.now() } } });
+}
+
+// Polled before every send: the master switch stops a run outright (used
+// for the "instantly kill" toggle), pausing a specific run just blocks
+// until resumed. Re-reads storage each time so an external toggle click
+// mid-run is noticed on the next item rather than requiring a restart.
+async function waitToProceedOrStop(runId) {
+  while (true) {
+    const { settings, activeRuns } = await getState();
+    if (!settings.masterEnabled) return 'stopped';
+    const run = activeRuns[runId];
+    if (!run || run.done) return 'stopped'; // deleted/finished from elsewhere
+    if (!run.paused) return 'proceed';
+    await new Promise((r) => setTimeout(r, 2000));
+  }
+}
+
 async function sendOneItem(waId, item) {
   const tab = await ensureWaTab();
   const ready = await pingContentScript(tab.id);
@@ -152,6 +201,10 @@ async function sendOneItem(waId, item) {
 
 async function runCampaign(campaign) {
   const { messages, lists, settings } = await getState();
+  if (!settings.masterEnabled) {
+    await appendLog({ campaignId: campaign.id, campaignName: campaign.name, status: 'error', detail: 'Skipped: extension is switched off.' });
+    return;
+  }
   const message = messages.find((m) => m.id === campaign.messageId);
   if (!message) {
     await appendLog({ campaignId: campaign.id, campaignName: campaign.name, status: 'error', detail: 'Message no longer exists.' });
@@ -170,8 +223,12 @@ async function runCampaign(campaign) {
 
   let totalSent = 0;
   let totalFailed = 0;
+  const totalCount = targetLists.reduce((sum, list) => sum + (list.members || []).length * items.length, 0);
+  await startActiveRun(campaign.id, campaign.name, totalCount);
 
-  for (let li = 0; li < targetLists.length; li++) {
+  let stopped = false;
+
+  for (let li = 0; li < targetLists.length && !stopped; li++) {
     const list = targetLists[li];
     const targets = list.members || [];
 
@@ -185,6 +242,16 @@ async function runCampaign(campaign) {
     }
 
     for (let i = 0; i < queue.length; i++) {
+      // Checked before every single send: the master switch (instant kill)
+      // or this run being paused both block here, re-reading storage each
+      // time so a toggle clicked mid-run takes effect on the very next item
+      // instead of needing the whole campaign restarted.
+      const outcome = await waitToProceedOrStop(campaign.id);
+      if (outcome === 'stopped') {
+        stopped = true;
+        break;
+      }
+
       const { target, item, itemIndex } = queue[i];
       const itemLabel = items.length > 1 ? ` (item ${itemIndex + 1}/${items.length})` : '';
       let sent = false;
@@ -192,6 +259,7 @@ async function runCampaign(campaign) {
         await sendOneItem(target.waId, item);
         sent = true;
         totalSent++;
+        await bumpActiveRun(campaign.id, 'sent');
         await appendLog({
           campaignId: campaign.id,
           campaignName: campaign.name,
@@ -201,6 +269,7 @@ async function runCampaign(campaign) {
         });
       } catch (err) {
         totalFailed++;
+        await bumpActiveRun(campaign.id, 'failed');
         await appendLog({
           campaignId: campaign.id,
           campaignName: campaign.name,
@@ -217,21 +286,31 @@ async function runCampaign(campaign) {
       }
     }
 
-    if (li < targetLists.length - 1) {
+    if (!stopped && li < targetLists.length - 1) {
       const delayRange = campaign.useDefaultDelay ? settings.defaultDelayBetweenListsMs : campaign.delayBetweenListsMs || settings.defaultDelayBetweenListsMs;
       await new Promise((r) => setTimeout(r, randomBetween(delayRange)));
     }
   }
 
+  if (stopped) {
+    await appendLog({
+      campaignId: campaign.id,
+      campaignName: campaign.name,
+      status: 'error',
+      detail: 'Stopped: extension switched off mid-run.'
+    });
+  }
+
   await setState({
     messages: messages.map((m) => (m.id === message.id ? { ...m, lastSentAt: Date.now() } : m))
   });
+  await finishActiveRun(campaign.id);
 
   chrome.notifications.create(uid(), {
     type: 'basic',
     iconUrl: 'icons/icon128.png',
     title: 'WhatsApp Scheduler',
-    message: `Campaign "${campaign.name}" finished: ${totalSent} sent, ${totalFailed} failed.`
+    message: `Campaign "${campaign.name}" ${stopped ? 'stopped' : 'finished'}: ${totalSent} sent, ${totalFailed} failed.`
   });
 }
 
@@ -514,7 +593,11 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
           break;
         }
         case 'runCampaignNow': {
-          const { campaigns } = await getState();
+          const { campaigns, settings } = await getState();
+          if (!settings.masterEnabled) {
+            sendResponse({ ok: false, error: 'Extension is switched off — turn it back on in the header first.' });
+            break;
+          }
           const campaign = campaigns.find((c) => c.id === msg.id);
           if (!campaign) {
             sendResponse({ ok: false, error: 'Campaign not found.' });
@@ -530,6 +613,10 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
         // delay/logging/notification behavior without being saved/scheduled.
         case 'sendNow': {
           const { messages, settings } = await getState();
+          if (!settings.masterEnabled) {
+            sendResponse({ ok: false, error: 'Extension is switched off — turn it back on in the header first.' });
+            break;
+          }
           const message = messages.find((m) => m.id === msg.messageId);
           if (!message) {
             sendResponse({ ok: false, error: 'Message not found.' });
@@ -539,8 +626,9 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
             sendResponse({ ok: false, error: 'Pick at least one list.' });
             break;
           }
+          const runId = `adhoc-${uid()}`;
           runCampaign({
-            id: `adhoc-${uid()}`,
+            id: runId,
             name: `Manual send: ${message.name}`,
             messageId: message.id,
             listIds: msg.listIds,
@@ -548,12 +636,24 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
             delayBetweenMsMs: settings.defaultDelayBetweenMsMs,
             delayBetweenListsMs: settings.defaultDelayBetweenListsMs
           });
-          sendResponse({ ok: true });
+          sendResponse({ ok: true, runId });
           break;
         }
 
         case 'clearLog': {
           await setState({ log: [] });
+          sendResponse({ ok: true });
+          break;
+        }
+
+        case 'togglePauseRun': {
+          const { activeRuns } = await getState();
+          const run = activeRuns[msg.runId];
+          if (!run || run.done) {
+            sendResponse({ ok: false, error: 'That run is no longer active.' });
+            break;
+          }
+          await setState({ activeRuns: { ...activeRuns, [msg.runId]: { ...run, paused: !run.paused } } });
           sendResponse({ ok: true });
           break;
         }

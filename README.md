@@ -50,10 +50,12 @@ store review, for the same ToS reasons noted above).
   sending to a new chat) before moving on to the next chat — no need to run
   separate messages/campaigns manually. Each saved message also has a
   **Send** icon to fire it off immediately at one or more saved lists,
-  without setting up a full scheduled campaign. Edit or delete any saved
-  message; each tracks when it was last sent. The compose form is also a
-  **persistent draft** — an unsaved label/text/items survives closing the
-  popup and picks back up next time you open it, until you Save or Cancel.
+  without setting up a full scheduled campaign — the panel shows a live
+  progress bar (sent/failed/pending, %) while it runs, updating in real
+  time. Edit or delete any saved message; each tracks when it was last
+  sent. The compose form is also a **persistent draft** — an unsaved
+  label/text/items survives closing the popup and picks back up next time
+  you open it, until you Save or Cancel.
 - **Lists tab** — open web.whatsapp.com in a normal tab, choose **Groups**,
   **Contacts**, **Communities**, **Chats**, or **All**, then click **Scan**:
   - Groups comes from every group you're a member of.
@@ -90,12 +92,22 @@ store review, for the same ToS reasons noted above).
   Delay defaults to the Safety tab's settings — untick **Use default delay**
   to set a custom delay range (between messages, and before starting the
   next list) just for this campaign. Pause/resume, run immediately, or
-  delete any campaign.
+  delete any campaign. A campaign shows a live progress bar under it
+  whenever it's actively running (scheduled or via Run now).
 - **Log tab** — history of what was sent, when, to which chat, and whether
   it succeeded or failed. **Clear log** wipes it.
 - **Safety tab** — the consent checkbox, jitter (± minutes around a fixed
   scheduled time), default delay ranges, and a light/dark/system appearance
   toggle matching WhatsApp Web's own theme.
+- **Master on/off switch** (top-right, next to the appearance toggle) — an
+  instant kill switch. Turning it off blocks any new send from starting and
+  stops whatever's currently running, checked before every single item (not
+  just when a campaign/send starts) so it takes effect within one send, not
+  after the whole thing finishes. A red banner shows while it's off.
+- Any active send or campaign shows a live **progress bar** (sent/failed/
+  pending, %) with its own **Pause/Resume** button — pausing waits before
+  the next item rather than stopping outright, so you can resume right
+  where it left off.
 - The popup reopens on whichever tab you last had open.
 
 ## How it works technically
@@ -186,18 +198,33 @@ existing lists once: **Scan**, search/select, and re-save each list
 - Media caption support depends on `WPP.chat.sendFileMessage`'s own
   `caption` option — very large files may be slow or rejected by WhatsApp's
   own upload limits, same as sending manually.
-- On accounts where a chat's local encryption session hasn't been fully
-  established yet (seen right after linking WhatsApp Web on a new browser),
-  WhatsApp Web's own internal code can throw `Cannot read properties of
-  null (reading 'rotateKey')` — a Signal Protocol session issue on
-  WhatsApp's end, not something this extension causes. Scanning works
-  around it by skipping metadata this extension doesn't need in the first
-  place (`ignoreGroupMetadata`); sending recovers from it reactively — if a
-  send hits this specific error, it opens the chat once
-  (`WPP.chat.openChatBottom`, mirroring a human clicking into it, which
-  appears to be what actually establishes the session) and retries that one
-  send, rather than doing it before every send and slowing all of them down
-  for a problem most sends never hit.
+- On some accounts, WhatsApp Web's own internal code can throw `Cannot read
+  properties of null (reading 'rotateKey')` — a Signal Protocol session
+  issue on WhatsApp's end (seen e.g. right after linking WhatsApp Web on a
+  new browser, before every chat's local session state has caught up), not
+  something this extension causes. Scanning works around it by skipping
+  metadata this extension doesn't need in the first place
+  (`ignoreGroupMetadata`). Sending recovers from it reactively: if a send
+  hits this error, it opens the chat once (`WPP.chat.openChatBottom`,
+  mirroring a human clicking into it, which appears to be what actually
+  establishes the session) and retries that one send, rather than doing it
+  before every send and slowing all of them down for a problem most sends
+  never hit. The admin-only-group check and Community redirect *do* need
+  real per-group metadata (unlike scanning) to do their job, so if metadata
+  resolution crashes there (e.g. because some other group in the account
+  has broken state, unrelated to the one actually being sent to) it's
+  treated as "couldn't check" and the send proceeds anyway, rather than
+  blocking every send in the account on an unrelated group's problem.
+- **Edge specifically** can put an inactive background tab to sleep
+  ("Sleeping tabs", enabled by default) after a period of idle time — since
+  this extension deliberately keeps the WhatsApp tab in the background so
+  it never steals focus, it's exactly the kind of tab that targets. Chrome
+  doesn't do this by default, which is why the same extension can behave
+  differently between the two browsers. If sends start failing partway
+  through a campaign on Edge with "WhatsApp Web tab is not ready," this is
+  the likely cause — add `web.whatsapp.com` to Edge's "Never put these
+  sites to sleep" list in `edge://settings/system`, or keep the WhatsApp
+  tab pinned/active yourself during a run.
 - A WhatsApp **Community** is implemented as a special group (the community
   wrapper) paired with a same-named announcement group underneath it. They're
   kept on separate scan scopes on purpose — the community wrapper only shows
