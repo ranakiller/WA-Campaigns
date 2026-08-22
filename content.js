@@ -42,6 +42,9 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
       } else if (msg.action === 'findContactByNumber') {
         const contact = await bridgeRequest('findContactByNumber', { number: msg.number }, 15000);
         sendResponse({ ok: true, contact });
+      } else if (msg.action === 'getActiveChat') {
+        const chat = await bridgeRequest('getActiveChat', {}, 10000);
+        sendResponse({ ok: true, chat });
       } else if (msg.action === 'sendMessage') {
         await bridgeRequest('sendMessage', { waId: msg.waId, text: msg.text }, 30000);
         sendResponse({ ok: true });

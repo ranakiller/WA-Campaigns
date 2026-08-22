@@ -46,13 +46,18 @@ store review, for the same ToS reasons noted above).
   documents in a single browse — each becomes its own item with its own
   caption (e.g. 10 airline package images, each with a different caption,
   all under one saved message). Reorder or remove items before saving. When
-  sent, every item goes to a chat one after another (with the same pacing as
-  sending to a new chat) before moving on to the next chat — no need to run
-  separate messages/campaigns manually. Each saved message also has a
-  **Send** icon to fire it off immediately at one or more saved lists,
-  without setting up a full scheduled campaign — the panel shows a live
-  progress bar (sent/failed/pending, %) while it runs, updating in real
-  time. Edit or delete any saved message; each tracks when it was last
+  sent, every item for a chat goes out back-to-back instantly (no delay
+  between items in the same chat). Your configured delay only applies when
+  moving on to the *next chat*. A checkbox ("Send a "➖" divider after each
+  item", on by default) controls whether each item is immediately followed
+  by its own standalone 2-line divider message — including after the very
+  last item — so the chat still reads clearly as separate threads; uncheck
+  it for messages where that's not wanted. Each saved message also has a
+  **Send** icon to fire it off immediately — either at one or more saved
+  lists, or with **Send to currently open chat**, which skips lists
+  entirely and sends only to whatever chat is open right now in the
+  WhatsApp Web tab. Either way the panel shows a live progress bar
+  (sent/failed/pending, %) while it runs, updating in real time. Edit or delete any saved message; each tracks when it was last
   sent. The compose form is also a **persistent draft** — an unsaved
   label/text/items survives closing the popup and picks back up next time
   you open it, until you Save or Cancel.
@@ -107,7 +112,9 @@ store review, for the same ToS reasons noted above).
 - Any active send or campaign shows a live **progress bar** (sent/failed/
   pending, %) with its own **Pause/Resume** button — pausing waits before
   the next item rather than stopping outright, so you can resume right
-  where it left off.
+  where it left off — and a **Reset** button to abandon a run outright
+  (typically one you paused and don't want to finish). Reset only stops
+  sending the rest; it doesn't re-send to chats already reached.
 - The popup reopens on whichever tab you last had open.
 
 ## How it works technically

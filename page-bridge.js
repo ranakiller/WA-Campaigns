@@ -293,6 +293,16 @@ async function handleRequest(action, payload) {
         number: chat.isGroup ? '' : chat.id.user || ''
       };
     }
+    case 'getActiveChat': {
+      const chat = window.WPP.chat.getActiveChat();
+      if (!chat || !chat.id) {
+        throw new Error('No chat is currently open in WhatsApp Web — open one first.');
+      }
+      return {
+        waId: chat.id._serialized,
+        name: chat.name || chat.formattedTitle || chat.id.user
+      };
+    }
     case 'sendMessage': {
       await withCommunityRedirect(payload.waId, (id) => window.WPP.chat.sendTextMessage(id, payload.text));
       return { sent: true };

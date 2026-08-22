@@ -163,10 +163,13 @@ button.ghost.small-inline { padding: 4px 8px; margin: 0; font-size: 11px; }
   margin: 3px 0 0;
   padding: 3px 6px;
   font-size: 11px;
+  font-family: inherit;
   border: 1px solid var(--border);
   border-radius: 4px;
   background: var(--bg-input);
   color: var(--text-primary);
+  resize: vertical;
+  min-height: 30px;
 }
 .composing-item-actions { display: flex; gap: 2px; flex-shrink: 0; }
 .composing-item-actions button {
@@ -227,7 +230,8 @@ button.ghost.small-inline { padding: 4px 8px; margin: 0; font-size: 11px; }
 }
 .progress-fill { background: var(--accent-bright); height: 100%; transition: width 0.3s ease; }
 .progress-fill.has-failures { background: var(--danger-fg); }
-.progress-pause-btn { width: 24px; height: 24px; background: var(--bg-hover); color: var(--accent); flex-shrink: 0; }
+.progress-pause-btn, .progress-reset-btn { width: 24px; height: 24px; flex-shrink: 0; }
+.progress-pause-btn { background: var(--bg-hover); color: var(--accent); }
 .progress-pause-btn:hover { background: var(--border); }
 .progress-label { font-size: 11px; color: var(--text-secondary); margin-top: 4px; display: block; }
 .progress-label.done { color: var(--success-fg); font-weight: 600; }

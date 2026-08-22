@@ -19,12 +19,18 @@ const DEFAULT_SETTINGS = {
 // Older stored messages are normalized to the new shape on read so nothing
 // needs a one-time migration step.
 function migrateMessage(m) {
-  if (Array.isArray(m.items)) return m;
-  const item =
-    m.kind === 'media' && m.media
-      ? { kind: 'media', media: m.media, caption: m.text || '' }
-      : { kind: 'text', text: m.text || '' };
-  return { ...m, items: [item] };
+  let next = m;
+  if (!Array.isArray(next.items)) {
+    const item =
+      next.kind === 'media' && next.media
+        ? { kind: 'media', media: next.media, caption: next.text || '' }
+        : { kind: 'text', text: next.text || '' };
+    next = { ...next, items: [item] };
+  }
+  if (next.sendDivider === undefined) {
+    next = { ...next, sendDivider: true };
+  }
+  return next;
 }
 
 // Campaigns used to have one schedule slot (a single daily time, or a
@@ -70,8 +76,26 @@ async function setState(partial) {
   await chrome.storage.local.set(partial);
 }
 
+// getState() reads every storage key at once, including `messages` — which
+// can hold multi-MB base64 media data URLs — so it's fine for the popup UI
+// but too heavy to call on every single send. These read only the one or
+// two small keys the send loop actually touches per item, which is what
+// keeps back-to-back sends in the same chat actually instant.
+async function getLogOnly() {
+  const data = await chrome.storage.local.get(['log']);
+  return data.log || [];
+}
+
+async function getRunControlState() {
+  const data = await chrome.storage.local.get(['settings', 'activeRuns']);
+  return {
+    settings: { ...DEFAULT_SETTINGS, ...(data.settings || {}) },
+    activeRuns: data.activeRuns || {}
+  };
+}
+
 async function appendLog(entry) {
-  const { log } = await getState();
+  const log = await getLogOnly();
   const next = [{ id: crypto.randomUUID(), timestamp: Date.now(), ...entry }, ...log].slice(
     0,
     300
@@ -139,7 +163,7 @@ function randomBetween([min, max]) {
 // campaign id — for an ad-hoc send that's the transient `adhoc-...` id
 // generated for that one run, returned to the popup so it can look itself up.
 async function startActiveRun(runId, name, total) {
-  const { activeRuns } = await getState();
+  const { activeRuns } = await getRunControlState();
   const pruned = {};
   for (const [id, run] of Object.entries(activeRuns)) {
     // Sweep out old finished runs opportunistically so storage doesn't
@@ -151,14 +175,14 @@ async function startActiveRun(runId, name, total) {
 }
 
 async function bumpActiveRun(runId, field) {
-  const { activeRuns } = await getState();
+  const { activeRuns } = await getRunControlState();
   const run = activeRuns[runId];
   if (!run) return;
   await setState({ activeRuns: { ...activeRuns, [runId]: { ...run, [field]: run[field] + 1 } } });
 }
 
 async function finishActiveRun(runId) {
-  const { activeRuns } = await getState();
+  const { activeRuns } = await getRunControlState();
   const run = activeRuns[runId];
   if (!run) return;
   await setState({ activeRuns: { ...activeRuns, [runId]: { ...run, done: true, finishedAt: Date.now() } } });
@@ -170,14 +194,19 @@ async function finishActiveRun(runId) {
 // mid-run is noticed on the next item rather than requiring a restart.
 async function waitToProceedOrStop(runId) {
   while (true) {
-    const { settings, activeRuns } = await getState();
-    if (!settings.masterEnabled) return 'stopped';
+    const { settings, activeRuns } = await getRunControlState();
+    if (!settings.masterEnabled) return 'master-off';
     const run = activeRuns[runId];
-    if (!run || run.done) return 'stopped'; // deleted/finished from elsewhere
+    if (!run || run.done) return 'reset'; // Reset button deletes the run — nothing else does mid-run
     if (!run.paused) return 'proceed';
     await new Promise((r) => setTimeout(r, 2000));
   }
 }
+
+// Sent as its own standalone text message immediately after every item/thread
+// in a chat (including the last one) so threads stay visually separated even
+// though they're sent back-to-back with no delay. Two lines, 8 dashes each.
+const THREAD_DIVIDER = '➖➖➖➖➖➖➖➖\n➖➖➖➖➖➖➖➖';
 
 async function sendOneItem(waId, item) {
   const tab = await ensureWaTab();
@@ -215,72 +244,122 @@ async function runCampaign(campaign) {
     await appendLog({ campaignId: campaign.id, campaignName: campaign.name, status: 'error', detail: 'Message has no content.' });
     return;
   }
-  const targetLists = lists.filter((l) => campaign.listIds.includes(l.id));
-  if (targetLists.length === 0) {
-    await appendLog({ campaignId: campaign.id, campaignName: campaign.name, status: 'error', detail: 'No valid lists.' });
-    return;
+  // A one-off "send to whatever chat is open right now" send bypasses saved
+  // lists entirely — it's given its single target directly instead of a
+  // listId to look up, wrapped as one synthetic list so every loop below
+  // (pacing, progress, logging, dividers) works unmodified either way.
+  let targetLists;
+  if (campaign.explicitTargets) {
+    targetLists = [{ id: 'explicit', name: campaign.name, members: campaign.explicitTargets }];
+  } else {
+    targetLists = lists.filter((l) => campaign.listIds.includes(l.id));
+    if (targetLists.length === 0) {
+      await appendLog({ campaignId: campaign.id, campaignName: campaign.name, status: 'error', detail: 'No valid lists.' });
+      return;
+    }
   }
 
   let totalSent = 0;
   let totalFailed = 0;
-  const totalCount = targetLists.reduce((sum, list) => sum + (list.members || []).length * items.length, 0);
+  // Each item is followed by its own divider send (when enabled), so double the per-item count.
+  const perTarget = message.sendDivider ? items.length * 2 : items.length;
+  const totalCount = targetLists.reduce((sum, list) => sum + (list.members || []).length * perTarget, 0);
   await startActiveRun(campaign.id, campaign.name, totalCount);
 
   let stopped = false;
+  let stopReason = null;
 
   for (let li = 0; li < targetLists.length && !stopped; li++) {
     const list = targetLists[li];
     const targets = list.members || [];
 
-    // Flatten (chat × item) into one queue so pacing is uniform whether
-    // consecutive sends are to different chats or multiple items landing
-    // in the same chat — e.g. 10 images to one group get the same
-    // between-send delay as sends to 10 different chats would.
-    const queue = [];
-    for (const target of targets) {
-      items.forEach((item, itemIndex) => queue.push({ target, item, itemIndex }));
-    }
+    for (let ti = 0; ti < targets.length; ti++) {
+      const target = targets[ti];
+      let sentAnyForTarget = false;
 
-    for (let i = 0; i < queue.length; i++) {
-      // Checked before every single send: the master switch (instant kill)
-      // or this run being paused both block here, re-reading storage each
-      // time so a toggle clicked mid-run takes effect on the very next item
-      // instead of needing the whole campaign restarted.
-      const outcome = await waitToProceedOrStop(campaign.id);
-      if (outcome === 'stopped') {
-        stopped = true;
-        break;
+      // All items ("threads") of the message go to this one chat back-to-back,
+      // with no configured delay between them — the paced delay only applies
+      // when moving on to the next chat, below.
+      for (let itemIndex = 0; itemIndex < items.length; itemIndex++) {
+        // Checked before every single send: the master switch (instant kill)
+        // or this run being paused both block here, re-reading storage each
+        // time so a toggle clicked mid-run takes effect on the very next item
+        // instead of needing the whole campaign restarted.
+        const outcome = await waitToProceedOrStop(campaign.id);
+        if (outcome !== 'proceed') {
+          stopped = true;
+          stopReason = outcome;
+          break;
+        }
+
+        const item = items[itemIndex];
+        const itemLabel = items.length > 1 ? ` (item ${itemIndex + 1}/${items.length})` : '';
+        let itemSent = false;
+        try {
+          await sendOneItem(target.waId, item);
+          itemSent = true;
+          sentAnyForTarget = true;
+          totalSent++;
+          await bumpActiveRun(campaign.id, 'sent');
+          await appendLog({
+            campaignId: campaign.id,
+            campaignName: campaign.name,
+            chatName: target.name,
+            status: 'success',
+            detail: `Sent${itemLabel}: "${(item.text || item.caption || '[media]').slice(0, 60)}"`
+          });
+        } catch (err) {
+          totalFailed++;
+          await bumpActiveRun(campaign.id, 'failed');
+          await appendLog({
+            campaignId: campaign.id,
+            campaignName: campaign.name,
+            chatName: target.name,
+            status: 'error',
+            detail: `${String(err.message || err)}${itemLabel}`
+          });
+        }
+
+        // Divider goes right after, as its own message, in the same chat —
+        // sent even after the very last item, and skipped only if the item
+        // itself never went out (nothing to separate), or if the message
+        // has divider sending turned off.
+        if (itemSent && message.sendDivider) {
+          const pauseCheck = await waitToProceedOrStop(campaign.id);
+          if (pauseCheck !== 'proceed') {
+            stopped = true;
+            stopReason = pauseCheck;
+            break;
+          }
+          try {
+            await sendOneItem(target.waId, { kind: 'text', text: THREAD_DIVIDER });
+            totalSent++;
+            await bumpActiveRun(campaign.id, 'sent');
+          } catch (err) {
+            totalFailed++;
+            await bumpActiveRun(campaign.id, 'failed');
+            await appendLog({
+              campaignId: campaign.id,
+              campaignName: campaign.name,
+              chatName: target.name,
+              status: 'error',
+              detail: `Divider failed: ${String(err.message || err)}${itemLabel}`
+            });
+          }
+        } else if (!itemSent && message.sendDivider) {
+          // Item never sent — the progress total still reserved a slot for
+          // the divider that won't happen, so mark it done (as a no-op) to
+          // keep the bar from stalling short of 100%.
+          totalFailed++;
+          await bumpActiveRun(campaign.id, 'failed');
+        }
       }
 
-      const { target, item, itemIndex } = queue[i];
-      const itemLabel = items.length > 1 ? ` (item ${itemIndex + 1}/${items.length})` : '';
-      let sent = false;
-      try {
-        await sendOneItem(target.waId, item);
-        sent = true;
-        totalSent++;
-        await bumpActiveRun(campaign.id, 'sent');
-        await appendLog({
-          campaignId: campaign.id,
-          campaignName: campaign.name,
-          chatName: target.name,
-          status: 'success',
-          detail: `Sent${itemLabel}: "${(item.text || item.caption || '[media]').slice(0, 60)}"`
-        });
-      } catch (err) {
-        totalFailed++;
-        await bumpActiveRun(campaign.id, 'failed');
-        await appendLog({
-          campaignId: campaign.id,
-          campaignName: campaign.name,
-          chatName: target.name,
-          status: 'error',
-          detail: `${String(err.message || err)}${itemLabel}`
-        });
-      }
-      // Only pace after a real send — a skipped/failed attempt didn't put
-      // anything on the wire, so there's nothing to space out.
-      if (sent && i < queue.length - 1) {
+      if (stopped) break;
+
+      // Pace before moving to the next chat — not after the last chat in this
+      // list, and only if something actually sent to this chat.
+      if (sentAnyForTarget && ti < targets.length - 1) {
         const delayRange = campaign.useDefaultDelay ? settings.defaultDelayBetweenMsMs : campaign.delayBetweenMsMs || settings.defaultDelayBetweenMsMs;
         await new Promise((r) => setTimeout(r, randomBetween(delayRange)));
       }
@@ -297,7 +376,7 @@ async function runCampaign(campaign) {
       campaignId: campaign.id,
       campaignName: campaign.name,
       status: 'error',
-      detail: 'Stopped: extension switched off mid-run.'
+      detail: stopReason === 'master-off' ? 'Stopped: extension switched off mid-run.' : 'Stopped: run was reset.'
     });
   }
 
@@ -640,6 +719,46 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
           break;
         }
 
+        // Sends to whichever chat is currently open in the WhatsApp Web tab,
+        // bypassing saved lists entirely — reuses runCampaign via a single
+        // explicit target so it still gets progress/logging/dividers/pacing.
+        case 'sendNowActiveChat': {
+          const { messages, settings } = await getState();
+          if (!settings.masterEnabled) {
+            sendResponse({ ok: false, error: 'Extension is switched off — turn it back on in the header first.' });
+            break;
+          }
+          const message = messages.find((m) => m.id === msg.messageId);
+          if (!message) {
+            sendResponse({ ok: false, error: 'Message not found.' });
+            break;
+          }
+          const tab = await ensureWaTab();
+          const ready = await pingContentScript(tab.id);
+          if (!ready) {
+            sendResponse({ ok: false, error: 'WhatsApp Web tab is not ready (make sure you are logged in and the page finished loading).' });
+            break;
+          }
+          const chatRes = await sendToTab(tab.id, { action: 'getActiveChat' }, 10000);
+          if (!chatRes || !chatRes.ok) {
+            sendResponse({ ok: false, error: (chatRes && chatRes.error) || 'Could not read the currently open chat.' });
+            break;
+          }
+          const chat = chatRes.chat;
+          const runId = `adhoc-${uid()}`;
+          runCampaign({
+            id: runId,
+            name: `Manual send: ${message.name} (current chat: ${chat.name})`,
+            messageId: message.id,
+            explicitTargets: [{ waId: chat.waId, name: chat.name }],
+            useDefaultDelay: true,
+            delayBetweenMsMs: settings.defaultDelayBetweenMsMs,
+            delayBetweenListsMs: settings.defaultDelayBetweenListsMs
+          });
+          sendResponse({ ok: true, runId, chatName: chat.name });
+          break;
+        }
+
         case 'clearLog': {
           await setState({ log: [] });
           sendResponse({ ok: true });
@@ -654,6 +773,20 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
             break;
           }
           await setState({ activeRuns: { ...activeRuns, [msg.runId]: { ...run, paused: !run.paused } } });
+          sendResponse({ ok: true });
+          break;
+        }
+
+        // Abandons a stuck/unwanted run (typically one paused mid-way) —
+        // deletes its progress record outright, which waitToProceedOrStop
+        // notices on the run's very next queued item and stops there. This
+        // does not re-send to chats it already reached, it just stops
+        // sending to the rest and clears the progress bar.
+        case 'resetRun': {
+          const { activeRuns } = await getState();
+          const next = { ...activeRuns };
+          delete next[msg.runId];
+          await setState({ activeRuns: next });
           sendResponse({ ok: true });
           break;
         }

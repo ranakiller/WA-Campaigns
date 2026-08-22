@@ -48,6 +48,7 @@ const PAUSE_ICON_SVG = '<svg viewBox="0 0 24 24" width="14" height="14"><path fi
 const PLAY_ICON_SVG = '<svg viewBox="0 0 24 24" width="14" height="14"><path fill="currentColor" d="M8 5v14l11-7z"/></svg>';
 const RUN_NOW_ICON_SVG =
   '<svg viewBox="0 0 24 24" width="14" height="14"><path fill="currentColor" d="M7 2v11h3v9l7-12h-4l4-8z"/></svg>';
+const RESET_ICON_SVG = '<svg viewBox="0 0 24 24" width="14" height="14"><path fill="currentColor" d="M6 6h12v12H6z"/></svg>';
 
 function renderProgressBlock(run) {
   const doneCount = run.sent + run.failed;
@@ -56,25 +57,34 @@ function renderProgressBlock(run) {
   const status = run.done
     ? `<span class="progress-label done">Finished — ${run.sent} sent${run.failed ? `, ${run.failed} failed` : ''}</span>`
     : `<span class="progress-label">${run.paused ? 'Paused — ' : ''}${doneCount}/${run.total} (${pct}%) — ${run.sent} sent${run.failed ? `, ${run.failed} failed` : ''}, ${run.total - doneCount} pending</span>`;
-  // Pause/resume is wired via a delegated document-level click listener
-  // (see below) rather than per-render, since this HTML is inserted via
-  // innerHTML from two different places (message send panel, campaign row).
-  const pauseBtn = !run.done
-    ? `<button class="icon-btn small-icon-btn progress-pause-btn" type="button" data-run-id="${run.id}" title="${run.paused ? 'Resume' : 'Pause'}">${run.paused ? PLAY_ICON_SVG : PAUSE_ICON_SVG}</button>`
+  // Pause/resume and reset are wired via a delegated document-level click
+  // listener (see below) rather than per-render, since this HTML is
+  // inserted via innerHTML from two different places (message send panel,
+  // campaign row).
+  const controls = !run.done
+    ? `<button class="icon-btn small-icon-btn progress-pause-btn" type="button" data-run-id="${run.id}" title="${run.paused ? 'Resume' : 'Pause'}">${run.paused ? PLAY_ICON_SVG : PAUSE_ICON_SVG}</button>
+       <button class="icon-btn small-icon-btn danger progress-reset-btn" type="button" data-run-id="${run.id}" title="Reset (stop and clear this run — doesn't re-send to chats already reached)">${RESET_ICON_SVG}</button>`
     : '';
   return `<div class="progress-block">
     <div class="progress-bar-row">
       <div class="progress-bar"><div class="${fillClass}" style="width:${pct}%"></div></div>
-      ${pauseBtn}
+      ${controls}
     </div>
     ${status}
   </div>`;
 }
 
 document.addEventListener('click', async (e) => {
-  const btn = e.target.closest('.progress-pause-btn');
-  if (!btn) return;
-  await call('togglePauseRun', { runId: btn.dataset.runId });
+  const pauseBtn = e.target.closest('.progress-pause-btn');
+  if (pauseBtn) {
+    await call('togglePauseRun', { runId: pauseBtn.dataset.runId });
+    return;
+  }
+  const resetBtn = e.target.closest('.progress-reset-btn');
+  if (resetBtn) {
+    if (!confirm("Reset this run? It stops sending the rest — chats already reached won't be re-sent to.")) return;
+    await call('resetRun', { runId: resetBtn.dataset.runId });
+  }
 });
 
 function downloadCsv(filename, chats) {
@@ -201,6 +211,7 @@ function saveDraft() {
       label: document.getElementById('msgLabel').value,
       text: document.getElementById('msgText').value,
       items: composingItems,
+      sendDivider: document.getElementById('msgSendDivider').checked,
       editingMessageId
     }
   });
@@ -219,6 +230,7 @@ function restoreDraft() {
     document.getElementById('msgLabel').value = draft.label || '';
     document.getElementById('msgText').value = draft.text || '';
     composingItems = draft.items || [];
+    document.getElementById('msgSendDivider').checked = draft.sendDivider !== false;
     editingMessageId = draft.editingMessageId || null;
     renderComposingItems();
     document.getElementById('saveMessageBtn').textContent = editingMessageId ? 'Update message' : 'Save message';
@@ -271,6 +283,7 @@ document.getElementById('addTextItemBtn').addEventListener('click', () => {
 });
 
 document.getElementById('msgLabel').addEventListener('input', saveDraft);
+document.getElementById('msgSendDivider').addEventListener('change', saveDraft);
 document.getElementById('msgText').addEventListener('input', saveDraft);
 
 function renderComposingItems() {
@@ -289,7 +302,7 @@ function renderComposingItems() {
           : escapeHtml(item.text.slice(0, 80));
       const captionField =
         item.kind === 'media'
-          ? `<input type="text" class="caption-input" data-idx="${i}" placeholder="Caption (optional)" value="${escapeHtml(item.caption || '')}" />`
+          ? `<textarea class="caption-input" data-idx="${i}" placeholder="Caption (optional)" rows="2">${escapeHtml(item.caption || '')}</textarea>`
           : '';
       return `<div class="composing-item">
         <span class="composing-item-icon">${icon}</span>
@@ -345,6 +358,7 @@ function resetMessageForm() {
   document.getElementById('msgLabel').value = '';
   document.getElementById('msgText').value = '';
   document.getElementById('msgFile').value = '';
+  document.getElementById('msgSendDivider').checked = true;
   renderComposingItems();
   document.getElementById('saveMessageBtn').textContent = 'Save message';
   document.getElementById('cancelEditMessageBtn').style.display = 'none';
@@ -361,7 +375,8 @@ document.getElementById('saveMessageBtn').addEventListener('click', async () => 
   }
   const first = composingItems[0];
   const name = label || (first.kind === 'media' ? first.media.filename : first.text.slice(0, 30));
-  const message = { id: editingMessageId, name, items: composingItems };
+  const sendDivider = document.getElementById('msgSendDivider').checked;
+  const message = { id: editingMessageId, name, items: composingItems, sendDivider };
   await call('saveMessage', { message });
   resetMessageForm();
   refresh();
@@ -419,6 +434,7 @@ function renderMessages() {
       document.getElementById('msgLabel').value = m.name;
       document.getElementById('msgText').value = '';
       composingItems = (m.items || []).map((item) => ({ ...item })); // clone so cancel doesn't mutate the saved copy
+      document.getElementById('msgSendDivider').checked = m.sendDivider !== false;
       renderComposingItems();
       document.getElementById('saveMessageBtn').textContent = 'Update message';
       document.getElementById('cancelEditMessageBtn').style.display = '';
@@ -476,11 +492,13 @@ function buildSendPanel(message) {
     return panel;
   }
 
-  if (STATE.lists.length === 0) {
-    panel.innerHTML = '<p class="hint">Build a list in the Lists tab first.</p>';
-    return panel;
-  }
   panel.innerHTML = `
+    <button class="ghost small-inline" type="button" data-act="sendActiveChat">Send to currently open chat</button>
+    <p class="hint">Sends only to whatever chat is open right now in the WhatsApp Web tab — no list needed.</p>
+    ${
+      STATE.lists.length === 0
+        ? ''
+        : `
     <div class="checklist">
       ${STATE.lists
         .map((l) => `<label><input type="checkbox" class="send-list-check" value="${l.id}" /> ${escapeHtml(l.name)} <span class="muted">(${(l.members || []).length})</span></label>`)
@@ -491,23 +509,41 @@ function buildSendPanel(message) {
       <button class="ghost small-inline" type="button" data-act="cancelSend">Cancel</button>
     </div>
     <p class="hint">Sends immediately using your Paced delay settings (Safety tab).</p>
-  `;
-  panel.querySelector('[data-act="cancelSend"]').addEventListener('click', () => {
-    messageRunIds.delete(message.id);
-    saveMessageRunIds();
-    openSendPanelMessageId = null;
-    renderMessages();
-  });
-  panel.querySelector('[data-act="confirmSend"]').addEventListener('click', async () => {
-    const listIds = Array.from(panel.querySelectorAll('.send-list-check:checked')).map((cb) => cb.value);
-    if (listIds.length === 0) {
-      alert('Pick at least one list.');
-      return;
+    `
     }
-    const res = await call('sendNow', { messageId: message.id, listIds });
+  `;
+  const cancelBtn = panel.querySelector('[data-act="cancelSend"]');
+  if (cancelBtn) {
+    cancelBtn.addEventListener('click', () => {
+      messageRunIds.delete(message.id);
+      saveMessageRunIds();
+      openSendPanelMessageId = null;
+      renderMessages();
+    });
+  }
+  const confirmBtn = panel.querySelector('[data-act="confirmSend"]');
+  if (confirmBtn) {
+    confirmBtn.addEventListener('click', async () => {
+      const listIds = Array.from(panel.querySelectorAll('.send-list-check:checked')).map((cb) => cb.value);
+      if (listIds.length === 0) {
+        alert('Pick at least one list.');
+        return;
+      }
+      const res = await call('sendNow', { messageId: message.id, listIds });
+      if (res.ok && res.runId) {
+        messageRunIds.set(message.id, { runId: res.runId, assignedAt: Date.now() });
+        saveMessageRunIds();
+      }
+      renderMessages();
+    });
+  }
+  panel.querySelector('[data-act="sendActiveChat"]').addEventListener('click', async () => {
+    const res = await call('sendNowActiveChat', { messageId: message.id });
     if (res.ok && res.runId) {
       messageRunIds.set(message.id, { runId: res.runId, assignedAt: Date.now() });
       saveMessageRunIds();
+    } else if (!res.ok) {
+      alert(res.error || 'Could not send to the currently open chat.');
     }
     renderMessages();
   });
