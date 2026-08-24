@@ -31,6 +31,19 @@ let editingMessageId = null;
 let editingListId = null;
 let editingCampaignId = null;
 
+// The divider checkbox appears in two independent places (the one-off Send
+// panel, and the campaign form) — each remembers its own last-used state
+// across popup opens, not tied to any one message/campaign. Loaded once
+// here (async), with a re-render once it resolves so anything already
+// painted with the checkbox's hardcoded default picks up the real value.
+let sendPanelDividerPref = true;
+let campaignDividerPref = true;
+chrome.storage.local.get(['sendPanelDividerPref', 'campaignDividerPref'], (data) => {
+  if (data.sendPanelDividerPref !== undefined) sendPanelDividerPref = data.sendPanelDividerPref;
+  if (data.campaignDividerPref !== undefined) campaignDividerPref = data.campaignDividerPref;
+  refresh();
+});
+
 // Chats seen via scan/manual-add. Backed by chrome.storage (STATE.fetchedChats)
 // so they survive the popup closing — refresh() merges storage into this map
 // on every load; "Clear fetched" is the only thing that empties it.
@@ -211,7 +224,6 @@ function saveDraft() {
       label: document.getElementById('msgLabel').value,
       text: document.getElementById('msgText').value,
       items: composingItems,
-      sendDivider: document.getElementById('msgSendDivider').checked,
       editingMessageId
     }
   });
@@ -230,7 +242,6 @@ function restoreDraft() {
     document.getElementById('msgLabel').value = draft.label || '';
     document.getElementById('msgText').value = draft.text || '';
     composingItems = draft.items || [];
-    document.getElementById('msgSendDivider').checked = draft.sendDivider !== false;
     editingMessageId = draft.editingMessageId || null;
     renderComposingItems();
     document.getElementById('saveMessageBtn').textContent = editingMessageId ? 'Update message' : 'Save message';
@@ -283,8 +294,31 @@ document.getElementById('addTextItemBtn').addEventListener('click', () => {
 });
 
 document.getElementById('msgLabel').addEventListener('input', saveDraft);
-document.getElementById('msgSendDivider').addEventListener('change', saveDraft);
 document.getElementById('msgText').addEventListener('input', saveDraft);
+
+// Fills in each media item's caption with its own file name (extension
+// stripped), but only where the caption is still empty — a quick starting
+// point for messages with many attachments, without clobbering captions
+// already typed in.
+function stripExtension(filename) {
+  const idx = filename.lastIndexOf('.');
+  return idx > 0 ? filename.slice(0, idx) : filename;
+}
+document.getElementById('fillCaptionsBtn').addEventListener('click', () => {
+  let filled = 0;
+  composingItems.forEach((item) => {
+    if (item.kind === 'media' && !item.caption) {
+      item.caption = stripExtension(item.media.filename);
+      filled++;
+    }
+  });
+  if (filled === 0) {
+    alert('No media items with an empty caption to fill.');
+    return;
+  }
+  renderComposingItems();
+  saveDraft();
+});
 
 function renderComposingItems() {
   document.getElementById('composingCount').textContent = String(composingItems.length);
@@ -358,7 +392,6 @@ function resetMessageForm() {
   document.getElementById('msgLabel').value = '';
   document.getElementById('msgText').value = '';
   document.getElementById('msgFile').value = '';
-  document.getElementById('msgSendDivider').checked = true;
   renderComposingItems();
   document.getElementById('saveMessageBtn').textContent = 'Save message';
   document.getElementById('cancelEditMessageBtn').style.display = 'none';
@@ -375,8 +408,7 @@ document.getElementById('saveMessageBtn').addEventListener('click', async () => 
   }
   const first = composingItems[0];
   const name = label || (first.kind === 'media' ? first.media.filename : first.text.slice(0, 30));
-  const sendDivider = document.getElementById('msgSendDivider').checked;
-  const message = { id: editingMessageId, name, items: composingItems, sendDivider };
+  const message = { id: editingMessageId, name, items: composingItems };
   await call('saveMessage', { message });
   resetMessageForm();
   refresh();
@@ -434,7 +466,6 @@ function renderMessages() {
       document.getElementById('msgLabel').value = m.name;
       document.getElementById('msgText').value = '';
       composingItems = (m.items || []).map((item) => ({ ...item })); // clone so cancel doesn't mutate the saved copy
-      document.getElementById('msgSendDivider').checked = m.sendDivider !== false;
       renderComposingItems();
       document.getElementById('saveMessageBtn').textContent = 'Update message';
       document.getElementById('cancelEditMessageBtn').style.display = '';
@@ -492,9 +523,36 @@ function buildSendPanel(message) {
     return panel;
   }
 
+  const items = message.items || [];
   panel.innerHTML = `
     <button class="ghost small-inline" type="button" data-act="sendActiveChat">Send to currently open chat</button>
     <p class="hint">Sends only to whatever chat is open right now in the WhatsApp Web tab — no list needed.</p>
+    ${
+      items.length <= 1
+        ? ''
+        : `
+    <p class="hint">Or send just one thread to the currently open chat:</p>
+    <div class="composing-list">
+      ${items
+        .map((item, idx) => {
+          const icon = item.kind === 'media' ? '📎' : '📝';
+          const preview = item.kind === 'media' ? escapeHtml(item.media.filename) : escapeHtml((item.text || '').slice(0, 60));
+          return `<div class="composing-item">
+            <span class="composing-item-icon">${icon}</span>
+            <div class="composing-item-body">
+              <div class="composing-item-preview">${preview}</div>
+            </div>
+            <div class="composing-item-actions">
+              <button class="icon-btn small-icon-btn" type="button" data-act="sendItemActiveChat" data-idx="${idx}" title="Send only this item to the currently open chat">
+                <svg viewBox="0 0 24 24" width="14" height="14"><path fill="currentColor" d="M2 21l21-9L2 3v7l15 2-15 2z"/></svg>
+              </button>
+            </div>
+          </div>`;
+        })
+        .join('')}
+    </div>
+    `
+    }
     ${
       STATE.lists.length === 0
         ? ''
@@ -507,6 +565,10 @@ function buildSendPanel(message) {
     <div class="send-panel-actions">
       <button class="primary" type="button" data-act="confirmSend">Send now</button>
       <button class="ghost small-inline" type="button" data-act="cancelSend">Cancel</button>
+      <label class="checkbox-row send-divider-check-row">
+        <input type="checkbox" class="send-divider-check" ${sendPanelDividerPref ? 'checked' : ''} />
+        Send a "➖" divider after each item
+      </label>
     </div>
     <p class="hint">Sends immediately using your Paced delay settings (Safety tab).</p>
     `
@@ -521,6 +583,13 @@ function buildSendPanel(message) {
       renderMessages();
     });
   }
+  const dividerCheck = panel.querySelector('.send-divider-check');
+  if (dividerCheck) {
+    dividerCheck.addEventListener('change', () => {
+      sendPanelDividerPref = dividerCheck.checked;
+      chrome.storage.local.set({ sendPanelDividerPref });
+    });
+  }
   const confirmBtn = panel.querySelector('[data-act="confirmSend"]');
   if (confirmBtn) {
     confirmBtn.addEventListener('click', async () => {
@@ -529,7 +598,8 @@ function buildSendPanel(message) {
         alert('Pick at least one list.');
         return;
       }
-      const res = await call('sendNow', { messageId: message.id, listIds });
+      const sendDivider = panel.querySelector('.send-divider-check').checked;
+      const res = await call('sendNow', { messageId: message.id, listIds, sendDivider });
       if (res.ok && res.runId) {
         messageRunIds.set(message.id, { runId: res.runId, assignedAt: Date.now() });
         saveMessageRunIds();
@@ -546,6 +616,19 @@ function buildSendPanel(message) {
       alert(res.error || 'Could not send to the currently open chat.');
     }
     renderMessages();
+  });
+  panel.querySelectorAll('[data-act="sendItemActiveChat"]').forEach((btn) => {
+    btn.addEventListener('click', async () => {
+      const itemIndex = Number(btn.dataset.idx);
+      const res = await call('sendItemToActiveChat', { messageId: message.id, itemIndex });
+      if (res.ok && res.runId) {
+        messageRunIds.set(message.id, { runId: res.runId, assignedAt: Date.now() });
+        saveMessageRunIds();
+      } else if (!res.ok) {
+        alert(res.error || 'Could not send that item to the currently open chat.');
+      }
+      renderMessages();
+    });
   });
   return panel;
 }
@@ -825,6 +908,10 @@ function setDelayFieldsDisabled(disabled) {
 document.getElementById('campUseDefaultDelay').addEventListener('change', (e) => {
   setDelayFieldsDisabled(e.target.checked);
 });
+document.getElementById('campSendDivider').addEventListener('change', (e) => {
+  campaignDividerPref = e.target.checked;
+  chrome.storage.local.set({ campaignDividerPref });
+});
 
 function resetCampaignForm() {
   editingCampaignId = null;
@@ -850,6 +937,7 @@ function resetCampaignForm() {
   document.getElementById('campDelayMax').value = Math.round(dMax / 1000);
   document.getElementById('campListDelayMin').value = Math.round(lMin / 1000);
   document.getElementById('campListDelayMax').value = Math.round(lMax / 1000);
+  document.getElementById('campSendDivider').checked = campaignDividerPref;
   document.getElementById('addCampaignBtn').textContent = 'Save campaign';
   document.getElementById('cancelEditCampaignBtn').style.display = 'none';
   renderCampaignForm();
@@ -899,6 +987,7 @@ document.getElementById('addCampaignBtn').addEventListener('click', async () => 
   if (listIds.length === 0) { alert('Pick at least one list.'); return; }
 
   const useDefaultDelay = document.getElementById('campUseDefaultDelay').checked;
+  const sendDivider = document.getElementById('campSendDivider').checked;
   const campaign = {
     id: editingCampaignId,
     name,
@@ -907,6 +996,7 @@ document.getElementById('addCampaignBtn').addEventListener('click', async () => 
     scheduleType: campScheduleType,
     enabled: true,
     useDefaultDelay,
+    sendDivider,
     delayBetweenMsMs: [
       secToMs(document.getElementById('campDelayMin').value, 20000),
       secToMs(document.getElementById('campDelayMax').value, 45000)
@@ -1009,6 +1099,7 @@ function renderCampaignList() {
       const useDefaultDelay = c.useDefaultDelay !== false;
       document.getElementById('campUseDefaultDelay').checked = useDefaultDelay;
       setDelayFieldsDisabled(useDefaultDelay);
+      document.getElementById('campSendDivider').checked = c.sendDivider !== false;
       const [dMin, dMax] = c.delayBetweenMsMs || [20000, 45000];
       const [lMin, lMax] = c.delayBetweenListsMs || [30000, 60000];
       document.getElementById('campDelayMin').value = Math.round(dMin / 1000);

@@ -19,18 +19,12 @@ const DEFAULT_SETTINGS = {
 // Older stored messages are normalized to the new shape on read so nothing
 // needs a one-time migration step.
 function migrateMessage(m) {
-  let next = m;
-  if (!Array.isArray(next.items)) {
-    const item =
-      next.kind === 'media' && next.media
-        ? { kind: 'media', media: next.media, caption: next.text || '' }
-        : { kind: 'text', text: next.text || '' };
-    next = { ...next, items: [item] };
-  }
-  if (next.sendDivider === undefined) {
-    next = { ...next, sendDivider: true };
-  }
-  return next;
+  if (Array.isArray(m.items)) return m;
+  const item =
+    m.kind === 'media' && m.media
+      ? { kind: 'media', media: m.media, caption: m.text || '' }
+      : { kind: 'text', text: m.text || '' };
+  return { ...m, items: [item] };
 }
 
 // Campaigns used to have one schedule slot (a single daily time, or a
@@ -38,6 +32,9 @@ function migrateMessage(m) {
 // have multiple daily times, a repeating interval, or multiple one-off
 // datetimes, and delay is either "use the Safety-tab defaults" or fully
 // custom — older stored campaigns are normalized to the new shape on read.
+// Whether to send a divider between items is also decided per-campaign (and
+// per one-off send) rather than baked into the message, so older stored
+// campaigns default to on (the original always-on behavior).
 function migrateCampaign(c) {
   let next = c;
   if (next.scheduleType === 'fixed') {
@@ -47,6 +44,9 @@ function migrateCampaign(c) {
   }
   if (next.useDefaultDelay === undefined) {
     next = { ...next, useDefaultDelay: !next.delayBetweenMsMs };
+  }
+  if (next.sendDivider === undefined) {
+    next = { ...next, sendDivider: true };
   }
   return next;
 }
@@ -203,10 +203,27 @@ async function waitToProceedOrStop(runId) {
   }
 }
 
-// Sent as its own standalone text message immediately after every item/thread
-// in a chat (including the last one) so threads stay visually separated even
-// though they're sent back-to-back with no delay. Two lines, 8 dashes each.
-const THREAD_DIVIDER = '➖➖➖➖➖➖➖➖\n➖➖➖➖➖➖➖➖';
+// Sent as its own standalone text message between items/threads in a chat
+// (never after the last one, never for a single-item message) so threads
+// stay visually separated even though they're sent back-to-back with no
+// delay. One line, 8 dashes.
+const THREAD_DIVIDER = '➖➖➖➖➖➖➖➖';
+
+// Looks up whichever chat is currently open in the WhatsApp Web tab, for the
+// "send to current chat" / "send this item to current chat" flows — shared
+// so both callers get the same tab-readiness handling and error messages.
+async function resolveActiveChatTarget() {
+  const tab = await ensureWaTab();
+  const ready = await pingContentScript(tab.id);
+  if (!ready) {
+    return { ok: false, error: 'WhatsApp Web tab is not ready (make sure you are logged in and the page finished loading).' };
+  }
+  const chatRes = await sendToTab(tab.id, { action: 'getActiveChat' }, 10000);
+  if (!chatRes || !chatRes.ok) {
+    return { ok: false, error: (chatRes && chatRes.error) || 'Could not read the currently open chat.' };
+  }
+  return { ok: true, chat: chatRes.chat };
+}
 
 async function sendOneItem(waId, item) {
   const tab = await ensureWaTab();
@@ -239,7 +256,13 @@ async function runCampaign(campaign) {
     await appendLog({ campaignId: campaign.id, campaignName: campaign.name, status: 'error', detail: 'Message no longer exists.' });
     return;
   }
-  const items = message.items || [];
+  // A "send just this one thread" send restricts to a single item out of
+  // the message instead of all of them — everything else (targets, pacing,
+  // logging) runs exactly the same either way.
+  const items =
+    campaign.onlyItemIndex !== undefined && campaign.onlyItemIndex !== null
+      ? (message.items || []).slice(campaign.onlyItemIndex, campaign.onlyItemIndex + 1)
+      : message.items || [];
   if (items.length === 0) {
     await appendLog({ campaignId: campaign.id, campaignName: campaign.name, status: 'error', detail: 'Message has no content.' });
     return;
@@ -261,8 +284,12 @@ async function runCampaign(campaign) {
 
   let totalSent = 0;
   let totalFailed = 0;
-  // Each item is followed by its own divider send (when enabled), so double the per-item count.
-  const perTarget = message.sendDivider ? items.length * 2 : items.length;
+  // A divider goes between items, not after the last one — so N items means
+  // N-1 dividers, and a single-item message gets none at all. Whether to
+  // send dividers at all is decided per-send (campaign.sendDivider), not
+  // stored on the message — every caller of runCampaign sets this explicitly.
+  const dividersPerTarget = campaign.sendDivider && items.length > 1 ? items.length - 1 : 0;
+  const perTarget = items.length + dividersPerTarget;
   const totalCount = targetLists.reduce((sum, list) => sum + (list.members || []).length * perTarget, 0);
   await startActiveRun(campaign.id, campaign.name, totalCount);
 
@@ -320,11 +347,13 @@ async function runCampaign(campaign) {
           });
         }
 
+        const needsDivider = campaign.sendDivider && itemIndex < items.length - 1;
+
         // Divider goes right after, as its own message, in the same chat —
-        // sent even after the very last item, and skipped only if the item
-        // itself never went out (nothing to separate), or if the message
-        // has divider sending turned off.
-        if (itemSent && message.sendDivider) {
+        // only between items (never after the last one, never for a
+        // single-item message), and skipped if the item itself never went
+        // out (nothing to separate).
+        if (itemSent && needsDivider) {
           const pauseCheck = await waitToProceedOrStop(campaign.id);
           if (pauseCheck !== 'proceed') {
             stopped = true;
@@ -346,7 +375,7 @@ async function runCampaign(campaign) {
               detail: `Divider failed: ${String(err.message || err)}${itemLabel}`
             });
           }
-        } else if (!itemSent && message.sendDivider) {
+        } else if (!itemSent && needsDivider) {
           // Item never sent — the progress total still reserved a slot for
           // the divider that won't happen, so mark it done (as a no-op) to
           // keep the bar from stalling short of 100%.
@@ -711,6 +740,7 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
             name: `Manual send: ${message.name}`,
             messageId: message.id,
             listIds: msg.listIds,
+            sendDivider: msg.sendDivider !== false,
             useDefaultDelay: true,
             delayBetweenMsMs: settings.defaultDelayBetweenMsMs,
             delayBetweenListsMs: settings.defaultDelayBetweenListsMs
@@ -733,24 +763,59 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
             sendResponse({ ok: false, error: 'Message not found.' });
             break;
           }
-          const tab = await ensureWaTab();
-          const ready = await pingContentScript(tab.id);
-          if (!ready) {
-            sendResponse({ ok: false, error: 'WhatsApp Web tab is not ready (make sure you are logged in and the page finished loading).' });
+          const active = await resolveActiveChatTarget();
+          if (!active.ok) {
+            sendResponse(active);
             break;
           }
-          const chatRes = await sendToTab(tab.id, { action: 'getActiveChat' }, 10000);
-          if (!chatRes || !chatRes.ok) {
-            sendResponse({ ok: false, error: (chatRes && chatRes.error) || 'Could not read the currently open chat.' });
-            break;
-          }
-          const chat = chatRes.chat;
+          const chat = active.chat;
           const runId = `adhoc-${uid()}`;
           runCampaign({
             id: runId,
             name: `Manual send: ${message.name} (current chat: ${chat.name})`,
             messageId: message.id,
             explicitTargets: [{ waId: chat.waId, name: chat.name }],
+            sendDivider: true,
+            useDefaultDelay: true,
+            delayBetweenMsMs: settings.defaultDelayBetweenMsMs,
+            delayBetweenListsMs: settings.defaultDelayBetweenListsMs
+          });
+          sendResponse({ ok: true, runId, chatName: chat.name });
+          break;
+        }
+
+        // Same as sendNowActiveChat but restricted to one item/thread out of
+        // the message — for sending just one image or one text of a
+        // multi-item message to the currently open chat.
+        case 'sendItemToActiveChat': {
+          const { messages, settings } = await getState();
+          if (!settings.masterEnabled) {
+            sendResponse({ ok: false, error: 'Extension is switched off — turn it back on in the header first.' });
+            break;
+          }
+          const message = messages.find((m) => m.id === msg.messageId);
+          if (!message) {
+            sendResponse({ ok: false, error: 'Message not found.' });
+            break;
+          }
+          if (!(message.items || [])[msg.itemIndex]) {
+            sendResponse({ ok: false, error: 'That item no longer exists on this message.' });
+            break;
+          }
+          const active = await resolveActiveChatTarget();
+          if (!active.ok) {
+            sendResponse(active);
+            break;
+          }
+          const chat = active.chat;
+          const runId = `adhoc-${uid()}`;
+          runCampaign({
+            id: runId,
+            name: `Manual send: ${message.name} item ${msg.itemIndex + 1} (current chat: ${chat.name})`,
+            messageId: message.id,
+            onlyItemIndex: msg.itemIndex,
+            explicitTargets: [{ waId: chat.waId, name: chat.name }],
+            sendDivider: true, // a single item never actually gets a divider — this is a no-op either way
             useDefaultDelay: true,
             delayBetweenMsMs: settings.defaultDelayBetweenMsMs,
             delayBetweenListsMs: settings.defaultDelayBetweenListsMs

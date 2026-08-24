@@ -55,11 +55,7 @@
 
       <label>Items in this message (<span id="composingCount">0</span>) — sent one after another to each chat</label>
       <div id="composingItems" class="composing-list"></div>
-
-      <label class="checkbox-row">
-        <input id="msgSendDivider" type="checkbox" checked />
-        Send a "➖" divider after each item
-      </label>
+      <button id="fillCaptionsBtn" class="ghost small-inline" type="button">Use file names as captions</button>
 
       <button id="saveMessageBtn" class="primary" type="button">Save message</button>
 
@@ -205,6 +201,11 @@
           <input id="campListDelayMin" type="number" min="1" max="600" disabled /> to
           <input id="campListDelayMax" type="number" min="1" max="600" disabled />
         </div>
+
+        <label class="checkbox-row">
+          <input id="campSendDivider" type="checkbox" checked />
+          Send a "➖" divider after each item
+        </label>
 
         <button id="addCampaignBtn" class="primary">Save campaign</button>
         <button id="cancelEditCampaignBtn" class="ghost" style="display:none">Cancel edit</button>

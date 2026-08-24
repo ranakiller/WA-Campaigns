@@ -48,15 +48,23 @@ store review, for the same ToS reasons noted above).
   all under one saved message). Reorder or remove items before saving. When
   sent, every item for a chat goes out back-to-back instantly (no delay
   between items in the same chat). Your configured delay only applies when
-  moving on to the *next chat*. A checkbox ("Send a "➖" divider after each
-  item", on by default) controls whether each item is immediately followed
-  by its own standalone 2-line divider message — including after the very
-  last item — so the chat still reads clearly as separate threads; uncheck
-  it for messages where that's not wanted. Each saved message also has a
-  **Send** icon to fire it off immediately — either at one or more saved
-  lists, or with **Send to currently open chat**, which skips lists
-  entirely and sends only to whatever chat is open right now in the
-  WhatsApp Web tab. Either way the panel shows a live progress bar
+  moving on to the *next chat*. A standalone 1-line "➖➖➖➖➖➖➖➖" divider
+  message can be sent *between* items — never after the last one, and never
+  for a single-item message — so a multi-item chat still reads clearly as
+  separate threads; this isn't a message-level setting, it's chosen at
+  send time (see below), since the same message might go out with or
+  without dividers depending on how it's sent. A "Use file names as
+  captions" button fills in each attached file's own name (extension
+  stripped) as its caption, for any media item whose caption is still empty
+  (won't overwrite one you've already typed). Each saved message also has a
+  **Send** icon to fire it off immediately — at one or more saved lists
+  (checkbox for the divider sits right next to Send now/Cancel — it
+  remembers its last-used state across popup opens), with
+  **Send to currently open chat** (skips lists entirely, sends the whole
+  message to whatever chat is open right now in the WhatsApp Web tab,
+  dividers on), or — for a multi-item message — sending just **one thread**
+  to that currently open chat via the small send icon next to that item.
+  Either way the panel shows a live progress bar
   (sent/failed/pending, %) while it runs, updating in real time. Edit or delete any saved message; each tracks when it was last
   sent. The compose form is also a **persistent draft** — an unsaved
   label/text/items survives closing the popup and picks back up next time
@@ -96,7 +104,10 @@ store review, for the same ToS reasons noted above).
     runs once, independently, then drops off the list.
   Delay defaults to the Safety tab's settings — untick **Use default delay**
   to set a custom delay range (between messages, and before starting the
-  next list) just for this campaign. Pause/resume, run immediately, or
+  next list) just for this campaign. A checkbox next to **Save campaign**
+  (remembers its last-used state across popup opens) controls whether that
+  campaign's multi-item messages get a divider between threads (see
+  Messages tab above). Pause/resume, run immediately, or
   delete any campaign. A campaign shows a live progress bar under it
   whenever it's actively running (scheduled or via Run now).
 - **Log tab** — history of what was sent, when, to which chat, and whether

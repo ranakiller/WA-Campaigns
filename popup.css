@@ -215,7 +215,8 @@ button.ghost.small-inline { padding: 4px 8px; margin: 0; font-size: 11px; }
   padding-top: 8px;
   border-top: 1px dashed var(--border);
 }
-.send-panel-actions { display: flex; gap: 6px; margin-top: 6px; }
+.send-panel-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; margin-top: 6px; }
+.send-panel-actions .send-divider-check-row { margin: 4px 0 0; width: 100%; }
 .send-panel-actions button.primary { padding: 6px 10px; font-size: 11px; }
 
 /* Live send/campaign progress. */
