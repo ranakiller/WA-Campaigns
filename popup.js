@@ -222,6 +222,7 @@ function saveDraft() {
   chrome.storage.local.set({
     messageDraft: {
       label: document.getElementById('msgLabel').value,
+      srNo: document.getElementById('msgSrNo').value,
       text: document.getElementById('msgText').value,
       items: composingItems,
       editingMessageId
@@ -240,6 +241,7 @@ function restoreDraft() {
     const hasContent = (draft.items && draft.items.length > 0) || draft.label || draft.text;
     if (!hasContent) return;
     document.getElementById('msgLabel').value = draft.label || '';
+    document.getElementById('msgSrNo').value = draft.srNo || '';
     document.getElementById('msgText').value = draft.text || '';
     composingItems = draft.items || [];
     editingMessageId = draft.editingMessageId || null;
@@ -320,6 +322,14 @@ document.getElementById('fillCaptionsBtn').addEventListener('click', () => {
   saveDraft();
 });
 
+document.getElementById('clearAllItemsBtn').addEventListener('click', () => {
+  if (composingItems.length === 0) return;
+  if (!confirm('Remove all items from this message?')) return;
+  composingItems = [];
+  renderComposingItems();
+  saveDraft();
+});
+
 function renderComposingItems() {
   document.getElementById('composingCount').textContent = String(composingItems.length);
   const box = document.getElementById('composingItems');
@@ -339,6 +349,7 @@ function renderComposingItems() {
           ? `<textarea class="caption-input" data-idx="${i}" placeholder="Caption (optional)" rows="2">${escapeHtml(item.caption || '')}</textarea>`
           : '';
       return `<div class="composing-item">
+        <input type="number" class="item-srno-input" data-idx="${i}" min="1" max="${composingItems.length}" value="${i + 1}" title="Thread number — change it to move this item to that position" />
         <span class="composing-item-icon">${icon}</span>
         <div class="composing-item-body">
           <div class="composing-item-preview">${preview}</div>
@@ -357,6 +368,23 @@ function renderComposingItems() {
     input.addEventListener('input', (e) => {
       composingItems[Number(e.target.dataset.idx)].caption = e.target.value;
       saveDraft();
+    });
+  });
+  // Typing a thread number moves that item to that position in the list —
+  // items are sent in this same array order, so reordering here directly
+  // controls send order, not just display.
+  box.querySelectorAll('.item-srno-input').forEach((input) => {
+    input.addEventListener('change', (e) => {
+      const from = Number(e.target.dataset.idx);
+      let to = Number(e.target.value) - 1;
+      if (!Number.isFinite(to)) to = from;
+      to = Math.max(0, Math.min(composingItems.length - 1, to));
+      if (to !== from) {
+        const [moved] = composingItems.splice(from, 1);
+        composingItems.splice(to, 0, moved);
+        saveDraft();
+      }
+      renderComposingItems();
     });
   });
   box.querySelectorAll('[data-act="remove"]').forEach((btn) => {
@@ -386,10 +414,19 @@ function renderComposingItems() {
   });
 }
 
+// Next unused serial number, suggested as the default for a new message so
+// it doesn't have to be typed by hand every time — one past whatever's
+// already the highest among saved messages.
+function nextSrNo() {
+  const max = STATE.messages.reduce((m, msg) => (typeof msg.srNo === 'number' ? Math.max(m, msg.srNo) : m), 0);
+  return max + 1;
+}
+
 function resetMessageForm() {
   editingMessageId = null;
   composingItems = [];
   document.getElementById('msgLabel').value = '';
+  document.getElementById('msgSrNo').value = nextSrNo();
   document.getElementById('msgText').value = '';
   document.getElementById('msgFile').value = '';
   renderComposingItems();
@@ -408,11 +445,47 @@ document.getElementById('saveMessageBtn').addEventListener('click', async () => 
   }
   const first = composingItems[0];
   const name = label || (first.kind === 'media' ? first.media.filename : first.text.slice(0, 30));
-  const message = { id: editingMessageId, name, items: composingItems };
+  const srNoRaw = document.getElementById('msgSrNo').value;
+  const srNo = srNoRaw !== '' ? Number(srNoRaw) : undefined;
+  const message = { id: editingMessageId, name, srNo, items: composingItems };
   await call('saveMessage', { message });
   resetMessageForm();
   refresh();
 });
+
+// Messages without a serial number sort after ones that have it (by
+// creation order among themselves), rather than being scattered in with
+// numbered ones at position 0.
+function sortMessagesBySrNo(messages) {
+  return messages.slice().sort((a, b) => {
+    const sa = typeof a.srNo === 'number' ? a.srNo : Infinity;
+    const sb = typeof b.srNo === 'number' ? b.srNo : Infinity;
+    if (sa !== sb) return sa - sb;
+    return (a.createdAt || 0) - (b.createdAt || 0);
+  });
+}
+
+// Reassigns every saved message's srNo to its position (1..N) in current
+// sort order, then swaps the srNo of the message at `id` with its neighbor
+// in the given direction. Normalizing first means reorder buttons work
+// sensibly even when srNo values were sparse/blank/duplicated, and every
+// subsequent move only has to touch the two swapped messages.
+async function moveMessage(id, direction) {
+  const sorted = sortMessagesBySrNo(STATE.messages);
+  const idx = sorted.findIndex((m) => m.id === id);
+  const swapIdx = direction === 'up' ? idx - 1 : idx + 1;
+  if (idx === -1 || swapIdx < 0 || swapIdx >= sorted.length) return;
+
+  const normalized = sorted.map((m, i) => ({ id: m.id, srNo: i + 1, original: m.srNo }));
+  [normalized[idx].srNo, normalized[swapIdx].srNo] = [normalized[swapIdx].srNo, normalized[idx].srNo];
+
+  for (const m of normalized) {
+    if (m.original !== m.srNo) {
+      await call('saveMessage', { message: { id: m.id, srNo: m.srNo } });
+    }
+  }
+  refresh();
+}
 
 function renderMessages() {
   const ul = document.getElementById('messageList');
@@ -420,7 +493,8 @@ function renderMessages() {
   if (STATE.messages.length === 0) {
     ul.innerHTML = '<li class="item-text">No saved messages yet.</li>';
   }
-  for (const m of STATE.messages) {
+  const sortedMessages = sortMessagesBySrNo(STATE.messages);
+  sortedMessages.forEach((m, idx) => {
     const li = document.createElement('li');
     const items = m.items || [];
     const first = items[0];
@@ -431,12 +505,15 @@ function renderMessages() {
       : '(empty)';
     const preview = items.length > 1 ? `${firstPreview} <span class="muted">+${items.length - 1} more item(s)</span>` : firstPreview;
     const lastSent = m.lastSentAt ? `Last sent ${new Date(m.lastSentAt).toLocaleString()}` : 'Never sent';
+    const srNoBadge = typeof m.srNo === 'number' ? `<span class="muted">#${m.srNo}</span> ` : '';
     li.innerHTML = `<div class="item-row">
       <div class="item-text">
-        <b>${escapeHtml(m.name)}</b><br/>${preview}<br/>
+        ${srNoBadge}<b>${escapeHtml(m.name)}</b><br/>${preview}<br/>
         <span class="log-time">${lastSent}</span>
       </div>
       <div class="item-actions">
+        <button class="icon-btn small-icon-btn" data-act="moveUp" type="button" title="Move up" ${idx === 0 ? 'disabled' : ''}>▲</button>
+        <button class="icon-btn small-icon-btn" data-act="moveDown" type="button" title="Move down" ${idx === sortedMessages.length - 1 ? 'disabled' : ''}>▼</button>
         <button class="icon-btn small-icon-btn" data-act="send" type="button" title="Send now">
           <svg viewBox="0 0 24 24" width="14" height="14"><path fill="currentColor" d="M2 21l21-9L2 3v7l15 2-15 2z"/></svg>
         </button>
@@ -464,6 +541,7 @@ function renderMessages() {
     li.querySelector('[data-act="edit"]').addEventListener('click', () => {
       editingMessageId = m.id;
       document.getElementById('msgLabel').value = m.name;
+      document.getElementById('msgSrNo').value = typeof m.srNo === 'number' ? m.srNo : '';
       document.getElementById('msgText').value = '';
       composingItems = (m.items || []).map((item) => ({ ...item })); // clone so cancel doesn't mutate the saved copy
       renderComposingItems();
@@ -476,8 +554,10 @@ function renderMessages() {
       await call('deleteMessage', { id: m.id });
       refresh();
     });
+    li.querySelector('[data-act="moveUp"]').addEventListener('click', () => moveMessage(m.id, 'up'));
+    li.querySelector('[data-act="moveDown"]').addEventListener('click', () => moveMessage(m.id, 'down'));
     ul.appendChild(li);
-  }
+  });
 }
 
 // Lightweight "send this saved message now" picker — reuses saved lists
@@ -525,24 +605,44 @@ function buildSendPanel(message) {
 
   const items = message.items || [];
   panel.innerHTML = `
-    <button class="ghost small-inline" type="button" data-act="sendActiveChat">Send to currently open chat</button>
-    <p class="hint">Sends only to whatever chat is open right now in the WhatsApp Web tab — no list needed.</p>
+    <div class="send-panel-top-row">
+      ${
+        items.length <= 1
+          ? ''
+          : `
+      <label class="checkbox-row send-item-select-all-row">
+        <input type="checkbox" class="send-item-select-all" checked />
+        Select all
+      </label>
+      `
+      }
+      <button class="icon-btn small-icon-btn send-active-chat-btn" type="button" data-act="sendActiveChat" title="Send to currently open chat — sends only to whatever chat is open right now in the WhatsApp Web tab, no list needed.">
+        <svg viewBox="0 0 24 24" width="16" height="16"><path fill="currentColor" d="M2 21l21-9L2 3v7l15 2-15 2z"/></svg>
+      </button>
+    </div>
     ${
       items.length <= 1
         ? ''
         : `
-    <p class="hint">Or send just one thread to the currently open chat:</p>
     <div class="composing-list">
       ${items
         .map((item, idx) => {
           const icon = item.kind === 'media' ? '📎' : '📝';
           const preview = item.kind === 'media' ? escapeHtml(item.media.filename) : escapeHtml((item.text || '').slice(0, 60));
           return `<div class="composing-item">
+            <input type="checkbox" class="send-item-select" data-idx="${idx}" checked />
             <span class="composing-item-icon">${icon}</span>
             <div class="composing-item-body">
               <div class="composing-item-preview">${preview}</div>
             </div>
             <div class="composing-item-actions">
+              ${
+                item.kind === 'media'
+                  ? `<button class="icon-btn small-icon-btn" type="button" data-act="openItemTab" data-idx="${idx}" title="Open this file in a new tab">
+                <svg viewBox="0 0 24 24" width="14" height="14"><path fill="currentColor" d="M19 19H5V5h7V3H5c-1.1 0-2 .9-2 2v14c0 1.1.9 2 2 2h14c1.1 0 2-.9 2-2v-7h-2v7zM14 3v2h3.59l-9.83 9.83 1.41 1.41L19 6.41V10h2V3h-7z"/></svg>
+              </button>`
+                  : ''
+              }
               <button class="icon-btn small-icon-btn" type="button" data-act="sendItemActiveChat" data-idx="${idx}" title="Send only this item to the currently open chat">
                 <svg viewBox="0 0 24 24" width="14" height="14"><path fill="currentColor" d="M2 21l21-9L2 3v7l15 2-15 2z"/></svg>
               </button>
@@ -590,6 +690,24 @@ function buildSendPanel(message) {
       chrome.storage.local.set({ sendPanelDividerPref });
     });
   }
+  const selectAllCheck = panel.querySelector('.send-item-select-all');
+  const itemSelectChecks = panel.querySelectorAll('.send-item-select');
+  if (selectAllCheck) {
+    selectAllCheck.addEventListener('change', () => {
+      itemSelectChecks.forEach((cb) => {
+        cb.checked = selectAllCheck.checked;
+      });
+    });
+    itemSelectChecks.forEach((cb) => {
+      cb.addEventListener('change', () => {
+        const checks = Array.from(itemSelectChecks);
+        const allChecked = checks.every((c) => c.checked);
+        const noneChecked = checks.every((c) => !c.checked);
+        selectAllCheck.checked = allChecked;
+        selectAllCheck.indeterminate = !allChecked && !noneChecked;
+      });
+    });
+  }
   const confirmBtn = panel.querySelector('[data-act="confirmSend"]');
   if (confirmBtn) {
     confirmBtn.addEventListener('click', async () => {
@@ -598,8 +716,19 @@ function buildSendPanel(message) {
         alert('Pick at least one list.');
         return;
       }
+      const itemChecks = panel.querySelectorAll('.send-item-select');
+      let itemIndexes;
+      if (itemChecks.length > 0) {
+        itemIndexes = Array.from(itemChecks)
+          .filter((cb) => cb.checked)
+          .map((cb) => Number(cb.dataset.idx));
+        if (itemIndexes.length === 0) {
+          alert('Select at least one item to send.');
+          return;
+        }
+      }
       const sendDivider = panel.querySelector('.send-divider-check').checked;
-      const res = await call('sendNow', { messageId: message.id, listIds, sendDivider });
+      const res = await call('sendNow', { messageId: message.id, listIds, itemIndexes, sendDivider });
       if (res.ok && res.runId) {
         messageRunIds.set(message.id, { runId: res.runId, assignedAt: Date.now() });
         saveMessageRunIds();
@@ -628,6 +757,14 @@ function buildSendPanel(message) {
         alert(res.error || 'Could not send that item to the currently open chat.');
       }
       renderMessages();
+    });
+  });
+  panel.querySelectorAll('[data-act="openItemTab"]').forEach((btn) => {
+    btn.addEventListener('click', () => {
+      const item = (message.items || [])[Number(btn.dataset.idx)];
+      if (item && item.media && item.media.dataUrl) {
+        chrome.tabs.create({ url: item.media.dataUrl });
+      }
     });
   });
   return panel;
@@ -954,8 +1091,9 @@ function renderCampaignForm() {
     ? (STATE.campaigns.find((c) => c.id === editingCampaignId) || {}).messageId
     : sel.value;
   sel.innerHTML =
-    STATE.messages.map((m) => `<option value="${m.id}">${escapeHtml(m.name)}</option>`).join('') ||
-    '<option value="">No messages saved</option>';
+    sortMessagesBySrNo(STATE.messages)
+      .map((m) => `<option value="${m.id}">${typeof m.srNo === 'number' ? `#${m.srNo} ` : ''}${escapeHtml(m.name)}</option>`)
+      .join('') || '<option value="">No messages saved</option>';
   if (desiredMessageId) sel.value = desiredMessageId;
 
   const checklist = document.getElementById('campListChecklist');
@@ -1135,13 +1273,69 @@ document.getElementById('clearLogBtn').addEventListener('click', async () => {
   refresh();
 });
 
+// Search text and the status filter persist across popup opens (own
+// storage keys, same pattern as lastTab) — kept in these JS vars as the
+// source of truth so renderLog() never has to touch the input's live value
+// itself (which would fight with the user mid-keystroke on every
+// storage-driven refresh() elsewhere in the popup).
+let logSearchQuery = '';
+let logStatusFilter = 'all';
+
+function updateLogSearchClearBtn() {
+  document.getElementById('logSearchClearBtn').classList.toggle('visible', logSearchQuery.length > 0);
+}
+
+chrome.storage.local.get(['logSearchQuery', 'logStatusFilter'], (data) => {
+  if (data.logSearchQuery) {
+    logSearchQuery = data.logSearchQuery;
+    document.getElementById('logSearchInput').value = logSearchQuery;
+  }
+  if (data.logStatusFilter) {
+    logStatusFilter = data.logStatusFilter;
+    document.getElementById('logStatusFilter').value = logStatusFilter;
+  }
+  updateLogSearchClearBtn();
+  refresh();
+});
+document.getElementById('logSearchInput').addEventListener('input', (e) => {
+  logSearchQuery = e.target.value;
+  chrome.storage.local.set({ logSearchQuery });
+  updateLogSearchClearBtn();
+  renderLog();
+});
+document.getElementById('logSearchClearBtn').addEventListener('click', () => {
+  logSearchQuery = '';
+  document.getElementById('logSearchInput').value = '';
+  chrome.storage.local.set({ logSearchQuery });
+  updateLogSearchClearBtn();
+  renderLog();
+});
+document.getElementById('logStatusFilter').addEventListener('change', (e) => {
+  logStatusFilter = e.target.value;
+  chrome.storage.local.set({ logStatusFilter });
+  renderLog();
+});
+
 function renderLog() {
   const ul = document.getElementById('logList');
+  const query = logSearchQuery.trim().toLowerCase();
+  const filtered = STATE.log.filter((l) => {
+    if (logStatusFilter !== 'all' && l.status !== logStatusFilter) return false;
+    if (query) {
+      // Includes the same formatted date/time string shown under each entry,
+      // so a search for e.g. "8/27", "1:13", or "pm" matches by when it ran,
+      // not just campaign/chat/message text.
+      const haystack = `${l.campaignName || ''} ${l.chatName || ''} ${l.detail || ''} ${new Date(l.timestamp).toLocaleString()}`.toLowerCase();
+      if (!haystack.includes(query)) return false;
+    }
+    return true;
+  });
+
   ul.innerHTML = '';
-  if (STATE.log.length === 0) {
-    ul.innerHTML = '<li class="item-text">No activity yet.</li>';
+  if (filtered.length === 0) {
+    ul.innerHTML = `<li class="item-text">${STATE.log.length === 0 ? 'No activity yet.' : 'No log entries match this search/filter.'}</li>`;
   }
-  for (const l of STATE.log) {
+  for (const l of filtered) {
     const li = document.createElement('li');
     li.innerHTML = `<div class="item-text">
       <span class="log-status-${l.status}">${l.status.toUpperCase()}</span>

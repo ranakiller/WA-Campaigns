@@ -41,11 +41,24 @@ store review, for the same ToS reasons noted above).
 
 ## What it does
 
-- **Messages tab** — a saved message is an ordered sequence of **items**:
+- **Messages tab** — a **Serial number** field (optional; suggests the next
+  unused number by default) controls display order — the Saved Messages
+  list and the Campaigns tab's message picker both sort by it ascending,
+  with unnumbered messages sorted after numbered ones. This only affects
+  ordering/display, not how sending itself works. Each saved message also
+  has **▲/▼** buttons to reorder it directly in the list, without typing a
+  number by hand — this renumbers every message to a clean 1..N first, so
+  it works sensibly even if some were unnumbered. A saved message is an
+  ordered sequence of **items**:
   add a text item (write it, tap **+**), or attach one or more images/
   documents in a single browse — each becomes its own item with its own
   caption (e.g. 10 airline package images, each with a different caption,
-  all under one saved message). Reorder or remove items before saving. When
+  all under one saved message). Reorder items with the ▲/▼ buttons, or type
+  a number directly into an item's own number box to jump it straight to
+  that position — either way, items are sent in this exact order, so
+  reordering here is reordering the send order. Remove items individually,
+  or clear all of them at once with the trash icon next to the item count.
+  When
   sent, every item for a chat goes out back-to-back instantly (no delay
   between items in the same chat). Your configured delay only applies when
   moving on to the *next chat*. A standalone 1-line "➖➖➖➖➖➖➖➖" divider
@@ -59,11 +72,16 @@ store review, for the same ToS reasons noted above).
   (won't overwrite one you've already typed). Each saved message also has a
   **Send** icon to fire it off immediately — at one or more saved lists
   (checkbox for the divider sits right next to Send now/Cancel — it
-  remembers its last-used state across popup opens), with
-  **Send to currently open chat** (skips lists entirely, sends the whole
-  message to whatever chat is open right now in the WhatsApp Web tab,
-  dividers on), or — for a multi-item message — sending just **one thread**
-  to that currently open chat via the small send icon next to that item.
+  remembers its last-used state across popup opens), or via the send-icon
+  button at the top-right of the panel (hover for its tooltip) which sends
+  the whole message to whatever chat is open right now in the WhatsApp Web
+  tab, no list needed. For a multi-item message, one shared item list
+  serves the rest: each item has its own checkbox (all checked by default,
+  with a "Select all" toggle next to that same top-right button)
+  controlling what's included in a list send, and its own ▶ button to send
+  just that one thread to the currently open chat — an image/PDF/document
+  item also gets an "open in a new tab" icon right before that button, to
+  preview the actual file before sending it.
   Either way the panel shows a live progress bar
   (sent/failed/pending, %) while it runs, updating in real time. Edit or delete any saved message; each tracks when it was last
   sent. The compose form is also a **persistent draft** — an unsaved
@@ -111,7 +129,11 @@ store review, for the same ToS reasons noted above).
   delete any campaign. A campaign shows a live progress bar under it
   whenever it's actively running (scheduled or via Run now).
 - **Log tab** — history of what was sent, when, to which chat, and whether
-  it succeeded or failed. **Clear log** wipes it.
+  it succeeded or failed. A search box (with a "✕" to clear it) matches
+  campaign name, chat name, message text, *and* the shown date/time — so
+  searching "8/27", "1:13", or "pm" filters by when it ran, too. A status
+  filter (success/error) narrows it further. Both remember their last-used
+  value across popup opens. **Clear log** wipes it.
 - **Safety tab** — the consent checkbox, jitter (± minutes around a fixed
   scheduled time), default delay ranges, and a light/dark/system appearance
   toggle matching WhatsApp Web's own theme.

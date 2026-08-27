@@ -256,13 +256,14 @@ async function runCampaign(campaign) {
     await appendLog({ campaignId: campaign.id, campaignName: campaign.name, status: 'error', detail: 'Message no longer exists.' });
     return;
   }
-  // A "send just this one thread" send restricts to a single item out of
-  // the message instead of all of them — everything else (targets, pacing,
-  // logging) runs exactly the same either way.
-  const items =
-    campaign.onlyItemIndex !== undefined && campaign.onlyItemIndex !== null
-      ? (message.items || []).slice(campaign.onlyItemIndex, campaign.onlyItemIndex + 1)
-      : message.items || [];
+  // Restricts to a chosen subset of the message's items instead of all of
+  // them — e.g. unchecking a couple of threads before a list send, or the
+  // "send just this one thread to the current chat" flow (a single-index
+  // array). Everything else (targets, pacing, logging, dividers) runs
+  // exactly the same either way, just over fewer items.
+  const items = Array.isArray(campaign.itemIndexes)
+    ? campaign.itemIndexes.map((i) => (message.items || [])[i]).filter(Boolean)
+    : message.items || [];
   if (items.length === 0) {
     await appendLog({ campaignId: campaign.id, campaignName: campaign.name, status: 'error', detail: 'Message has no content.' });
     return;
@@ -734,12 +735,17 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
             sendResponse({ ok: false, error: 'Pick at least one list.' });
             break;
           }
+          if (Array.isArray(msg.itemIndexes) && msg.itemIndexes.length === 0) {
+            sendResponse({ ok: false, error: 'Select at least one item to send.' });
+            break;
+          }
           const runId = `adhoc-${uid()}`;
           runCampaign({
             id: runId,
             name: `Manual send: ${message.name}`,
             messageId: message.id,
             listIds: msg.listIds,
+            itemIndexes: msg.itemIndexes,
             sendDivider: msg.sendDivider !== false,
             useDefaultDelay: true,
             delayBetweenMsMs: settings.defaultDelayBetweenMsMs,
@@ -813,7 +819,7 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
             id: runId,
             name: `Manual send: ${message.name} item ${msg.itemIndex + 1} (current chat: ${chat.name})`,
             messageId: message.id,
-            onlyItemIndex: msg.itemIndex,
+            itemIndexes: [msg.itemIndex],
             explicitTargets: [{ waId: chat.waId, name: chat.name }],
             sendDivider: true, // a single item never actually gets a divider — this is a no-op either way
             useDefaultDelay: true,

@@ -39,6 +39,9 @@
       <label for="msgLabel">Label (for your own reference)</label>
       <input id="msgLabel" type="text" placeholder="e.g. Weekly reminder" />
 
+      <label for="msgSrNo">Serial number (controls sort order in the list below)</label>
+      <input id="msgSrNo" type="number" min="1" step="1" placeholder="e.g. 1" />
+
       <div class="field-row-with-actions">
         <label for="msgText">Add a text item</label>
         <div class="field-row-icons">
@@ -53,7 +56,12 @@
       <textarea id="msgText" placeholder="Write a text item, then tap +..." rows="3"></textarea>
       <input id="msgFile" type="file" multiple style="display:none" accept="image/*,video/*,application/pdf,.doc,.docx,.xls,.xlsx,.ppt,.pptx,.zip" />
 
-      <label>Items in this message (<span id="composingCount">0</span>) — sent one after another to each chat</label>
+      <div class="row-with-action">
+        <label>Items in this message (<span id="composingCount">0</span>) — sent one after another to each chat</label>
+        <button id="clearAllItemsBtn" class="icon-btn small-icon-btn danger" type="button" title="Remove all items from this message">
+          <svg viewBox="0 0 24 24" width="14" height="14"><path fill="currentColor" d="M6 19a2 2 0 0 0 2 2h8a2 2 0 0 0 2-2V7H6v12ZM19 4h-3.5l-1-1h-5l-1 1H5v2h14V4Z"/></svg>
+        </button>
+      </div>
       <div id="composingItems" class="composing-list"></div>
       <button id="fillCaptionsBtn" class="ghost small-inline" type="button">Use file names as captions</button>
 
@@ -217,7 +225,18 @@
 
     <!-- LOG -->
     <section id="tab-log" class="tab-panel">
-      <button id="clearLogBtn" class="ghost">Clear log</button>
+      <div class="log-filter-row">
+        <div class="search-with-clear">
+          <input id="logSearchInput" type="text" placeholder="Search logs (campaign, chat, message, date/time)..." />
+          <button id="logSearchClearBtn" class="search-clear-btn" type="button" title="Clear search">✕</button>
+        </div>
+        <select id="logStatusFilter">
+          <option value="all">All statuses</option>
+          <option value="success">Success only</option>
+          <option value="error">Errors only</option>
+        </select>
+        <button id="clearLogBtn" class="ghost small-inline">Clear log</button>
+      </div>
       <ul id="logList" class="item-list"></ul>
     </section>
 
