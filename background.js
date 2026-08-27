@@ -8,7 +8,9 @@ const DEFAULT_SETTINGS = {
   defaultDelayBetweenListsMs: [30000, 60000], // gap before starting the next list in a campaign
   consentAccepted: false,
   theme: 'system', // 'system' | 'light' | 'dark'
-  masterEnabled: true // instant kill switch — off blocks new sends and stops any run in progress
+  masterEnabled: true, // instant kill switch — off blocks new sends and stops any run in progress
+  headerText: '', // prepended to the first item of every sent message (its caption, if the first item is media)
+  footerText: '' // appended to the last item of every sent message (its caption, if the last item is media)
 };
 
 // ---------- storage helpers ----------
@@ -209,6 +211,32 @@ async function waitToProceedOrStop(runId) {
 // delay. One line, 8 dashes.
 const THREAD_DIVIDER = '➖➖➖➖➖➖➖➖';
 
+// Joins whichever of header/content/footer are non-empty with a blank line
+// between each — so a missing header or empty caption never leaves a stray
+// leading/trailing blank line.
+function withHeaderFooter(content, headerText, footerText) {
+  const parts = [];
+  if (headerText) parts.push(headerText);
+  if (content) parts.push(content);
+  if (footerText) parts.push(footerText);
+  return parts.join('\n\n');
+}
+
+// Applies the global header/footer to every item of a message (text goes in
+// .text, media goes in .caption) — a fresh array so the underlying stored
+// message/items are never mutated.
+function applyHeaderFooter(items, settings) {
+  const headerText = (settings.headerText || '').trim();
+  const footerText = (settings.footerText || '').trim();
+  if (!headerText && !footerText) return items;
+  return items.map((item) => {
+    if (item.kind === 'media') {
+      return { ...item, caption: withHeaderFooter(item.caption || '', headerText, footerText) };
+    }
+    return { ...item, text: withHeaderFooter(item.text || '', headerText, footerText) };
+  });
+}
+
 // Looks up whichever chat is currently open in the WhatsApp Web tab, for the
 // "send to current chat" / "send this item to current chat" flows — shared
 // so both callers get the same tab-readiness handling and error messages.
@@ -268,6 +296,9 @@ async function runCampaign(campaign) {
     await appendLog({ campaignId: campaign.id, campaignName: campaign.name, status: 'error', detail: 'Message has no content.' });
     return;
   }
+  // Header/footer come from the global Safety-tab settings, not the campaign,
+  // and wrap every item/thread individually (text or, for media, caption).
+  const sendItems = applyHeaderFooter(items, settings);
   // A one-off "send to whatever chat is open right now" send bypasses saved
   // lists entirely — it's given its single target directly instead of a
   // listId to look up, wrapped as one synthetic list so every loop below
@@ -320,7 +351,7 @@ async function runCampaign(campaign) {
           break;
         }
 
-        const item = items[itemIndex];
+        const item = sendItems[itemIndex];
         const itemLabel = items.length > 1 ? ` (item ${itemIndex + 1}/${items.length})` : '';
         let itemSent = false;
         try {
@@ -769,6 +800,10 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
             sendResponse({ ok: false, error: 'Message not found.' });
             break;
           }
+          if (Array.isArray(msg.itemIndexes) && msg.itemIndexes.length === 0) {
+            sendResponse({ ok: false, error: 'Select at least one item to send.' });
+            break;
+          }
           const active = await resolveActiveChatTarget();
           if (!active.ok) {
             sendResponse(active);
@@ -780,8 +815,9 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
             id: runId,
             name: `Manual send: ${message.name} (current chat: ${chat.name})`,
             messageId: message.id,
+            itemIndexes: msg.itemIndexes,
             explicitTargets: [{ waId: chat.waId, name: chat.name }],
-            sendDivider: true,
+            sendDivider: msg.sendDivider !== false,
             useDefaultDelay: true,
             delayBetweenMsMs: settings.defaultDelayBetweenMsMs,
             delayBetweenListsMs: settings.defaultDelayBetweenListsMs

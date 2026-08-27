@@ -23,6 +23,60 @@ chrome.storage.local.get(['messageRunIds'], (data) => {
     if (entry && entry.runId) messageRunIds.set(msgId, entry);
   }
 });
+// Which items are unchecked in a message's send panel — kept in memory (not
+// persisted) so the checkboxes survive the re-render that follows every
+// send/click instead of snapping back to "all checked", which looked like
+// the selection had been silently discarded even though the send itself
+// correctly used whatever was checked at click time.
+const itemSelectionUnchecked = new Map(); // messageId -> Set<itemIndex>
+function uncheckedSetFor(messageId) {
+  let set = itemSelectionUnchecked.get(messageId);
+  if (!set) {
+    set = new Set();
+    itemSelectionUnchecked.set(messageId, set);
+  }
+  return set;
+}
+// Same idea as messageRunIds, but for the "send to current chat"/"send this
+// item to current chat" buttons — these are quick one-off sends, not a list
+// run, so instead of taking over the whole panel with a progress block they
+// turn their own button into a small round percentage indicator. Keyed by
+// message id (whole-message send) or `${messageId}:${itemIndex}` (one item).
+const activeChatRunIds = new Map();
+function saveActiveChatRunIds() {
+  chrome.storage.local.set({ activeChatRunIds: Object.fromEntries(activeChatRunIds) });
+}
+chrome.storage.local.get(['activeChatRunIds'], (data) => {
+  for (const [key, entry] of Object.entries(data.activeChatRunIds || {})) {
+    if (entry && entry.runId) activeChatRunIds.set(key, entry);
+  }
+});
+// Looks up the live run for one of those keys, clearing it out (and
+// persisting the clear) once it's done or once it's been too long to
+// plausibly still be "about to start" — so the button reverts to normal
+// without any lingering finished-state UI to dismiss.
+function activeChatRunFor(key) {
+  const entry = activeChatRunIds.get(key);
+  if (!entry) return null;
+  const run = STATE.activeRuns[entry.runId];
+  if (!run) {
+    if (Date.now() - (entry.assignedAt || 0) < 8000) return { starting: true, id: entry.runId };
+    activeChatRunIds.delete(key);
+    saveActiveChatRunIds();
+    return null;
+  }
+  if (run.done) {
+    activeChatRunIds.delete(key);
+    saveActiveChatRunIds();
+    return null;
+  }
+  return run;
+}
+function activeChatRunPct(run) {
+  if (!run || run.starting) return 0;
+  const done = (run.sent || 0) + (run.failed || 0);
+  return run.total ? Math.round((done / run.total) * 100) : 0;
+}
 // The message currently being composed/edited — an ordered sequence of
 // items, each independently text or media(+its own caption). Sent one after
 // another to each chat before the campaign moves on to the next chat.
@@ -87,7 +141,34 @@ function renderProgressBlock(run) {
   </div>`;
 }
 
+// A "send to current chat" style icon button, in its normal or its sending
+// state — sending replaces the arrow icon with a round percentage ring
+// (button itself becomes the progress indicator) instead of a separate
+// progress bar taking over the panel, since these are one-off sends. The
+// ring stays clickable while sending — clicking it stops that run (there's
+// no other pause/stop control visible for it once the progress bar is gone).
+function activeChatBtnHtml({ act, idx, extraClass = '', title, iconSvg, run, runKey }) {
+  const idxAttr = idx === undefined ? '' : ` data-idx="${idx}"`;
+  if (!run) {
+    return `<button class="icon-btn small-icon-btn ${extraClass}" type="button" data-act="${act}"${idxAttr} title="${escapeHtml(title)}">${iconSvg}</button>`;
+  }
+  const pct = activeChatRunPct(run);
+  return `<button class="icon-btn small-icon-btn sending-ring ${extraClass}" type="button" data-act="stopActiveChatSend" data-run-id="${run.id}" data-run-key="${runKey}" style="--pct:${pct}" title="Sending… ${pct}% — click to stop">
+    <span class="sending-ring-pct">${run.starting ? '' : pct + '%'}</span>
+  </button>`;
+}
+
 document.addEventListener('click', async (e) => {
+  const stopBtn = e.target.closest('[data-act="stopActiveChatSend"]');
+  if (stopBtn) {
+    if (confirm('Stop this send?')) {
+      await call('resetRun', { runId: stopBtn.dataset.runId });
+      activeChatRunIds.delete(stopBtn.dataset.runKey);
+      saveActiveChatRunIds();
+      refresh();
+    }
+    return;
+  }
   const pauseBtn = e.target.closest('.progress-pause-btn');
   if (pauseBtn) {
     await call('togglePauseRun', { runId: pauseBtn.dataset.runId });
@@ -212,6 +293,20 @@ chrome.storage.local.get(['lastTab'], (data) => {
 // separate text item. Nothing is "the" message until Save is pressed.
 
 let openSendPanelMessageId = null; // only one "send now" panel open at a time
+// Persisted (same pattern as lastTab/messageRunIds) so an expanded send panel
+// stays expanded across closing and reopening the popup instead of silently
+// collapsing back — the popup's JS state (including this variable) is
+// destroyed and rebuilt from scratch every time it's reopened.
+function setOpenSendPanel(id) {
+  openSendPanelMessageId = id;
+  chrome.storage.local.set({ openSendPanelMessageId: id });
+}
+chrome.storage.local.get(['openSendPanelMessageId'], (data) => {
+  if (data.openSendPanelMessageId) {
+    openSendPanelMessageId = data.openSendPanelMessageId;
+    refresh();
+  }
+});
 
 // The in-progress compose form (label, text box, staged items) is a popup
 // UI concern, not core app data — same pattern as lastTab — so it's read
@@ -535,7 +630,7 @@ function renderMessages() {
         alert('Accept the consent checkbox on the Campaigns or Safety tab first — sending is gated behind it, even for a one-off send.');
         return;
       }
-      openSendPanelMessageId = openSendPanelMessageId === m.id ? null : m.id;
+      setOpenSendPanel(openSendPanelMessageId === m.id ? null : m.id);
       renderMessages();
     });
     li.querySelector('[data-act="edit"]').addEventListener('click', () => {
@@ -596,7 +691,7 @@ function buildSendPanel(message) {
       closeBtn.addEventListener('click', () => {
         messageRunIds.delete(message.id);
         saveMessageRunIds();
-        openSendPanelMessageId = null;
+        setOpenSendPanel(null);
         renderMessages();
       });
     }
@@ -604,6 +699,8 @@ function buildSendPanel(message) {
   }
 
   const items = message.items || [];
+  const wholeSendRun = activeChatRunFor(`msg-${message.id}`);
+  const unchecked = uncheckedSetFor(message.id);
   panel.innerHTML = `
     <div class="send-panel-top-row">
       ${
@@ -611,14 +708,19 @@ function buildSendPanel(message) {
           ? ''
           : `
       <label class="checkbox-row send-item-select-all-row">
-        <input type="checkbox" class="send-item-select-all" checked />
+        <input type="checkbox" class="send-item-select-all" ${unchecked.size === 0 ? 'checked' : ''} ${unchecked.size > 0 && unchecked.size < items.length ? 'data-indeterminate="1"' : ''} />
         Select all
       </label>
       `
       }
-      <button class="icon-btn small-icon-btn send-active-chat-btn" type="button" data-act="sendActiveChat" title="Send to currently open chat — sends only to whatever chat is open right now in the WhatsApp Web tab, no list needed.">
-        <svg viewBox="0 0 24 24" width="16" height="16"><path fill="currentColor" d="M2 21l21-9L2 3v7l15 2-15 2z"/></svg>
-      </button>
+      ${activeChatBtnHtml({
+        act: 'sendActiveChat',
+        extraClass: 'send-active-chat-btn',
+        title: 'Send to currently open chat — sends only to whatever chat is open right now in the WhatsApp Web tab, no list needed.',
+        iconSvg: '<svg viewBox="0 0 24 24" width="16" height="16"><path fill="currentColor" d="M2 21l21-9L2 3v7l15 2-15 2z"/></svg>',
+        run: wholeSendRun,
+        runKey: `msg-${message.id}`
+      })}
     </div>
     ${
       items.length <= 1
@@ -630,7 +732,7 @@ function buildSendPanel(message) {
           const icon = item.kind === 'media' ? '📎' : '📝';
           const preview = item.kind === 'media' ? escapeHtml(item.media.filename) : escapeHtml((item.text || '').slice(0, 60));
           return `<div class="composing-item">
-            <input type="checkbox" class="send-item-select" data-idx="${idx}" checked />
+            <input type="checkbox" class="send-item-select" data-idx="${idx}" ${unchecked.has(idx) ? '' : 'checked'} />
             <span class="composing-item-icon">${icon}</span>
             <div class="composing-item-body">
               <div class="composing-item-preview">${preview}</div>
@@ -643,9 +745,14 @@ function buildSendPanel(message) {
               </button>`
                   : ''
               }
-              <button class="icon-btn small-icon-btn" type="button" data-act="sendItemActiveChat" data-idx="${idx}" title="Send only this item to the currently open chat">
-                <svg viewBox="0 0 24 24" width="14" height="14"><path fill="currentColor" d="M2 21l21-9L2 3v7l15 2-15 2z"/></svg>
-              </button>
+              ${activeChatBtnHtml({
+                act: 'sendItemActiveChat',
+                idx,
+                title: 'Send only this item to the currently open chat',
+                iconSvg: '<svg viewBox="0 0 24 24" width="14" height="14"><path fill="currentColor" d="M2 21l21-9L2 3v7l15 2-15 2z"/></svg>',
+                run: activeChatRunFor(`msg-${message.id}:${idx}`),
+                runKey: `msg-${message.id}:${idx}`
+              })}
             </div>
           </div>`;
         })
@@ -679,7 +786,7 @@ function buildSendPanel(message) {
     cancelBtn.addEventListener('click', () => {
       messageRunIds.delete(message.id);
       saveMessageRunIds();
-      openSendPanelMessageId = null;
+      setOpenSendPanel(null);
       renderMessages();
     });
   }
@@ -693,13 +800,18 @@ function buildSendPanel(message) {
   const selectAllCheck = panel.querySelector('.send-item-select-all');
   const itemSelectChecks = panel.querySelectorAll('.send-item-select');
   if (selectAllCheck) {
+    selectAllCheck.indeterminate = selectAllCheck.hasAttribute('data-indeterminate');
     selectAllCheck.addEventListener('change', () => {
       itemSelectChecks.forEach((cb) => {
         cb.checked = selectAllCheck.checked;
+        if (selectAllCheck.checked) unchecked.delete(Number(cb.dataset.idx));
+        else unchecked.add(Number(cb.dataset.idx));
       });
     });
     itemSelectChecks.forEach((cb) => {
       cb.addEventListener('change', () => {
+        if (cb.checked) unchecked.delete(Number(cb.dataset.idx));
+        else unchecked.add(Number(cb.dataset.idx));
         const checks = Array.from(itemSelectChecks);
         const allChecked = checks.every((c) => c.checked);
         const noneChecked = checks.every((c) => !c.checked);
@@ -736,23 +848,39 @@ function buildSendPanel(message) {
       renderMessages();
     });
   }
-  panel.querySelector('[data-act="sendActiveChat"]').addEventListener('click', async () => {
-    const res = await call('sendNowActiveChat', { messageId: message.id });
-    if (res.ok && res.runId) {
-      messageRunIds.set(message.id, { runId: res.runId, assignedAt: Date.now() });
-      saveMessageRunIds();
-    } else if (!res.ok) {
-      alert(res.error || 'Could not send to the currently open chat.');
-    }
-    renderMessages();
-  });
+  const sendActiveChatBtn = panel.querySelector('[data-act="sendActiveChat"]');
+  if (sendActiveChatBtn) {
+    sendActiveChatBtn.addEventListener('click', async () => {
+      const dividerCb = panel.querySelector('.send-divider-check');
+      const sendDivider = dividerCb ? dividerCb.checked : sendPanelDividerPref;
+      const itemChecks = panel.querySelectorAll('.send-item-select');
+      let itemIndexes;
+      if (itemChecks.length > 0) {
+        itemIndexes = Array.from(itemChecks)
+          .filter((cb) => cb.checked)
+          .map((cb) => Number(cb.dataset.idx));
+        if (itemIndexes.length === 0) {
+          alert('Select at least one item to send.');
+          return;
+        }
+      }
+      const res = await call('sendNowActiveChat', { messageId: message.id, sendDivider, itemIndexes });
+      if (res.ok && res.runId) {
+        activeChatRunIds.set(`msg-${message.id}`, { runId: res.runId, assignedAt: Date.now() });
+        saveActiveChatRunIds();
+      } else if (!res.ok) {
+        alert(res.error || 'Could not send to the currently open chat.');
+      }
+      renderMessages();
+    });
+  }
   panel.querySelectorAll('[data-act="sendItemActiveChat"]').forEach((btn) => {
     btn.addEventListener('click', async () => {
       const itemIndex = Number(btn.dataset.idx);
       const res = await call('sendItemToActiveChat', { messageId: message.id, itemIndex });
       if (res.ok && res.runId) {
-        messageRunIds.set(message.id, { runId: res.runId, assignedAt: Date.now() });
-        saveMessageRunIds();
+        activeChatRunIds.set(`msg-${message.id}:${itemIndex}`, { runId: res.runId, assignedAt: Date.now() });
+        saveActiveChatRunIds();
       } else if (!res.ok) {
         alert(res.error || 'Could not send that item to the currently open chat.');
       }
@@ -1360,6 +1488,8 @@ function renderSettings() {
   document.getElementById('listDelayMax').value = Math.round(lmax / 1000);
   document.getElementById('themeSelect').value = s.theme || 'system';
   document.getElementById('consentCheckboxSettings').checked = !!s.consentAccepted;
+  document.getElementById('headerText').value = s.headerText || '';
+  document.getElementById('footerText').value = s.footerText || '';
 }
 
 document.getElementById('saveSettingsBtn').addEventListener('click', async () => {
@@ -1370,13 +1500,17 @@ document.getElementById('saveSettingsBtn').addEventListener('click', async () =>
   const lmax = secToMs(document.getElementById('listDelayMax').value, 60000);
   const theme = document.getElementById('themeSelect').value;
   const consentAccepted = document.getElementById('consentCheckboxSettings').checked;
+  const headerText = document.getElementById('headerText').value;
+  const footerText = document.getElementById('footerText').value;
   await call('saveSettings', {
     settings: {
       jitterMinutes,
       defaultDelayBetweenMsMs: [min, Math.max(min, max)],
       defaultDelayBetweenListsMs: [lmin, Math.max(lmin, lmax)],
       theme,
-      consentAccepted
+      consentAccepted,
+      headerText,
+      footerText
     }
   });
   refresh();

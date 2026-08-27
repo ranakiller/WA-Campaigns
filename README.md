@@ -82,8 +82,16 @@ store review, for the same ToS reasons noted above).
   just that one thread to the currently open chat — an image/PDF/document
   item also gets an "open in a new tab" icon right before that button, to
   preview the actual file before sending it.
-  Either way the panel shows a live progress bar
-  (sent/failed/pending, %) while it runs, updating in real time. Edit or delete any saved message; each tracks when it was last
+  The item checkboxes control both what a list send includes and what the
+  whole-message "send to current chat" button sends — only checked items go
+  out either way. A list send shows a live progress bar (sent/failed/pending,
+  %) under the panel while it runs. Sending to the current chat — whole
+  message or a single thread — skips that panel-wide progress bar instead:
+  the button you clicked turns into a small round percentage ring in place
+  of its icon until the send finishes, without disturbing the rest of the
+  panel. Hover that ring and click it (with a confirm) to stop the send
+  early — since there's no progress bar there to hold a pause/stop button.
+  Edit or delete any saved message; each tracks when it was last
   sent. The compose form is also a **persistent draft** — an unsaved
   label/text/items survives closing the popup and picks back up next time
   you open it, until you Save or Cancel.
@@ -135,8 +143,12 @@ store review, for the same ToS reasons noted above).
   filter (success/error) narrows it further. Both remember their last-used
   value across popup opens. **Clear log** wipes it.
 - **Safety tab** — the consent checkbox, jitter (± minutes around a fixed
-  scheduled time), default delay ranges, and a light/dark/system appearance
-  toggle matching WhatsApp Web's own theme.
+  scheduled time), default delay ranges, a light/dark/system appearance
+  toggle matching WhatsApp Web's own theme, and an optional message
+  header/footer. When set, the header and footer are added to *every*
+  item/thread of every sent message — text items in the text, media items
+  in the caption — each separated from that item's own content by a blank
+  line. Leave either empty to skip it.
 - **Master on/off switch** (top-right, next to the appearance toggle) — an
   instant kill switch. Turning it off blocks any new send from starting and
   stops whatever's currently running, checked before every single item (not

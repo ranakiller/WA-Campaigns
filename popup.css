@@ -124,6 +124,36 @@ body {
 .small-icon-btn:hover { background: var(--border); }
 .small-icon-btn.danger { background: var(--danger-bg); color: var(--danger-fg); }
 .small-icon-btn.danger:hover { filter: brightness(0.92); }
+.icon-btn.sending-ring {
+  position: relative;
+  background: conic-gradient(var(--accent) calc(var(--pct) * 1%), var(--border) 0);
+  cursor: pointer;
+  transition: background 0.25s ease;
+}
+.icon-btn.sending-ring::before {
+  content: '';
+  position: absolute;
+  inset: 3px;
+  border-radius: 50%;
+  background: var(--bg-panel);
+}
+.icon-btn.sending-ring:hover::before { background: var(--danger-bg); }
+.sending-ring-pct {
+  position: relative;
+  z-index: 1;
+  font-size: 8px;
+  font-weight: 700;
+  color: var(--text-primary);
+  line-height: 1;
+}
+/* Hovering a while-sending ring hints that clicking it stops the send. */
+.icon-btn.sending-ring:hover .sending-ring-pct { font-size: 0; }
+.icon-btn.sending-ring:hover .sending-ring-pct::after {
+  content: '✕';
+  font-size: 12px;
+  font-weight: 700;
+  color: var(--danger-fg);
+}
 button.ghost.small-inline { padding: 4px 8px; margin: 0; font-size: 11px; }
 
 /* A label row with one or more icon-button actions docked to its right —

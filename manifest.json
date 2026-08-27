@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "WhatsApp Message Scheduler",
-  "version": "4.13.1",
+  "version": "4.15.3",
   "description": "Save lists of your own WhatsApp groups/contacts, build text/media message campaigns, and schedule them safely — driven by WhatsApp Web's own internal API (via WPPConnect/wa-js) instead of simulated clicks.",
   "permissions": ["storage", "unlimitedStorage", "alarms", "tabs", "notifications"],
   "host_permissions": ["https://web.whatsapp.com/*"],
