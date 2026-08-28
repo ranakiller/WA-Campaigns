@@ -1,0 +1,12 @@
+rules_version = '2';
+
+// Paste this into Firebase Console → Storage → Rules → Publish.
+// Same idea as firestore.rules: a signed-in user can only read/write media
+// files under their own uid's folder.
+service firebase.storage {
+  match /b/{bucket}/o {
+    match /users/{uid}/media/{fileId} {
+      allow read, write: if request.auth != null && request.auth.uid == uid;
+    }
+  }
+}

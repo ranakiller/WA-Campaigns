@@ -46,11 +46,14 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
         const chat = await bridgeRequest('getActiveChat', {}, 10000);
         sendResponse({ ok: true, chat });
       } else if (msg.action === 'sendMessage') {
-        await bridgeRequest('sendMessage', { waId: msg.waId, text: msg.text }, 30000);
-        sendResponse({ ok: true });
+        const result = await bridgeRequest('sendMessage', { waId: msg.waId, text: msg.text }, 30000);
+        sendResponse({ ok: true, ...result });
       } else if (msg.action === 'sendMedia') {
-        await bridgeRequest('sendMedia', { waId: msg.waId, media: msg.media, caption: msg.caption }, 45000);
-        sendResponse({ ok: true });
+        const result = await bridgeRequest('sendMedia', { waId: msg.waId, media: msg.media, caption: msg.caption }, 45000);
+        sendResponse({ ok: true, ...result });
+      } else if (msg.action === 'deleteMessage') {
+        const result = await bridgeRequest('deleteMessage', { waId: msg.waId, msgId: msg.msgId }, 20000);
+        sendResponse({ ok: true, ...result });
       } else {
         sendResponse({ ok: false, error: 'Unknown action' });
       }

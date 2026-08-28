@@ -1,5 +1,11 @@
 // background.js — service worker: owns storage, scheduling (chrome.alarms),
 // and talks to the content script running inside the WhatsApp Web tab.
+// Must be the first import — installs an XMLHttpRequest shim that the
+// Firebase SDK (imported transitively below) needs to work at all in a
+// service worker. See xhr-polyfill.js for why.
+import './xhr-polyfill.js';
+import { signInWithGoogle, silentSignIn, signOutEverywhere, watchAuthState, currentUser } from './auth.js';
+import { SYNC_KEYS, syncPush, reconcileAll, attachRealtimeListeners, detachRealtimeListeners } from './sync.js';
 
 const WA_URL_PATTERN = 'https://web.whatsapp.com/*';
 const DEFAULT_SETTINGS = {
@@ -10,8 +16,35 @@ const DEFAULT_SETTINGS = {
   theme: 'system', // 'system' | 'light' | 'dark'
   masterEnabled: true, // instant kill switch — off blocks new sends and stops any run in progress
   headerText: '', // prepended to the first item of every sent message (its caption, if the first item is media)
-  footerText: '' // appended to the last item of every sent message (its caption, if the last item is media)
+  footerText: '', // appended to the last item of every sent message (its caption, if the last item is media)
+  syncEnabled: false // real-time Firebase sync of messages/lists/campaigns/log/settings, off by default
 };
+
+// Mirrors Firebase Auth's current user into chrome.storage.local (as plain
+// {uid, email, displayName, photoURL} | null) so popup.js can read sign-in
+// state the exact same way it reads everything else — via getState() and
+// the existing storage.onChanged -> refresh() live-update path — instead of
+// needing its own separate channel to the Auth SDK, which never runs in the
+// popup at all (see auth.js).
+watchAuthState(async (user) => {
+  const authUser = user ? { uid: user.uid, email: user.email, displayName: user.displayName, photoURL: user.photoURL } : null;
+  await chrome.storage.local.set({ authUser });
+  if (user) {
+    const { settings } = await getRunControlState();
+    if (settings.syncEnabled) {
+      await reconcileAll();
+      attachRealtimeListeners();
+    }
+  } else {
+    detachRealtimeListeners();
+  }
+});
+
+// Every service worker start (extension load, browser start, or waking back
+// up after being idled out) re-establishes its own Firebase session from
+// whatever token Chrome already has cached — silent, no UI — so sync keeps
+// working across restarts without asking the user to sign in again.
+silentSignIn();
 
 // ---------- storage helpers ----------
 
@@ -34,9 +67,11 @@ function migrateMessage(m) {
 // have multiple daily times, a repeating interval, or multiple one-off
 // datetimes, and delay is either "use the Safety-tab defaults" or fully
 // custom — older stored campaigns are normalized to the new shape on read.
-// Whether to send a divider between items is also decided per-campaign (and
-// per one-off send) rather than baked into the message, so older stored
-// campaigns default to on (the original always-on behavior).
+// Whether to send a separator between items is also decided per-campaign
+// (and per one-off send) rather than baked into the message, so older
+// stored campaigns default to on (the original always-on behavior). Older
+// campaigns may still have this stored under its old name, sendDivider —
+// carried over rather than silently reset to the default.
 function migrateCampaign(c) {
   let next = c;
   if (next.scheduleType === 'fixed') {
@@ -47,8 +82,8 @@ function migrateCampaign(c) {
   if (next.useDefaultDelay === undefined) {
     next = { ...next, useDefaultDelay: !next.delayBetweenMsMs };
   }
-  if (next.sendDivider === undefined) {
-    next = { ...next, sendDivider: true };
+  if (next.sendSeparator === undefined) {
+    next = { ...next, sendSeparator: next.sendDivider !== undefined ? next.sendDivider : true };
   }
   return next;
 }
@@ -61,7 +96,8 @@ async function getState() {
     'campaigns',
     'log',
     'settings',
-    'activeRuns'
+    'activeRuns',
+    'authUser'
   ]);
   return {
     fetchedChats: data.fetchedChats || [],
@@ -70,12 +106,22 @@ async function getState() {
     campaigns: (data.campaigns || []).map(migrateCampaign),
     log: data.log || [],
     settings: { ...DEFAULT_SETTINGS, ...(data.settings || {}) },
-    activeRuns: data.activeRuns || {}
+    activeRuns: data.activeRuns || {},
+    authUser: data.authUser || null
   };
 }
 
 async function setState(partial) {
   await chrome.storage.local.set(partial);
+  // Fire-and-forget: local saves must never wait on a network round-trip to
+  // Firestore, they're already durable the moment chrome.storage.local
+  // resolves above. syncPush() itself no-ops instantly if signed out or
+  // sync is turned off.
+  for (const key of Object.keys(partial)) {
+    if (SYNC_KEYS.includes(key)) {
+      syncPush(key, partial[key]).catch((err) => console.warn('[sync] push failed for', key, err));
+    }
+  }
 }
 
 // getState() reads every storage key at once, including `messages` — which
@@ -107,6 +153,18 @@ async function appendLog(entry) {
 
 function uid() {
   return crypto.randomUUID();
+}
+
+// Same parsing as page-bridge.js's chatIdFromMsgId — the chat-id segment
+// embedded in a WhatsApp message id is ground truth for which chat a
+// message actually lives in. Applied again here, at delete time, so a log
+// entry whose stored waId predates that fix (an @c.us id for a contact
+// WhatsApp actually sent the message to under their @lid identity) still
+// gets deleted correctly, not just messages sent after the fix.
+function chatIdFromMsgId(msgId) {
+  if (typeof msgId !== 'string') return null;
+  const parts = msgId.split('_');
+  return parts.length >= 2 ? parts[1] : null;
 }
 
 // ---------- WhatsApp tab management ----------
@@ -151,6 +209,27 @@ async function pingContentScript(tabId, attempts = 5) {
     await new Promise((r) => setTimeout(r, 1500));
   }
   return false;
+}
+
+// Real-time "would a send actually work right now" check for the popup's
+// header status dot — a single quick attempt, not pingContentScript's
+// patient multi-attempt retry loop (which is fine to wait ~7s for during an
+// actual send, but would make the popup feel stuck if run on every open).
+// Deliberately doesn't call ensureWaTab() — auto-opening a tab just to
+// answer "is it ready" would be surprising, and "no tab open" is itself a
+// legitimate not-ready state to report.
+async function checkWaStatus() {
+  const tab = await findWaTab();
+  if (!tab) {
+    return { ready: false, reason: 'No WhatsApp Web tab is open.' };
+  }
+  try {
+    const res = await sendToTab(tab.id, { action: 'ping' }, 4000);
+    if (res && res.ok) return { ready: true };
+    return { ready: false, reason: (res && res.error) || 'WhatsApp Web is not ready yet.' };
+  } catch (err) {
+    return { ready: false, reason: String((err && err.message) || err) };
+  }
 }
 
 // ---------- sending ----------
@@ -208,8 +287,8 @@ async function waitToProceedOrStop(runId) {
 // Sent as its own standalone text message between items/threads in a chat
 // (never after the last one, never for a single-item message) so threads
 // stay visually separated even though they're sent back-to-back with no
-// delay. One line, 8 dashes.
-const THREAD_DIVIDER = '➖➖➖➖➖➖➖➖';
+// delay. One line, 3 dashes.
+const THREAD_SEPARATOR = '➖➖➖';
 
 // Joins whichever of header/content/footer are non-empty with a blank line
 // between each — so a missing header or empty caption never leaves a stray
@@ -287,7 +366,7 @@ async function runCampaign(campaign) {
   // Restricts to a chosen subset of the message's items instead of all of
   // them — e.g. unchecking a couple of threads before a list send, or the
   // "send just this one thread to the current chat" flow (a single-index
-  // array). Everything else (targets, pacing, logging, dividers) runs
+  // array). Everything else (targets, pacing, logging, separators) runs
   // exactly the same either way, just over fewer items.
   const items = Array.isArray(campaign.itemIndexes)
     ? campaign.itemIndexes.map((i) => (message.items || [])[i]).filter(Boolean)
@@ -302,12 +381,22 @@ async function runCampaign(campaign) {
   // A one-off "send to whatever chat is open right now" send bypasses saved
   // lists entirely — it's given its single target directly instead of a
   // listId to look up, wrapped as one synthetic list so every loop below
-  // (pacing, progress, logging, dividers) works unmodified either way.
+  // (pacing, progress, logging, separators) works unmodified either way.
   let targetLists;
   if (campaign.explicitTargets) {
     targetLists = [{ id: 'explicit', name: campaign.name, members: campaign.explicitTargets }];
   } else {
-    targetLists = lists.filter((l) => campaign.listIds.includes(l.id));
+    // memberFilter optionally restricts a list to a chosen subset of its
+    // members for this one send (e.g. unchecking a couple of chats before
+    // clicking Send now) rather than always sending to every member of
+    // every checked list.
+    targetLists = lists
+      .filter((l) => campaign.listIds.includes(l.id))
+      .map((l) => {
+        const allowed = campaign.memberFilter && campaign.memberFilter[l.id];
+        return allowed ? { ...l, members: (l.members || []).filter((m) => allowed.includes(m.waId)) } : l;
+      })
+      .filter((l) => (l.members || []).length > 0);
     if (targetLists.length === 0) {
       await appendLog({ campaignId: campaign.id, campaignName: campaign.name, status: 'error', detail: 'No valid lists.' });
       return;
@@ -316,12 +405,13 @@ async function runCampaign(campaign) {
 
   let totalSent = 0;
   let totalFailed = 0;
-  // A divider goes between items, not after the last one — so N items means
-  // N-1 dividers, and a single-item message gets none at all. Whether to
-  // send dividers at all is decided per-send (campaign.sendDivider), not
-  // stored on the message — every caller of runCampaign sets this explicitly.
-  const dividersPerTarget = campaign.sendDivider && items.length > 1 ? items.length - 1 : 0;
-  const perTarget = items.length + dividersPerTarget;
+  // A separator goes between items, not after the last one — so N items
+  // means N-1 separators, and a single-item message gets none at all.
+  // Whether to send separators at all is decided per-send
+  // (campaign.sendSeparator), not stored on the message — every caller of
+  // runCampaign sets this explicitly.
+  const separatorsPerTarget = campaign.sendSeparator && items.length > 1 ? items.length - 1 : 0;
+  const perTarget = items.length + separatorsPerTarget;
   const totalCount = targetLists.reduce((sum, list) => sum + (list.members || []).length * perTarget, 0);
   await startActiveRun(campaign.id, campaign.name, totalCount);
 
@@ -355,7 +445,7 @@ async function runCampaign(campaign) {
         const itemLabel = items.length > 1 ? ` (item ${itemIndex + 1}/${items.length})` : '';
         let itemSent = false;
         try {
-          await sendOneItem(target.waId, item);
+          const sendRes = await sendOneItem(target.waId, item);
           itemSent = true;
           sentAnyForTarget = true;
           totalSent++;
@@ -365,7 +455,12 @@ async function runCampaign(campaign) {
             campaignName: campaign.name,
             chatName: target.name,
             status: 'success',
-            detail: `Sent${itemLabel}: "${(item.text || item.caption || '[media]').slice(0, 60)}"`
+            detail: `Sent${itemLabel}: "${(item.text || item.caption || '[media]').slice(0, 60)}"`,
+            // Enough to later call "delete for everyone" on this exact
+            // message — waId is the chat it actually landed in (can differ
+            // from target.waId for a community-redirected send).
+            waId: sendRes.waId || target.waId,
+            msgId: sendRes.msgId || null
           });
         } catch (err) {
           totalFailed++;
@@ -379,13 +474,13 @@ async function runCampaign(campaign) {
           });
         }
 
-        const needsDivider = campaign.sendDivider && itemIndex < items.length - 1;
+        const needsSeparator = campaign.sendSeparator && itemIndex < items.length - 1;
 
-        // Divider goes right after, as its own message, in the same chat —
+        // Separator goes right after, as its own message, in the same chat —
         // only between items (never after the last one, never for a
         // single-item message), and skipped if the item itself never went
         // out (nothing to separate).
-        if (itemSent && needsDivider) {
+        if (itemSent && needsSeparator) {
           const pauseCheck = await waitToProceedOrStop(campaign.id);
           if (pauseCheck !== 'proceed') {
             stopped = true;
@@ -393,7 +488,7 @@ async function runCampaign(campaign) {
             break;
           }
           try {
-            await sendOneItem(target.waId, { kind: 'text', text: THREAD_DIVIDER });
+            await sendOneItem(target.waId, { kind: 'text', text: THREAD_SEPARATOR });
             totalSent++;
             await bumpActiveRun(campaign.id, 'sent');
           } catch (err) {
@@ -404,12 +499,12 @@ async function runCampaign(campaign) {
               campaignName: campaign.name,
               chatName: target.name,
               status: 'error',
-              detail: `Divider failed: ${String(err.message || err)}${itemLabel}`
+              detail: `Separator failed: ${String(err.message || err)}${itemLabel}`
             });
           }
-        } else if (!itemSent && needsDivider) {
+        } else if (!itemSent && needsSeparator) {
           // Item never sent — the progress total still reserved a slot for
-          // the divider that won't happen, so mark it done (as a no-op) to
+          // the separator that won't happen, so mark it done (as a no-op) to
           // keep the bar from stalling short of 100%.
           totalFailed++;
           await bumpActiveRun(campaign.id, 'failed');
@@ -452,6 +547,85 @@ async function runCampaign(campaign) {
     title: 'WhatsApp Scheduler',
     message: `Campaign "${campaign.name}" ${stopped ? 'stopped' : 'finished'}: ${totalSent} sent, ${totalFailed} failed.`
   });
+}
+
+async function markLogEntryDeleted(id) {
+  const log = await getLogOnly();
+  const next = log.map((l) => (l.id === id ? { ...l, deletedForEveryone: true } : l));
+  await setState({ log: next });
+}
+
+// "Delete for everyone" for one or more previously-sent log entries — reuses
+// the same activeRuns progress/pause/reset machinery as a normal send, just
+// calling WPP.chat.deleteMessage(..., revoke: true) instead of a send. Each
+// entry is attempted independently: WhatsApp only allows this within a
+// limited time window after sending, so a failure on one message (too old,
+// already deleted elsewhere, etc.) is logged and the rest still proceed
+// rather than aborting the whole batch.
+//
+// This deliberately does one message per call, one at a time, with a real
+// pacing gap between every single one — not grouped/batched by chat. That
+// was tried (WPP.chat.deleteMessage() accepts an array of message ids) on
+// the assumption it'd send one combined command per chat; decompiling the
+// actual implementation showed it just loops internally and fires one
+// revoke per message anyway, with *no* pacing between them, which turned
+// out to be *less* reliable than pacing them ourselves.
+async function runDeleteForEveryone(runId, entries) {
+  const { settings } = await getRunControlState();
+  const label = entries.length > 1 ? `Delete for everyone (${entries.length} messages)` : 'Delete for everyone';
+  if (!settings.masterEnabled) {
+    await appendLog({ campaignId: runId, campaignName: label, status: 'error', detail: 'Skipped: extension is switched off.' });
+    return;
+  }
+  await startActiveRun(runId, label, entries.length);
+  let stopped = false;
+  let stopReason = null;
+  for (const entry of entries) {
+    const outcome = await waitToProceedOrStop(runId);
+    if (outcome !== 'proceed') {
+      stopped = true;
+      stopReason = outcome;
+      break;
+    }
+    try {
+      const tab = await ensureWaTab();
+      const ready = await pingContentScript(tab.id);
+      if (!ready) throw new Error('WhatsApp Web tab is not ready.');
+      const waId = chatIdFromMsgId(entry.msgId) || entry.waId;
+      const res = await sendToTab(tab.id, { action: 'deleteMessage', waId, msgId: entry.msgId }, 20000);
+      if (!res || !res.ok) throw new Error((res && res.error) || 'Unknown failure.');
+      if (!res.isRevoked) throw new Error('WhatsApp declined to delete for everyone (likely past its time window, or already removed).');
+      // No separate "success" log entry — the original Sent entry already
+      // gets its delete button replaced with a "Deleted for everyone ✓"
+      // mark (see markLogEntryDeleted/renderLog), which is confirmation
+      // enough without duplicating it as a second log line.
+      await markLogEntryDeleted(entry.id);
+      await bumpActiveRun(runId, 'sent');
+    } catch (err) {
+      await bumpActiveRun(runId, 'failed');
+      await appendLog({
+        campaignId: runId,
+        campaignName: label,
+        chatName: entry.chatName,
+        status: 'error',
+        detail: `Could not delete for everyone in ${entry.chatName || 'chat'}: ${String(err.message || err)}`
+      });
+    }
+    // Pacing gap between deletes — same spirit as sends, avoids firing a
+    // burst of revoke calls back-to-back faster than WhatsApp Web's own
+    // connection can keep up with (a plausible cause of a delete silently
+    // not actually landing despite resolving locally).
+    await new Promise((r) => setTimeout(r, 2500));
+  }
+  if (stopped) {
+    await appendLog({
+      campaignId: runId,
+      campaignName: label,
+      status: 'error',
+      detail: stopReason === 'master-off' ? 'Stopped: extension switched off mid-run.' : 'Stopped: run was reset.'
+    });
+  }
+  await finishActiveRun(runId);
 }
 
 // ---------- alarm scheduling ----------
@@ -587,6 +761,11 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
       switch (msg.action) {
         case 'getState': {
           sendResponse({ ok: true, state: await getState() });
+          break;
+        }
+
+        case 'checkWaStatus': {
+          sendResponse({ ok: true, ...(await checkWaStatus()) });
           break;
         }
 
@@ -770,14 +949,22 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
             sendResponse({ ok: false, error: 'Select at least one item to send.' });
             break;
           }
+          if (
+            msg.memberFilter &&
+            msg.listIds.every((id) => Array.isArray(msg.memberFilter[id]) && msg.memberFilter[id].length === 0)
+          ) {
+            sendResponse({ ok: false, error: 'Select at least one chat to send to.' });
+            break;
+          }
           const runId = `adhoc-${uid()}`;
           runCampaign({
             id: runId,
             name: `Manual send: ${message.name}`,
             messageId: message.id,
             listIds: msg.listIds,
+            memberFilter: msg.memberFilter,
             itemIndexes: msg.itemIndexes,
-            sendDivider: msg.sendDivider !== false,
+            sendSeparator: msg.sendSeparator !== false,
             useDefaultDelay: true,
             delayBetweenMsMs: settings.defaultDelayBetweenMsMs,
             delayBetweenListsMs: settings.defaultDelayBetweenListsMs
@@ -788,7 +975,7 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
 
         // Sends to whichever chat is currently open in the WhatsApp Web tab,
         // bypassing saved lists entirely — reuses runCampaign via a single
-        // explicit target so it still gets progress/logging/dividers/pacing.
+        // explicit target so it still gets progress/logging/separators/pacing.
         case 'sendNowActiveChat': {
           const { messages, settings } = await getState();
           if (!settings.masterEnabled) {
@@ -817,7 +1004,7 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
             messageId: message.id,
             itemIndexes: msg.itemIndexes,
             explicitTargets: [{ waId: chat.waId, name: chat.name }],
-            sendDivider: msg.sendDivider !== false,
+            sendSeparator: msg.sendSeparator !== false,
             useDefaultDelay: true,
             delayBetweenMsMs: settings.defaultDelayBetweenMsMs,
             delayBetweenListsMs: settings.defaultDelayBetweenListsMs
@@ -857,7 +1044,7 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
             messageId: message.id,
             itemIndexes: [msg.itemIndex],
             explicitTargets: [{ waId: chat.waId, name: chat.name }],
-            sendDivider: true, // a single item never actually gets a divider — this is a no-op either way
+            sendSeparator: true, // a single item never actually gets a separator — this is a no-op either way
             useDefaultDelay: true,
             delayBetweenMsMs: settings.defaultDelayBetweenMsMs,
             delayBetweenListsMs: settings.defaultDelayBetweenListsMs
@@ -869,6 +1056,76 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
         case 'clearLog': {
           await setState({ log: [] });
           sendResponse({ ok: true });
+          break;
+        }
+
+        case 'deleteForEveryone': {
+          const { settings } = await getRunControlState();
+          if (!settings.masterEnabled) {
+            sendResponse({ ok: false, error: 'Extension is switched off — turn it back on in the header first.' });
+            break;
+          }
+          const log = await getLogOnly();
+          const entry = log.find((l) => l.id === msg.logId);
+          if (!entry || entry.status !== 'success' || !entry.waId || !entry.msgId) {
+            sendResponse({ ok: false, error: 'Nothing to delete for this entry.' });
+            break;
+          }
+          if (entry.deletedForEveryone) {
+            sendResponse({ ok: false, error: 'Already deleted for everyone.' });
+            break;
+          }
+          const runId = `delete-${uid()}`;
+          runDeleteForEveryone(runId, [entry]);
+          sendResponse({ ok: true, runId });
+          break;
+        }
+
+        // Deletes every not-yet-deleted, successfully-sent message logged
+        // under one send action (campaignId) — the bulk "undo this whole
+        // send" for an ad-hoc send, whose campaignId is unique per click of
+        // Send now/send-to-current-chat.
+        case 'deleteForEveryoneBulk': {
+          const { settings } = await getRunControlState();
+          if (!settings.masterEnabled) {
+            sendResponse({ ok: false, error: 'Extension is switched off — turn it back on in the header first.' });
+            break;
+          }
+          const log = await getLogOnly();
+          const entries = log.filter(
+            (l) => l.campaignId === msg.campaignId && l.status === 'success' && l.waId && l.msgId && !l.deletedForEveryone
+          );
+          if (entries.length === 0) {
+            sendResponse({ ok: false, error: 'Nothing left to delete for this send.' });
+            break;
+          }
+          const runId = `delete-${uid()}`;
+          runDeleteForEveryone(runId, entries);
+          sendResponse({ ok: true, runId });
+          break;
+        }
+
+        // Same as deleteForEveryoneBulk, but targets an explicit set of log
+        // entries rather than "everything under one send" — used when the
+        // Log tab's search/status filter is narrowing what's shown, so bulk
+        // delete only touches what's actually visible/filtered rather than
+        // the whole send it came from.
+        case 'deleteForEveryoneByIds': {
+          const { settings } = await getRunControlState();
+          if (!settings.masterEnabled) {
+            sendResponse({ ok: false, error: 'Extension is switched off — turn it back on in the header first.' });
+            break;
+          }
+          const log = await getLogOnly();
+          const idSet = new Set(msg.logIds || []);
+          const entries = log.filter((l) => idSet.has(l.id) && l.status === 'success' && l.waId && l.msgId && !l.deletedForEveryone);
+          if (entries.length === 0) {
+            sendResponse({ ok: false, error: 'Nothing left to delete for this filter.' });
+            break;
+          }
+          const runId = `delete-${uid()}`;
+          runDeleteForEveryone(runId, entries);
+          sendResponse({ ok: true, runId });
           break;
         }
 
@@ -900,7 +1157,34 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
 
         case 'saveSettings': {
           const { settings } = await getState();
-          await setState({ settings: { ...settings, ...msg.settings } });
+          const wasSyncEnabled = settings.syncEnabled;
+          const nextSettings = { ...settings, ...msg.settings };
+          await setState({ settings: nextSettings });
+          // Flipping the toggle takes effect immediately rather than
+          // waiting for the next service worker wake — turning it on
+          // catches this device up (and seeds the cloud copy on first
+          // sign-in), turning it off stops listening right away.
+          if (nextSettings.syncEnabled && !wasSyncEnabled) {
+            await reconcileAll();
+            attachRealtimeListeners();
+          } else if (!nextSettings.syncEnabled && wasSyncEnabled) {
+            detachRealtimeListeners();
+          }
+          sendResponse({ ok: true });
+          break;
+        }
+        case 'signIn': {
+          try {
+            const user = await signInWithGoogle();
+            sendResponse({ ok: true, user: { uid: user.uid, email: user.email, displayName: user.displayName } });
+          } catch (err) {
+            sendResponse({ ok: false, error: String(err && err.message ? err.message : err) });
+          }
+          break;
+        }
+        case 'signOut': {
+          await signOutEverywhere();
+          detachRealtimeListeners();
           sendResponse({ ok: true });
           break;
         }

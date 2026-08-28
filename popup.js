@@ -23,6 +23,19 @@ chrome.storage.local.get(['messageRunIds'], (data) => {
     if (entry && entry.runId) messageRunIds.set(msgId, entry);
   }
 });
+// The currently-running "delete for everyone" run, if any — only one at a
+// time. Persisted the same way as messageRunIds so it survives a popup
+// close/reopen mid-run; assignedAt gives the same short grace window as
+// messageRunIds before background.js has necessarily written the run's
+// storage record yet.
+let deleteRunEntry = null; // { runId, assignedAt } | null
+function setDeleteRunId(id) {
+  deleteRunEntry = id ? { runId: id, assignedAt: Date.now() } : null;
+  chrome.storage.local.set({ deleteRunEntry });
+}
+chrome.storage.local.get(['deleteRunEntry'], (data) => {
+  if (data.deleteRunEntry && data.deleteRunEntry.runId) deleteRunEntry = data.deleteRunEntry;
+});
 // Which items are unchecked in a message's send panel — kept in memory (not
 // persisted) so the checkboxes survive the re-render that follows every
 // send/click instead of snapping back to "all checked", which looked like
@@ -37,6 +50,52 @@ function uncheckedSetFor(messageId) {
   }
   return set;
 }
+// Same idea, one level down, but flipped: which chats within a list are
+// *selected* for this particular send — every list/chat starts unchecked by
+// default (nothing is picked until you explicitly pick it), so this tracks
+// selections rather than exclusions. Checking a list's own checkbox selects
+// all its members; checking individual chats without touching the list
+// checkbox selects just those. Persisted to chrome.storage.local (unlike
+// itemSelectionUnchecked above) so it survives closing and reopening the
+// popup, not just surviving a re-render within one session.
+const listSelections = new Map(); // messageId -> Map(listId -> Set<waId>)
+function listSelectionSetFor(messageId, listId) {
+  let byList = listSelections.get(messageId);
+  if (!byList) {
+    byList = new Map();
+    listSelections.set(messageId, byList);
+  }
+  let set = byList.get(listId);
+  if (!set) {
+    set = new Set();
+    byList.set(listId, set);
+  }
+  return set;
+}
+function saveListSelections() {
+  const plain = {};
+  for (const [msgId, byList] of listSelections) {
+    plain[msgId] = {};
+    for (const [listId, set] of byList) {
+      plain[msgId][listId] = Array.from(set);
+    }
+  }
+  chrome.storage.local.set({ listSelections: plain });
+}
+chrome.storage.local.get(['listSelections'], (data) => {
+  const plain = data.listSelections || {};
+  for (const msgId of Object.keys(plain)) {
+    const byList = new Map();
+    for (const listId of Object.keys(plain[msgId])) {
+      byList.set(listId, new Set(plain[msgId][listId]));
+    }
+    listSelections.set(msgId, byList);
+  }
+  refresh();
+});
+// Which lists currently have their member checklist expanded — purely a
+// this-session UI convenience, doesn't need to survive a popup reopen.
+const expandedListPanels = new Set(); // `${messageId}:${listId}`
 // Same idea as messageRunIds, but for the "send to current chat"/"send this
 // item to current chat" buttons — these are quick one-off sends, not a list
 // run, so instead of taking over the whole panel with a progress block they
@@ -85,16 +144,16 @@ let editingMessageId = null;
 let editingListId = null;
 let editingCampaignId = null;
 
-// The divider checkbox appears in two independent places (the one-off Send
+// The separator checkbox appears in two independent places (the one-off Send
 // panel, and the campaign form) — each remembers its own last-used state
 // across popup opens, not tied to any one message/campaign. Loaded once
 // here (async), with a re-render once it resolves so anything already
 // painted with the checkbox's hardcoded default picks up the real value.
-let sendPanelDividerPref = true;
-let campaignDividerPref = true;
-chrome.storage.local.get(['sendPanelDividerPref', 'campaignDividerPref'], (data) => {
-  if (data.sendPanelDividerPref !== undefined) sendPanelDividerPref = data.sendPanelDividerPref;
-  if (data.campaignDividerPref !== undefined) campaignDividerPref = data.campaignDividerPref;
+let sendPanelSeparatorPref = true;
+let campaignSeparatorPref = true;
+chrome.storage.local.get(['sendPanelSeparatorPref', 'campaignSeparatorPref'], (data) => {
+  if (data.sendPanelSeparatorPref !== undefined) sendPanelSeparatorPref = data.sendPanelSeparatorPref;
+  if (data.campaignSeparatorPref !== undefined) campaignSeparatorPref = data.campaignSeparatorPref;
   refresh();
 });
 
@@ -121,9 +180,12 @@ function renderProgressBlock(run) {
   const doneCount = run.sent + run.failed;
   const pct = run.total > 0 ? Math.round((doneCount / run.total) * 100) : 0;
   const fillClass = run.failed > 0 ? 'progress-fill has-failures' : 'progress-fill';
+  // Same run shape (sent/failed counters) is reused for both a send and a
+  // "delete for everyone" run — the wording should match which one it is.
+  const verb = String(run.id || '').startsWith('delete-') ? 'deleted' : 'sent';
   const status = run.done
-    ? `<span class="progress-label done">Finished — ${run.sent} sent${run.failed ? `, ${run.failed} failed` : ''}</span>`
-    : `<span class="progress-label">${run.paused ? 'Paused — ' : ''}${doneCount}/${run.total} (${pct}%) — ${run.sent} sent${run.failed ? `, ${run.failed} failed` : ''}, ${run.total - doneCount} pending</span>`;
+    ? `<span class="progress-label done">Finished — ${run.sent} ${verb}${run.failed ? `, ${run.failed} failed` : ''}</span>`
+    : `<span class="progress-label">${run.paused ? 'Paused — ' : ''}${doneCount}/${run.total} (${pct}%) — ${run.sent} ${verb}${run.failed ? `, ${run.failed} failed` : ''}, ${run.total - doneCount} pending</span>`;
   // Pause/resume and reset are wired via a delegated document-level click
   // listener (see below) rather than per-render, since this HTML is
   // inserted via innerHTML from two different places (message send panel,
@@ -203,10 +265,15 @@ function downloadCsv(filename, chats) {
 async function refresh() {
   const res = await call('getState');
   if (res.ok) STATE = res.state;
+  applyTheme();
+  const signedIn = !!STATE.authUser;
+  document.getElementById('loginScreen').style.display = signedIn ? 'none' : 'flex';
+  document.getElementById('appContent').style.display = signedIn ? '' : 'none';
+  renderHeaderAccount();
+  if (!signedIn) return;
   for (const c of STATE.fetchedChats || []) {
     chatSource.set(c.waId, c);
   }
-  applyTheme();
   renderMasterToggle();
   renderMessages();
   renderListBuilder();
@@ -238,14 +305,23 @@ function applyTheme() {
   } else {
     document.documentElement.setAttribute('data-theme', theme);
   }
+  document.querySelectorAll('.theme-option-btn').forEach((btn) => {
+    btn.classList.toggle('active', btn.dataset.theme === theme);
+  });
 }
 
-document.getElementById('themeToggleBtn').addEventListener('click', async () => {
-  const order = ['system', 'light', 'dark'];
-  const current = STATE.settings.theme || 'system';
-  const next = order[(order.indexOf(current) + 1) % order.length];
-  await call('saveSettings', { settings: { theme: next } });
-  refresh();
+document.getElementById('themeToggleBtn').addEventListener('click', (e) => {
+  e.stopPropagation();
+  const panel = document.getElementById('themePanel');
+  panel.style.display = panel.style.display === 'none' ? '' : 'none';
+});
+document.getElementById('themePanel').addEventListener('click', (e) => e.stopPropagation());
+document.querySelectorAll('.theme-option-btn').forEach((btn) => {
+  btn.addEventListener('click', async () => {
+    await call('saveSettings', { settings: { theme: btn.dataset.theme } });
+    document.getElementById('themePanel').style.display = 'none';
+    refresh();
+  });
 });
 
 // ---------- master on/off switch ----------
@@ -701,32 +777,27 @@ function buildSendPanel(message) {
   const items = message.items || [];
   const wholeSendRun = activeChatRunFor(`msg-${message.id}`);
   const unchecked = uncheckedSetFor(message.id);
+  const wholeSendBtnHtml = activeChatBtnHtml({
+    act: 'sendActiveChat',
+    extraClass: 'send-active-chat-btn',
+    title: 'Send to currently open chat — sends only to whatever chat is open right now in the WhatsApp Web tab, no list needed.',
+    iconSvg: '<svg viewBox="0 0 24 24" width="16" height="16"><path fill="currentColor" d="M2 21l21-9L2 3v7l15 2-15 2z"/></svg>',
+    run: wholeSendRun,
+    runKey: `msg-${message.id}`
+  });
   panel.innerHTML = `
-    <div class="send-panel-top-row">
-      ${
-        items.length <= 1
-          ? ''
-          : `
-      <label class="checkbox-row send-item-select-all-row">
-        <input type="checkbox" class="send-item-select-all" ${unchecked.size === 0 ? 'checked' : ''} ${unchecked.size > 0 && unchecked.size < items.length ? 'data-indeterminate="1"' : ''} />
-        Select all
-      </label>
-      `
-      }
-      ${activeChatBtnHtml({
-        act: 'sendActiveChat',
-        extraClass: 'send-active-chat-btn',
-        title: 'Send to currently open chat — sends only to whatever chat is open right now in the WhatsApp Web tab, no list needed.',
-        iconSvg: '<svg viewBox="0 0 24 24" width="16" height="16"><path fill="currentColor" d="M2 21l21-9L2 3v7l15 2-15 2z"/></svg>',
-        run: wholeSendRun,
-        runKey: `msg-${message.id}`
-      })}
-    </div>
     ${
       items.length <= 1
-        ? ''
+        ? `<div class="send-panel-top-row">${wholeSendBtnHtml}</div>`
         : `
     <div class="composing-list">
+      <div class="send-panel-top-row">
+        <label class="checkbox-row send-item-select-all-row">
+          <input type="checkbox" class="send-item-select-all" ${unchecked.size === 0 ? 'checked' : ''} ${unchecked.size > 0 && unchecked.size < items.length ? 'data-indeterminate="1"' : ''} />
+          Select all
+        </label>
+        ${wholeSendBtnHtml}
+      </div>
       ${items
         .map((item, idx) => {
           const icon = item.kind === 'media' ? '📎' : '📝';
@@ -766,18 +837,48 @@ function buildSendPanel(message) {
         : `
     <div class="checklist">
       ${STATE.lists
-        .map((l) => `<label><input type="checkbox" class="send-list-check" value="${l.id}" /> ${escapeHtml(l.name)} <span class="muted">(${(l.members || []).length})</span></label>`)
+        .map((l) => {
+          const members = l.members || [];
+          const selected = listSelectionSetFor(message.id, l.id);
+          const selectedCount = members.filter((m) => selected.has(m.waId)).length;
+          const expandKey = `${message.id}:${l.id}`;
+          const expanded = expandedListPanels.has(expandKey);
+          return `<div class="list-check-row">
+            <label class="checkbox-row list-check-label">
+              <input type="checkbox" class="send-list-check" value="${l.id}" ${selectedCount === members.length && members.length > 0 ? 'checked' : ''} ${selectedCount > 0 && selectedCount < members.length ? 'data-indeterminate="1"' : ''} />
+              ${escapeHtml(l.name)} <span class="muted badge-count-${l.id}">(${selectedCount}/${members.length})</span>
+            </label>
+            ${
+              members.length > 0
+                ? `<button class="icon-btn small-icon-btn list-expand-btn" type="button" data-act="toggleListMembers" data-list-id="${l.id}" title="Choose which chats in this list">
+              <svg viewBox="0 0 24 24" width="14" height="14"><path fill="currentColor" d="M7 10l5 5 5-5z"/></svg>
+            </button>`
+                : ''
+            }
+          </div>
+          ${
+            members.length > 0
+              ? `<div class="list-members" data-list-id="${l.id}" style="display:${expanded ? '' : 'none'}">
+            ${members
+              .map(
+                (m) =>
+                  `<label class="checkbox-row list-member-row"><input type="checkbox" class="list-member-check" data-list-id="${l.id}" data-wa-id="${escapeHtml(m.waId)}" ${selected.has(m.waId) ? 'checked' : ''} /> ${escapeHtml(m.name || m.waId)}</label>`
+              )
+              .join('')}
+          </div>`
+              : ''
+          }`;
+        })
         .join('')}
     </div>
     <div class="send-panel-actions">
+      <label class="checkbox-row send-separator-check-row">
+        <input type="checkbox" class="send-separator-check" ${sendPanelSeparatorPref ? 'checked' : ''} />
+        Send a "➖" separator after each item
+      </label>
       <button class="primary" type="button" data-act="confirmSend">Send now</button>
       <button class="ghost small-inline" type="button" data-act="cancelSend">Cancel</button>
-      <label class="checkbox-row send-divider-check-row">
-        <input type="checkbox" class="send-divider-check" ${sendPanelDividerPref ? 'checked' : ''} />
-        Send a "➖" divider after each item
-      </label>
     </div>
-    <p class="hint">Sends immediately using your Paced delay settings (Safety tab).</p>
     `
     }
   `;
@@ -790,13 +891,72 @@ function buildSendPanel(message) {
       renderMessages();
     });
   }
-  const dividerCheck = panel.querySelector('.send-divider-check');
-  if (dividerCheck) {
-    dividerCheck.addEventListener('change', () => {
-      sendPanelDividerPref = dividerCheck.checked;
-      chrome.storage.local.set({ sendPanelDividerPref });
+  const separatorCheck = panel.querySelector('.send-separator-check');
+  if (separatorCheck) {
+    separatorCheck.addEventListener('change', () => {
+      sendPanelSeparatorPref = separatorCheck.checked;
+      chrome.storage.local.set({ sendPanelSeparatorPref });
     });
   }
+  panel.querySelectorAll('[data-act="toggleListMembers"]').forEach((btn) => {
+    btn.addEventListener('click', () => {
+      const listId = btn.dataset.listId;
+      const key = `${message.id}:${listId}`;
+      const membersEl = panel.querySelector(`.list-members[data-list-id="${listId}"]`);
+      const nowExpanded = membersEl.style.display === 'none';
+      membersEl.style.display = nowExpanded ? '' : 'none';
+      btn.classList.toggle('expanded', nowExpanded);
+      if (nowExpanded) expandedListPanels.add(key);
+      else expandedListPanels.delete(key);
+    });
+  });
+  function updateListCheckboxState(listId) {
+    const list = STATE.lists.find((l) => l.id === listId);
+    if (!list) return;
+    const members = list.members || [];
+    const selected = listSelectionSetFor(message.id, listId);
+    const selectedCount = members.filter((m) => selected.has(m.waId)).length;
+    const badge = panel.querySelector(`.badge-count-${listId}`);
+    if (badge) badge.textContent = `(${selectedCount}/${members.length})`;
+    const listCb = panel.querySelector(`.send-list-check[value="${listId}"]`);
+    if (listCb) {
+      listCb.checked = selectedCount > 0 && selectedCount === members.length;
+      listCb.indeterminate = selectedCount > 0 && selectedCount < members.length;
+    }
+  }
+  panel.querySelectorAll('.send-list-check').forEach((cb) => {
+    cb.indeterminate = cb.hasAttribute('data-indeterminate');
+  });
+  panel.querySelectorAll('.list-member-check').forEach((cb) => {
+    cb.addEventListener('change', () => {
+      const listId = cb.dataset.listId;
+      const selected = listSelectionSetFor(message.id, listId);
+      if (cb.checked) selected.add(cb.dataset.waId);
+      else selected.delete(cb.dataset.waId);
+      saveListSelections();
+      updateListCheckboxState(listId);
+    });
+  });
+  // The list's own checkbox doubles as select-all/none for its members —
+  // there's no separate select-all row inside the expanded member list.
+  // Selecting the list itself, or selecting just some chats within it
+  // (without ever touching the list checkbox), both count as "this list is
+  // part of the send" — see confirmSend below, which reads member
+  // selections directly rather than gating on the list checkbox alone.
+  panel.querySelectorAll('.send-list-check').forEach((listCb) => {
+    listCb.addEventListener('change', () => {
+      const listId = listCb.value;
+      const memberChecks = panel.querySelectorAll(`.list-member-check[data-list-id="${listId}"]`);
+      const selected = listSelectionSetFor(message.id, listId);
+      memberChecks.forEach((cb) => {
+        cb.checked = listCb.checked;
+        if (listCb.checked) selected.add(cb.dataset.waId);
+        else selected.delete(cb.dataset.waId);
+      });
+      saveListSelections();
+      updateListCheckboxState(listId);
+    });
+  });
   const selectAllCheck = panel.querySelector('.send-item-select-all');
   const itemSelectChecks = panel.querySelectorAll('.send-item-select');
   if (selectAllCheck) {
@@ -823,9 +983,24 @@ function buildSendPanel(message) {
   const confirmBtn = panel.querySelector('[data-act="confirmSend"]');
   if (confirmBtn) {
     confirmBtn.addEventListener('click', async () => {
-      const listIds = Array.from(panel.querySelectorAll('.send-list-check:checked')).map((cb) => cb.value);
+      // A list counts as "picked" as soon as it has at least one selected
+      // chat — whether that came from checking the list itself (selects
+      // everyone) or hand-picking individual chats within it. Read straight
+      // from the selection state rather than the checkbox's own :checked,
+      // since a partially-selected list shows as indeterminate (unchecked).
+      const memberFilter = {};
+      const listIds = [];
+      for (const l of STATE.lists) {
+        const members = l.members || [];
+        if (members.length === 0) continue;
+        const selected = listSelectionSetFor(message.id, l.id);
+        const selectedWaIds = members.filter((m) => selected.has(m.waId)).map((m) => m.waId);
+        if (selectedWaIds.length === 0) continue;
+        listIds.push(l.id);
+        if (selectedWaIds.length < members.length) memberFilter[l.id] = selectedWaIds;
+      }
       if (listIds.length === 0) {
-        alert('Pick at least one list.');
+        alert('Select at least one chat to send to.');
         return;
       }
       const itemChecks = panel.querySelectorAll('.send-item-select');
@@ -839,8 +1014,8 @@ function buildSendPanel(message) {
           return;
         }
       }
-      const sendDivider = panel.querySelector('.send-divider-check').checked;
-      const res = await call('sendNow', { messageId: message.id, listIds, itemIndexes, sendDivider });
+      const sendSeparator = panel.querySelector('.send-separator-check').checked;
+      const res = await call('sendNow', { messageId: message.id, listIds, memberFilter, itemIndexes, sendSeparator });
       if (res.ok && res.runId) {
         messageRunIds.set(message.id, { runId: res.runId, assignedAt: Date.now() });
         saveMessageRunIds();
@@ -851,8 +1026,8 @@ function buildSendPanel(message) {
   const sendActiveChatBtn = panel.querySelector('[data-act="sendActiveChat"]');
   if (sendActiveChatBtn) {
     sendActiveChatBtn.addEventListener('click', async () => {
-      const dividerCb = panel.querySelector('.send-divider-check');
-      const sendDivider = dividerCb ? dividerCb.checked : sendPanelDividerPref;
+      const separatorCb = panel.querySelector('.send-separator-check');
+      const sendSeparator = separatorCb ? separatorCb.checked : sendPanelSeparatorPref;
       const itemChecks = panel.querySelectorAll('.send-item-select');
       let itemIndexes;
       if (itemChecks.length > 0) {
@@ -864,7 +1039,7 @@ function buildSendPanel(message) {
           return;
         }
       }
-      const res = await call('sendNowActiveChat', { messageId: message.id, sendDivider, itemIndexes });
+      const res = await call('sendNowActiveChat', { messageId: message.id, sendSeparator, itemIndexes });
       if (res.ok && res.runId) {
         activeChatRunIds.set(`msg-${message.id}`, { runId: res.runId, assignedAt: Date.now() });
         saveActiveChatRunIds();
@@ -1173,9 +1348,9 @@ function setDelayFieldsDisabled(disabled) {
 document.getElementById('campUseDefaultDelay').addEventListener('change', (e) => {
   setDelayFieldsDisabled(e.target.checked);
 });
-document.getElementById('campSendDivider').addEventListener('change', (e) => {
-  campaignDividerPref = e.target.checked;
-  chrome.storage.local.set({ campaignDividerPref });
+document.getElementById('campSendSeparator').addEventListener('change', (e) => {
+  campaignSeparatorPref = e.target.checked;
+  chrome.storage.local.set({ campaignSeparatorPref });
 });
 
 function resetCampaignForm() {
@@ -1202,7 +1377,7 @@ function resetCampaignForm() {
   document.getElementById('campDelayMax').value = Math.round(dMax / 1000);
   document.getElementById('campListDelayMin').value = Math.round(lMin / 1000);
   document.getElementById('campListDelayMax').value = Math.round(lMax / 1000);
-  document.getElementById('campSendDivider').checked = campaignDividerPref;
+  document.getElementById('campSendSeparator').checked = campaignSeparatorPref;
   document.getElementById('addCampaignBtn').textContent = 'Save campaign';
   document.getElementById('cancelEditCampaignBtn').style.display = 'none';
   renderCampaignForm();
@@ -1253,7 +1428,7 @@ document.getElementById('addCampaignBtn').addEventListener('click', async () => 
   if (listIds.length === 0) { alert('Pick at least one list.'); return; }
 
   const useDefaultDelay = document.getElementById('campUseDefaultDelay').checked;
-  const sendDivider = document.getElementById('campSendDivider').checked;
+  const sendSeparator = document.getElementById('campSendSeparator').checked;
   const campaign = {
     id: editingCampaignId,
     name,
@@ -1262,7 +1437,7 @@ document.getElementById('addCampaignBtn').addEventListener('click', async () => 
     scheduleType: campScheduleType,
     enabled: true,
     useDefaultDelay,
-    sendDivider,
+    sendSeparator,
     delayBetweenMsMs: [
       secToMs(document.getElementById('campDelayMin').value, 20000),
       secToMs(document.getElementById('campDelayMax').value, 45000)
@@ -1365,7 +1540,7 @@ function renderCampaignList() {
       const useDefaultDelay = c.useDefaultDelay !== false;
       document.getElementById('campUseDefaultDelay').checked = useDefaultDelay;
       setDelayFieldsDisabled(useDefaultDelay);
-      document.getElementById('campSendDivider').checked = c.sendDivider !== false;
+      document.getElementById('campSendSeparator').checked = c.sendSeparator !== false;
       const [dMin, dMax] = c.delayBetweenMsMs || [20000, 45000];
       const [lMin, lMax] = c.delayBetweenListsMs || [30000, 60000];
       document.getElementById('campDelayMin').value = Math.round(dMin / 1000);
@@ -1444,9 +1619,43 @@ document.getElementById('logStatusFilter').addEventListener('change', (e) => {
   renderLog();
 });
 
+// How many of a given send's logged messages are still eligible for
+// "delete for everyone" (successfully sent, we captured its WhatsApp
+// message id, and it hasn't already been deleted) — computed over the full
+// log regardless of the current search/status filter, since the delete
+// action itself always targets the whole send.
+function deletableCountsByCampaign() {
+  const counts = new Map(); // campaignId -> remaining count
+  for (const l of STATE.log) {
+    if (l.status === 'success' && l.waId && l.msgId && !l.deletedForEveryone) {
+      counts.set(l.campaignId, (counts.get(l.campaignId) || 0) + 1);
+    }
+  }
+  return counts;
+}
+
 function renderLog() {
+  const progressEl = document.getElementById('deleteRunProgress');
+  const deleteRun = deleteRunEntry ? STATE.activeRuns[deleteRunEntry.runId] : null;
+  if (deleteRun) {
+    progressEl.innerHTML = `
+      ${renderProgressBlock(deleteRun)}
+      ${deleteRun.done ? '<button class="ghost small-inline" type="button" data-act="closeDeleteRun">Close</button>' : '<p class="hint">Deleting for everyone — this updates live.</p>'}
+    `;
+    const closeBtn = progressEl.querySelector('[data-act="closeDeleteRun"]');
+    if (closeBtn) closeBtn.addEventListener('click', () => { setDeleteRunId(null); renderLog(); });
+  } else if (deleteRunEntry && Date.now() - (deleteRunEntry.assignedAt || 0) < 8000) {
+    // background.js hasn't necessarily written the run's progress record
+    // yet — same grace window as messageRunIds, see buildSendPanel.
+    progressEl.innerHTML = '<p class="hint">Starting…</p>';
+  } else {
+    progressEl.innerHTML = '';
+    if (deleteRunEntry) setDeleteRunId(null); // run finished and was pruned — stop looking for it
+  }
+
   const ul = document.getElementById('logList');
   const query = logSearchQuery.trim().toLowerCase();
+  const filterActive = !!query || logStatusFilter !== 'all';
   const filtered = STATE.log.filter((l) => {
     if (logStatusFilter !== 'all' && l.status !== logStatusFilter) return false;
     if (query) {
@@ -1459,22 +1668,96 @@ function renderLog() {
     return true;
   });
 
+  // The bulk delete button lives up top next to Clear log, not inline per
+  // entry. With no search/status filter active it targets the newest send
+  // that still has anything left to delete (STATE.log is newest-first).
+  // With a filter active, it targets exactly what's currently visible —
+  // deleting only the filtered messages, not the rest of whatever send(s)
+  // they came from.
+  const bulkBtn = document.getElementById('bulkDeleteForEveryoneBtn');
+  if (filterActive) {
+    const eligible = filtered.filter((l) => l.status === 'success' && l.waId && l.msgId && !l.deletedForEveryone);
+    if (eligible.length > 1) {
+      bulkBtn.style.display = '';
+      bulkBtn.title = `Delete for everyone — filtered messages (${eligible.length})`;
+      bulkBtn.dataset.mode = 'filtered';
+      bulkBtn.dataset.logIds = JSON.stringify(eligible.map((l) => l.id));
+      bulkBtn.dataset.count = eligible.length;
+    } else {
+      bulkBtn.style.display = 'none';
+    }
+  } else {
+    const deletableCounts = deletableCountsByCampaign();
+    const newestDeletable = STATE.log.find((l) => (deletableCounts.get(l.campaignId) || 0) > 1);
+    if (newestDeletable) {
+      const count = deletableCounts.get(newestDeletable.campaignId);
+      bulkBtn.style.display = '';
+      bulkBtn.title = `Delete for everyone — this send (${count} messages)`;
+      bulkBtn.dataset.mode = 'campaign';
+      bulkBtn.dataset.campaignId = newestDeletable.campaignId;
+      bulkBtn.dataset.count = count;
+    } else {
+      bulkBtn.style.display = 'none';
+    }
+  }
+
   ul.innerHTML = '';
   if (filtered.length === 0) {
     ul.innerHTML = `<li class="item-text">${STATE.log.length === 0 ? 'No activity yet.' : 'No log entries match this search/filter.'}</li>`;
   }
   for (const l of filtered) {
     const li = document.createElement('li');
+    const canDeleteThis = l.status === 'success' && l.waId && l.msgId && !l.deletedForEveryone;
     li.innerHTML = `<div class="item-text">
       <span class="log-status-${l.status}">${l.status.toUpperCase()}</span>
       ${l.campaignName ? ' · ' + escapeHtml(l.campaignName) : ''}
       ${l.chatName ? ' → ' + escapeHtml(l.chatName) : ''}<br/>
       <span class="log-time">${new Date(l.timestamp).toLocaleString()}</span><br/>
       ${escapeHtml(l.detail || '')}
-    </div>`;
+      ${l.deletedForEveryone ? '<br/><span class="muted">Deleted for everyone ✓</span>' : ''}
+    </div>
+    ${
+      canDeleteThis
+        ? `<div class="log-entry-actions">
+      <button class="icon-btn small-icon-btn danger" type="button" data-act="deleteForEveryone" data-log-id="${l.id}" title="Delete for everyone">
+        <svg viewBox="0 0 24 24" width="14" height="14"><path fill="currentColor" d="M6 19a2 2 0 0 0 2 2h8a2 2 0 0 0 2-2V7H6v12ZM19 4h-3.5l-1-1h-5l-1 1H5v2h14V4Z"/></svg>
+      </button>
+    </div>`
+        : ''
+    }`;
     ul.appendChild(li);
   }
+  ul.querySelectorAll('[data-act="deleteForEveryone"]').forEach((btn) => {
+    btn.addEventListener('click', async () => {
+      if (!confirm('Delete this message for everyone? This only works if WhatsApp still allows it (a limited time after sending).')) return;
+      const res = await call('deleteForEveryone', { logId: btn.dataset.logId });
+      if (res.ok && res.runId) setDeleteRunId(res.runId);
+      else if (!res.ok) alert(res.error || 'Could not start delete.');
+      refresh();
+    });
+  });
 }
+
+document.getElementById('bulkDeleteForEveryoneBtn').addEventListener('click', async () => {
+  const btn = document.getElementById('bulkDeleteForEveryoneBtn');
+  const mode = btn.dataset.mode;
+  const count = btn.dataset.count;
+  if (!mode) return;
+  const scopeText = mode === 'filtered' ? 'filtered' : 'from this send';
+  if (
+    !confirm(
+      `Delete all ${count} messages ${scopeText} for everyone? This only works if WhatsApp still allows it (a limited time after sending) — chats past that window will be skipped and logged as failed.`
+    )
+  )
+    return;
+  const res =
+    mode === 'filtered'
+      ? await call('deleteForEveryoneByIds', { logIds: JSON.parse(btn.dataset.logIds || '[]') })
+      : await call('deleteForEveryoneBulk', { campaignId: btn.dataset.campaignId });
+  if (res.ok && res.runId) setDeleteRunId(res.runId);
+  else if (!res.ok) alert(res.error || 'Could not start delete.');
+  refresh();
+});
 
 // ============ SETTINGS ============
 function renderSettings() {
@@ -1486,19 +1769,81 @@ function renderSettings() {
   const [lmin, lmax] = s.defaultDelayBetweenListsMs || [30000, 60000];
   document.getElementById('listDelayMin').value = Math.round(lmin / 1000);
   document.getElementById('listDelayMax').value = Math.round(lmax / 1000);
-  document.getElementById('themeSelect').value = s.theme || 'system';
   document.getElementById('consentCheckboxSettings').checked = !!s.consentAccepted;
   document.getElementById('headerText').value = s.headerText || '';
   document.getElementById('footerText').value = s.footerText || '';
 }
 
+document.getElementById('googleSignInBtn').addEventListener('click', async () => {
+  const btn = document.getElementById('googleSignInBtn');
+  const errEl = document.getElementById('loginError');
+  errEl.style.display = 'none';
+  btn.disabled = true;
+  const res = await call('signIn');
+  btn.disabled = false;
+  if (!res.ok) {
+    errEl.textContent = res.error || 'Sign-in failed. Try again.';
+    errEl.style.display = '';
+    return;
+  }
+  refresh();
+});
+
+document.getElementById('signOutBtn').addEventListener('click', async () => {
+  if (!confirm('Sign out? Sync (if on) will stop until you sign back in.')) return;
+  await call('signOut');
+  refresh();
+});
+
+// The account/sync UI lives entirely up in the header now (name+avatar next
+// to the master/theme toggles) instead of buried at the bottom of the
+// Settings tab — clicking it opens a small dropdown with the sync toggle and
+// sign out, rather than switching tabs.
+function renderHeaderAccount() {
+  const user = STATE.authUser;
+  document.getElementById('appLogoImg').style.display = user ? 'none' : '';
+  document.getElementById('headerAccountWrap').style.display = user ? '' : 'none';
+  if (!user) return;
+  const img = document.getElementById('headerAccountAvatarImg');
+  const initialEl = document.getElementById('headerAccountInitial');
+  if (user.photoURL) {
+    img.src = user.photoURL;
+    img.style.display = '';
+    initialEl.style.display = 'none';
+  } else {
+    img.style.display = 'none';
+    initialEl.style.display = '';
+    initialEl.textContent = (user.displayName || user.email || '?').charAt(0).toUpperCase();
+  }
+  document.getElementById('headerAccountNamePanel').textContent = user.displayName || user.email || '';
+  document.getElementById('accountEmail').textContent = user.email || '';
+  document.getElementById('syncEnabledCheck').checked = !!STATE.settings.syncEnabled;
+}
+
+document.getElementById('headerAccountBtn').addEventListener('click', (e) => {
+  e.stopPropagation();
+  const panel = document.getElementById('headerAccountPanel');
+  panel.style.display = panel.style.display === 'none' ? '' : 'none';
+});
+document.getElementById('headerAccountPanel').addEventListener('click', (e) => e.stopPropagation());
+document.addEventListener('click', () => {
+  document.getElementById('headerAccountPanel').style.display = 'none';
+  document.getElementById('themePanel').style.display = 'none';
+});
+
+document.getElementById('syncEnabledCheck').addEventListener('change', async (e) => {
+  await call('saveSettings', { settings: { syncEnabled: e.target.checked } });
+  refresh();
+});
+
+let saveSettingsBtnResetTimer = null;
 document.getElementById('saveSettingsBtn').addEventListener('click', async () => {
+  const btn = document.getElementById('saveSettingsBtn');
   const jitterMinutes = Number(document.getElementById('jitterMinutes').value) || 0;
   const min = secToMs(document.getElementById('delayMin').value, 20000);
   const max = secToMs(document.getElementById('delayMax').value, 45000);
   const lmin = secToMs(document.getElementById('listDelayMin').value, 30000);
   const lmax = secToMs(document.getElementById('listDelayMax').value, 60000);
-  const theme = document.getElementById('themeSelect').value;
   const consentAccepted = document.getElementById('consentCheckboxSettings').checked;
   const headerText = document.getElementById('headerText').value;
   const footerText = document.getElementById('footerText').value;
@@ -1507,13 +1852,19 @@ document.getElementById('saveSettingsBtn').addEventListener('click', async () =>
       jitterMinutes,
       defaultDelayBetweenMsMs: [min, Math.max(min, max)],
       defaultDelayBetweenListsMs: [lmin, Math.max(lmin, lmax)],
-      theme,
       consentAccepted,
       headerText,
       footerText
     }
   });
   refresh();
+  btn.textContent = 'Saved ✓';
+  btn.classList.add('save-confirmed');
+  clearTimeout(saveSettingsBtnResetTimer);
+  saveSettingsBtnResetTimer = setTimeout(() => {
+    btn.textContent = 'Save';
+    btn.classList.remove('save-confirmed');
+  }, 1800);
 });
 
 // background.js writes log entries (and other state) directly to
@@ -1523,12 +1874,44 @@ document.getElementById('saveSettingsBtn').addEventListener('click', async () =>
 // since those happen on every keystroke while composing a message and are
 // already reflected live in the form — a full refresh() on each one would
 // make typing feel laggy for no benefit.
+// Keys whose own write handler already applies the change directly to the
+// DOM (checkbox states, badge text, etc.) — reacting to their own storage
+// write by tearing down and rebuilding the whole send panel would just
+// reset scroll position inside it for no visible benefit, which is exactly
+// what made checking chats in a long list feel like it kept jumping back to
+// the top on every click.
+const SELF_APPLIED_STORAGE_KEYS = new Set(['messageDraft', 'listSelections']);
 chrome.storage.onChanged.addListener((changes, area) => {
   if (area !== 'local') return;
   const keys = Object.keys(changes);
-  if (keys.length === 1 && keys[0] === 'messageDraft') return;
+  if (keys.length === 1 && SELF_APPLIED_STORAGE_KEYS.has(keys[0])) return;
   refresh();
 });
 
+// A fresh, real-time check every time the popup opens — not cached state —
+// since the extension being "on" and a message actually being sendable are
+// different things: reloading the extension, WhatsApp Web not being open,
+// or the page not having finished loading yet would all still let a send
+// attempt start and then fail. This is what a send attempt itself checks
+// (pingContentScript), just surfaced up front instead of only discovered
+// after clicking Send.
+async function checkWaStatusLive() {
+  const dot = document.getElementById('waStatusDot');
+  const text = document.getElementById('waStatusText');
+  dot.className = 'wa-status-dot checking';
+  text.textContent = 'WhatsApp Status: checking…';
+  const res = await call('checkWaStatus');
+  if (res.ok && res.ready) {
+    dot.className = 'wa-status-dot ready';
+    text.textContent = 'WhatsApp Status: ready';
+    document.getElementById('waStatusLine').title = 'WhatsApp Web is ready — sends should go through.';
+  } else {
+    dot.className = 'wa-status-dot not-ready';
+    text.textContent = 'WhatsApp Status: not ready';
+    document.getElementById('waStatusLine').title = res.reason || 'WhatsApp Web is not ready — a send would fail right now.';
+  }
+}
+
 restoreDraft();
 refresh();
+checkWaStatusLive();

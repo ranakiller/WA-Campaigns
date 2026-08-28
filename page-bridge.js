@@ -15,6 +15,23 @@ function isLidWid(id) {
   return !!(id && id.isLid && id.isLid());
 }
 
+// WhatsApp message ids are formatted `{fromMe}_{chatId}_{uniqueId}` (a group
+// message adds a trailing `_{participant}`, which this ignores) — the
+// chat-id segment is ground truth for which chat a message actually lives
+// in, which for an individual contact can differ from whatever id was used
+// to *address* the send (WhatsApp can silently resolve a phone-number-based
+// @c.us id to that contact's @lid identity when actually sending, the same
+// way a community's wrapper id gets redirected to its announcement group —
+// see withCommunityRedirect below). Deleting later needs the chat the
+// message truly lives in, not the id it was originally sent to, so this is
+// used to correct `waId` right after every send rather than trusting the
+// input id.
+function chatIdFromMsgId(msgId) {
+  if (typeof msgId !== 'string') return null;
+  const parts = msgId.split('_');
+  return parts.length >= 2 ? parts[1] : null;
+}
+
 async function waitForWppReady(timeoutMs = 30000) {
   if (window.WPP && window.WPP.isReady) return true;
   return new Promise((resolve) => {
@@ -72,7 +89,11 @@ async function fetchGroups() {
     .filter((c) => !c.isParentGroup)
     .map((c) => ({
       waId: c.id && c.id._serialized,
-      name: c.name || c.formattedTitle || (c.id && c.id.user) || 'Unknown',
+      // formattedTitle first: after a group rename, a stale/duplicate chat
+      // object can linger with the old text still cached in .name while
+      // formattedTitle is already current on every chat object, live or
+      // stale — .name is only the fallback for the rare case it's missing.
+      name: c.formattedTitle || c.name || (c.id && c.id.user) || 'Unknown',
       type: 'group',
       number: ''
     }))
@@ -111,7 +132,8 @@ async function fetchCommunities() {
   return chats
     .map((c) => ({
       waId: c.id && c.id._serialized,
-      name: c.name || c.formattedTitle || (c.id && c.id.user) || 'Unknown',
+      // Same formattedTitle-first reasoning as fetchGroups above.
+      name: c.formattedTitle || c.name || (c.id && c.id.user) || 'Unknown',
       type: 'community',
       number: ''
     }))
@@ -235,23 +257,28 @@ async function openChatBeforeSend(waId) {
   }
 }
 
+// Returns { result, waId } rather than just the raw send result — the chat
+// a message actually lands in can differ from the one originally requested
+// (community redirect, see below), and callers that need to reference the
+// sent message later (delete-for-everyone) need to know exactly which chat
+// it's really sitting in, not just where the caller thought it was going.
 async function withCommunityRedirect(waId, sendFn) {
   const resolvedId = await resolveCommunitySendTarget(waId);
   await assertCanPostToGroup(resolvedId);
   try {
-    return await sendFn(resolvedId);
+    return { result: await sendFn(resolvedId), waId: resolvedId };
   } catch (err) {
     const message = String((err && err.message) || err);
 
     const communityMatch = message.match(COMMUNITY_REDIRECT_RE);
     if (communityMatch) {
       await assertCanPostToGroup(communityMatch[1]);
-      return sendFn(communityMatch[1]);
+      return { result: await sendFn(communityMatch[1]), waId: communityMatch[1] };
     }
 
     if (ROTATE_KEY_ERROR_RE.test(message)) {
       await openChatBeforeSend(resolvedId);
-      return sendFn(resolvedId); // let this one's error (if any) propagate as-is
+      return { result: await sendFn(resolvedId), waId: resolvedId }; // let this one's error (if any) propagate as-is
     }
 
     throw err;
@@ -300,15 +327,17 @@ async function handleRequest(action, payload) {
       }
       return {
         waId: chat.id._serialized,
-        name: chat.name || chat.formattedTitle || chat.id.user
+        // formattedTitle first — see fetchGroups' comment; the open chat
+        // could be a renamed group with a stale .name too.
+        name: chat.formattedTitle || chat.name || chat.id.user
       };
     }
     case 'sendMessage': {
-      await withCommunityRedirect(payload.waId, (id) => window.WPP.chat.sendTextMessage(id, payload.text));
-      return { sent: true };
+      const { result, waId } = await withCommunityRedirect(payload.waId, (id) => window.WPP.chat.sendTextMessage(id, payload.text));
+      return { sent: true, msgId: result && result.id, waId: chatIdFromMsgId(result && result.id) || waId };
     }
     case 'sendMedia': {
-      await withCommunityRedirect(payload.waId, (id) =>
+      const { result, waId } = await withCommunityRedirect(payload.waId, (id) =>
         window.WPP.chat.sendFileMessage(id, payload.media.dataUrl, {
           type: 'auto-detect',
           caption: payload.caption || undefined,
@@ -316,7 +345,36 @@ async function handleRequest(action, payload) {
           mimetype: payload.media.mimeType
         })
       );
-      return { sent: true };
+      return { sent: true, msgId: result && result.id, waId: chatIdFromMsgId(result && result.id) || waId };
+    }
+    // "Delete for everyone" — WhatsApp only allows this within a limited
+    // time window after sending and only for messages sent by this account;
+    // past that it throws or comes back with isRevoked:false, which the
+    // caller (background.js) reports per-message rather than treating as a
+    // hard failure that stops the rest of a bulk delete.
+    //
+    // A verify-and-retry step was tried here (re-checking the message's own
+    // state a moment later, retrying the revoke if it didn't look confirmed
+    // yet) to guard against WPP resolving isRevoked:true before WhatsApp's
+    // server has actually processed it. In testing that made things worse,
+    // not better — confirmed via WhatsApp Web's own console that a single
+    // direct call reliably works (including on individual/@lid chats, which
+    // the retry path was specifically breaking), so trust the one call's own
+    // result rather than second-guessing it.
+    //
+    // Passing an array of message ids to WPP.chat.deleteMessage() was also
+    // tried, on the assumption it'd send one combined revoke command for a
+    // whole chat. Decompiling the actual implementation showed that's wrong
+    // — it just loops internally and fires one separate revoke send per
+    // message anyway, with *no* pacing between them at all, which is worse
+    // than doing it ourselves one at a time with a real gap between each.
+    // So this stays one message per call, and pacing (see the delay between
+    // deletes in runDeleteForEveryone, background.js) is the real mitigation
+    // for a silent miss, not batching.
+    case 'deleteMessage': {
+      const outcome = await window.WPP.chat.deleteMessage(payload.waId, payload.msgId, false, true);
+      const r = Array.isArray(outcome) ? outcome[0] : outcome;
+      return { isRevoked: !!(r && r.isRevoked), isDeleted: !!(r && r.isDeleted) };
     }
     default:
       throw new Error(`Unknown bridge action: ${action}`);

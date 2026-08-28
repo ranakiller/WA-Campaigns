@@ -22,7 +22,7 @@ groups/contacts before you can schedule anything.
 
 Ways to reduce risk if you use it anyway:
 - Keep daily volume modest (a handful of sends a day, not hundreds).
-- Leave delay/jitter settings (Safety tab) turned on — don't set them to 0.
+- Leave delay/jitter settings (Settings tab) turned on — don't set them to 0.
   The defaults (20–45s between messages, 30–60s between lists) are on the
   conservative side on purpose; general guidance for reducing spam-detection
   risk on personal WhatsApp automation suggests staying well above a few
@@ -61,17 +61,17 @@ store review, for the same ToS reasons noted above).
   When
   sent, every item for a chat goes out back-to-back instantly (no delay
   between items in the same chat). Your configured delay only applies when
-  moving on to the *next chat*. A standalone 1-line "➖➖➖➖➖➖➖➖" divider
+  moving on to the *next chat*. A standalone 1-line "➖➖➖" separator
   message can be sent *between* items — never after the last one, and never
   for a single-item message — so a multi-item chat still reads clearly as
   separate threads; this isn't a message-level setting, it's chosen at
   send time (see below), since the same message might go out with or
-  without dividers depending on how it's sent. A "Use file names as
+  without separators depending on how it's sent. A "Use file names as
   captions" button fills in each attached file's own name (extension
   stripped) as its caption, for any media item whose caption is still empty
   (won't overwrite one you've already typed). Each saved message also has a
   **Send** icon to fire it off immediately — at one or more saved lists
-  (checkbox for the divider sits right next to Send now/Cancel — it
+  (checkbox for the separator sits right next to Send now/Cancel — it
   remembers its last-used state across popup opens), or via the send-icon
   button at the top-right of the panel (hover for its tooltip) which sends
   the whole message to whatever chat is open right now in the WhatsApp Web
@@ -81,7 +81,17 @@ store review, for the same ToS reasons noted above).
   controlling what's included in a list send, and its own ▶ button to send
   just that one thread to the currently open chat — an image/PDF/document
   item also gets an "open in a new tab" icon right before that button, to
-  preview the actual file before sending it.
+  preview the actual file before sending it. Each list in the checklist has
+  its own ▾ button that expands a per-chat checklist — every chat starts
+  unchecked, nothing is picked until you explicitly pick it. Checking the
+  list's own checkbox selects every one of its members at once; checking
+  individual chats within it (without touching the list checkbox) selects
+  just those — either way, having at least one chat selected is what makes
+  that list part of the send, shown as the list checkbox going fully
+  checked, partially (indeterminate), or back to empty. The list's own label
+  shows a live "(selected/total)" count. These selections are saved per
+  message and survive closing and reopening the popup, not just a
+  re-render.
   The item checkboxes control both what a list send includes and what the
   whole-message "send to current chat" button sends — only checked items go
   out either way. A list send shows a live progress bar (sent/failed/pending,
@@ -128,11 +138,11 @@ store review, for the same ToS reasons noted above).
     it doesn't fire in the middle of the night.
   - **One-time (multiple)** — add one or more specific date/times; each
     runs once, independently, then drops off the list.
-  Delay defaults to the Safety tab's settings — untick **Use default delay**
+  Delay defaults to the Settings tab's settings — untick **Use default delay**
   to set a custom delay range (between messages, and before starting the
   next list) just for this campaign. A checkbox next to **Save campaign**
   (remembers its last-used state across popup opens) controls whether that
-  campaign's multi-item messages get a divider between threads (see
+  campaign's multi-item messages get a separator between threads (see
   Messages tab above). Pause/resume, run immediately, or
   delete any campaign. A campaign shows a live progress bar under it
   whenever it's actively running (scheduled or via Run now).
@@ -141,14 +151,37 @@ store review, for the same ToS reasons noted above).
   campaign name, chat name, message text, *and* the shown date/time — so
   searching "8/27", "1:13", or "pm" filters by when it ran, too. A status
   filter (success/error) narrows it further. Both remember their last-used
-  value across popup opens. **Clear log** wipes it.
-- **Safety tab** — the consent checkbox, jitter (± minutes around a fixed
+  value across popup opens. **Clear log** wipes it. Every successfully sent
+  message gets a **delete-for-everyone** button (WhatsApp's own "delete for
+  everyone," not just deleting it from this log) — and if it was part of a
+  multi-chat send, a bulk "Delete all N for everyone" button appears once for
+  that whole send too. With the search box or status filter narrowing the
+  list down, that same bulk button instead targets exactly what's currently
+  filtered/visible — deleting only those, not the rest of whatever send(s)
+  they came from. WhatsApp only allows this within a limited time after
+  sending; past that (or if a chat's already had it deleted) that one is
+  logged as failed and the rest of a bulk delete still proceeds rather than
+  stopping. A live progress bar (with the same pause/reset controls as a
+  send) shows while a delete is running. Deletes are paced a few seconds
+  apart, one message at a time — WhatsApp's own `deleteMessage` API does
+  technically accept a batch of message ids, but it turns out that's not a
+  single combined command, just an internal loop with no pacing of its own,
+  so batching made deletes *less* reliable, not faster, and isn't used here.
+- **Settings tab** — the consent checkbox, jitter (± minutes around a fixed
   scheduled time), default delay ranges, a light/dark/system appearance
   toggle matching WhatsApp Web's own theme, and an optional message
   header/footer. When set, the header and footer are added to *every*
   item/thread of every sent message — text items in the text, media items
   in the caption — each separated from that item's own content by a blank
   line. Leave either empty to skip it.
+- **WhatsApp Status** (under the header title) — a glowing dot, checked
+  fresh every time the popup opens rather than cached: green means a send
+  would actually go through right now, red means it wouldn't (no
+  `web.whatsapp.com` tab open, or the page/its content script isn't
+  ready — e.g. right after reloading the extension, an already-open tab's
+  content script is orphaned until that tab itself is reloaded). This is the
+  same readiness check a real send performs, just surfaced up front instead
+  of only discovered after clicking Send and getting an error.
 - **Master on/off switch** (top-right, next to the appearance toggle) — an
   instant kill switch. Turning it off blocks any new send from starting and
   stops whatever's currently running, checked before every single item (not
@@ -161,6 +194,69 @@ store review, for the same ToS reasons noted above).
   (typically one you paused and don't want to finish). Reset only stops
   sending the rest; it doesn't re-send to chats already reached.
 - The popup reopens on whichever tab you last had open.
+- **Sign-in is required** — a fresh install (or an old one after this
+  update) shows a "Continue with Google" screen before anything else. It
+  uses whichever Google account is already active in the browser (Chrome's
+  native account picker, via `chrome.identity`) — the same button both signs
+  up (first time) and logs in (every time after), there's no separate form.
+  Sign out and see/change the sync toggle from the bottom of the Settings tab.
+
+## Account sync (Firebase)
+
+Turning on **"Sync messages/lists/campaigns/log/settings to my account in
+real time"** (Settings tab) mirrors those five things to your own Firebase
+project under your signed-in account, so a second device signed into the
+same Google account picks them up automatically. Off by default.
+
+- **Push is instant**: every save here (a message, a list, a campaign, a
+  settings change, a log entry) writes to Firestore right after it writes
+  locally.
+- **Pull happens whenever this extension is active** — the popup open, a
+  campaign running, WhatsApp Web tab activity, etc. Manifest V3 shuts down
+  the extension's background service worker after ~30s fully idle (a Chrome
+  platform limit, not something an extension can override), so a change made
+  on another device while this one has been sitting untouched arrives the
+  next time something wakes it up, typically within seconds of you opening
+  the popup — not necessarily the literal instant it happened elsewhere.
+- **Conflict handling is whole-value, last-write-wins**, per key, compared
+  by a plain timestamp — not a field-by-field merge. Editing the *same*
+  message/list/campaign on two devices within the same sync round-trip means
+  whichever save lands later wins outright. For how this tool is actually
+  used (one person, mostly one device at a time) that trade-off keeps the
+  sync engine simple and predictable rather than adding real-time-collab-grade
+  merge logic for a scenario that rarely comes up.
+- **Media (images/PDFs/docs)** doesn't live in Firestore (documents there cap
+  out at 1MB) — it's uploaded to Firebase Storage instead, content-addressed
+  by a hash of the file so the same attachment reused across messages/devices
+  only ever uploads once. Firestore just holds a reference to it.
+
+### One-time setup (required before sign-in will work at all)
+
+This repo ships with placeholders, not real credentials — nobody's Firebase
+project or Google Cloud project can be created on your behalf. Fill in:
+
+1. **`manifest.json`** → `oauth2.client_id`: a Chrome Extension–type OAuth
+   client ID from Google Cloud Console (APIs & Services → Credentials →
+   Create Credentials → OAuth client ID → Application type "Chrome
+   Extension"), using this extension's permanently pinned ID:
+   `gjacnhihfadbodlcjanankehcfaomlhc` (see `manifest.json`'s `key` field —
+   don't lose the private key that produced it, kept *outside* this folder at
+   `ext-signing-key-WA-Bulk-Sender.pem` in the parent directory on purpose —
+   Chrome warns if a `.pem` sits inside the folder it's loading unpacked, and
+   it must never be committed or shared).
+2. **`firebase-config.js`** → both `firebaseConfig` (Firebase Console →
+   Project settings → General → Your apps → the web app's config) and
+   `GOOGLE_OAUTH_CLIENT_ID` (same value as step 1).
+3. In the Firebase Console, confirm **Authentication → Sign-in method →
+   Google** is enabled, and that **Firestore Database** and **Storage** have
+   both been created.
+4. Paste **`firestore.rules`** into Firestore Database → Rules, and
+   **`storage.rules`** into Storage → Rules, then Publish each — without
+   these, either nobody's data is protected (if left in test mode) or
+   nothing will read/write at all (once test mode expires).
+
+Until all four are done, the "Continue with Google" button will fail —
+that's expected, not a bug.
 
 ## How it works technically
 
@@ -200,7 +296,26 @@ internal data/functions instead of the rendered page.
 - Everything (messages incl. media, fetched chats, lists, campaigns, logs,
   settings, last-open tab) is stored locally via `chrome.storage.local`
   (with the `unlimitedStorage` permission, since saved images/documents can
-  be a few MB) — nothing leaves your machine, there's no external server.
+  be a few MB) — that's still true regardless of sync. With account sync
+  turned on (off by default — see "Account sync" above), messages/lists/
+  campaigns/log/settings additionally get copied to your own Firebase
+  project under your signed-in Google account; `fetchedChats` and in-progress
+  run state stay device-local either way.
+- **`firebase-init.js`**, **`auth.js`**, and **`sync.js`** are the account
+  sync layer — sign-in and all Firestore/Storage traffic happen entirely in
+  `background.js` (the service worker), using the vendored Firebase SDK
+  (`vendor/firebase/`, Apache-2.0, © Google LLC — license notice inline at
+  the top of each vendored file) and `chrome.identity.getAuthToken()` for
+  Google sign-in. `popup.js` never touches Firebase directly; it just calls
+  `signIn`/`signOut`/reads `authUser` and `settings.syncEnabled` the same way
+  it reads everything else.
+- **`xhr-polyfill.js`** — Manifest V3 service workers have no
+  `XMLHttpRequest` at all (only `fetch`), but the Firebase SDK still uses it
+  internally in a few places (Firestore's long-polling transport, Storage's
+  uploader), which otherwise throws or makes Firestore think it's
+  permanently offline. This installs a minimal `fetch()`-backed shim before
+  any Firebase code runs — it must stay the very first import in
+  `background.js` for that ordering to hold.
 
 ## Requirements
 
