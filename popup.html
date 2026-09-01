@@ -95,6 +95,7 @@
   <main>
     <!-- MESSAGES -->
     <section id="tab-messages" class="tab-panel active">
+      <div class="panel-card">
       <h3>Save a message</h3>
       <label for="msgLabel">Label (for your own reference)</label>
       <input id="msgLabel" type="text" placeholder="e.g. Weekly reminder" />
@@ -128,6 +129,7 @@
       <button id="saveMessageBtn" class="primary" type="button">Save message</button>
 
       <button id="cancelEditMessageBtn" class="ghost" style="display:none">Cancel edit</button>
+      </div>
 
       <h3>Saved messages</h3>
       <ul id="messageList" class="item-list"></ul>
@@ -135,6 +137,7 @@
 
     <!-- LISTS -->
     <section id="tab-lists" class="tab-panel">
+      <div class="panel-card">
       <p class="hint">Open <b>web.whatsapp.com</b> in a tab, then scan to pull chats straight from WhatsApp. Search, select, and save them as a list below.</p>
       <div class="kind-toggle" id="scanScopeToggle">
         <button type="button" class="kind-btn active" data-scope="groups">Groups</button>
@@ -158,7 +161,9 @@
         <button id="csvImportBtn" type="button">Import from CSV</button>
       </div>
       <p class="hint">Groups can't be added by typing a name — there's no way to look one up that way, only scanning finds them. A CSV works for both, though: one phone number per row for new contacts (added instantly, no per-number check — whether it's really on WhatsApp only gets checked when you actually send to it, same as any other send), or re-import an "Export fetched chats to CSV" file (below) — trimmed down to whichever rows you want — to pull groups back in by the id it already has.</p>
+      </div>
 
+      <div class="panel-card">
       <h3 id="listBuilderTitle">Build a list</h3>
       <div class="row-with-action">
         <span class="muted">Fetched chats</span>
@@ -177,6 +182,7 @@
       <div id="listBuilderChecklist" class="checklist"></div>
       <button id="saveListBtn" class="primary">Save list</button>
       <button id="cancelEditListBtn" class="ghost" style="display:none">Cancel edit</button>
+      </div>
 
       <h3>Saved lists</h3>
       <ul id="listsList" class="item-list"></ul>
@@ -207,6 +213,7 @@
 
     <!-- SETTINGS -->
     <section id="tab-settings" class="tab-panel">
+      <div class="panel-card">
       <p class="hint warn">
         Fully automated sending can trigger WhatsApp's spam detection even for your own groups.
         These settings add randomness so sends look less scripted. Lower risk isn't zero risk —
@@ -241,6 +248,7 @@
       <textarea id="footerText" rows="2" placeholder="Leave empty for no footer"></textarea>
 
       <button id="saveSettingsBtn" class="primary">Save</button>
+      </div>
     </section>
   </main>
   </div>
