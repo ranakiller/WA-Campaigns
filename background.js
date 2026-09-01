@@ -9,15 +9,15 @@ import { SYNC_KEYS, syncPush, reconcileAll, attachRealtimeListeners, detachRealt
 
 const WA_URL_PATTERN = 'https://web.whatsapp.com/*';
 const DEFAULT_SETTINGS = {
-  jitterMinutes: 4, // fixed-time campaigns fire within +/- this many minutes
+  jitterMinutes: 4, // fixed-time schedules fire within +/- this many minutes
   defaultDelayBetweenMsMs: [20000, 45000], // human-ish gap between consecutive sends
-  defaultDelayBetweenListsMs: [30000, 60000], // gap before starting the next list in a campaign
+  defaultDelayBetweenListsMs: [30000, 60000], // gap before starting the next list in a scheduled send
   consentAccepted: false,
   theme: 'system', // 'system' | 'light' | 'dark'
   masterEnabled: true, // instant kill switch — off blocks new sends and stops any run in progress
   headerText: '', // prepended to the first item of every sent message (its caption, if the first item is media)
   footerText: '', // appended to the last item of every sent message (its caption, if the last item is media)
-  syncEnabled: false // real-time Firebase sync of messages/lists/campaigns/log/settings, off by default
+  syncEnabled: false // real-time Firebase sync of messages/lists/log/settings, off by default
 };
 
 // Mirrors Firebase Auth's current user into chrome.storage.local (as plain
@@ -52,26 +52,34 @@ silentSignIn();
 // sequence of items (each independently text, or media with its own
 // caption), sent one after another to a chat before moving to the next.
 // Older stored messages are normalized to the new shape on read so nothing
-// needs a one-time migration step.
+// needs a one-time migration step. A message also now carries its own
+// `schedules` array (see migrateLegacyCampaignsIntoMessages below) instead
+// of scheduling living in a separate top-level "campaigns" entity.
 function migrateMessage(m) {
-  if (Array.isArray(m.items)) return m;
-  const item =
-    m.kind === 'media' && m.media
-      ? { kind: 'media', media: m.media, caption: m.text || '' }
-      : { kind: 'text', text: m.text || '' };
-  return { ...m, items: [item] };
+  let next = m;
+  if (!Array.isArray(next.items)) {
+    const item =
+      next.kind === 'media' && next.media
+        ? { kind: 'media', media: next.media, caption: next.text || '' }
+        : { kind: 'text', text: next.text || '' };
+    next = { ...next, items: [item] };
+  }
+  if (!Array.isArray(next.schedules)) {
+    next = { ...next, schedules: [] };
+  }
+  return next;
 }
 
-// Campaigns used to have one schedule slot (a single daily time, or a
-// single one-off datetime) and a Paced/Fast sendMode. Now a campaign can
-// have multiple daily times, a repeating interval, or multiple one-off
-// datetimes, and delay is either "use the Safety-tab defaults" or fully
-// custom — older stored campaigns are normalized to the new shape on read.
-// Whether to send a separator between items is also decided per-campaign
-// (and per one-off send) rather than baked into the message, so older
-// stored campaigns default to on (the original always-on behavior). Older
-// campaigns may still have this stored under its old name, sendDivider —
-// carried over rather than silently reset to the default.
+// Normalizes one legacy campaign's shape (old single-slot schedule fields,
+// old delay/separator field names) — used only by the one-time migration
+// below, since campaigns as their own stored entity no longer exist.
+// Schedules used to have one slot (a single daily time, or a single one-off
+// datetime) and a Paced/Fast sendMode; now a schedule can have multiple
+// daily times, a repeating interval, or multiple one-off datetimes, and
+// delay is either "use the Safety-tab defaults" or fully custom. Whether to
+// send a separator between items is also decided per-schedule (and per
+// one-off send) rather than baked into the message — older campaigns may
+// still have this stored under its old name, sendDivider.
 function migrateCampaign(c) {
   let next = c;
   if (next.scheduleType === 'fixed') {
@@ -88,12 +96,71 @@ function migrateCampaign(c) {
   return next;
 }
 
+// One-time migration: folds any legacy top-level `campaigns` entries into
+// `schedules` on the message they targeted, then removes the `campaigns`
+// key entirely. Safe to call on every startup — it's a no-op once
+// `campaigns` no longer exists in storage. A campaign whose target message
+// was since deleted has nothing to attach to and is dropped.
+async function migrateLegacyCampaignsIntoMessages() {
+  const data = await chrome.storage.local.get(['messages', 'campaigns']);
+  if (!Array.isArray(data.campaigns)) return;
+  const messages = (data.messages || []).map(migrateMessage);
+  for (const raw of data.campaigns) {
+    const c = migrateCampaign(raw);
+    const message = messages.find((m) => m.id === c.messageId);
+    if (!message) continue;
+    const {
+      id,
+      messageId,
+      name,
+      listIds,
+      memberFilter,
+      itemIndexes,
+      sendSeparator,
+      scheduleType,
+      times,
+      datetimes,
+      intervalMinutes,
+      timesPerDay,
+      windowStart,
+      windowEnd,
+      useDefaultDelay,
+      delayBetweenMsMs,
+      delayBetweenListsMs,
+      enabled
+    } = c;
+    message.schedules = [
+      ...(message.schedules || []),
+      {
+        id: id || uid(),
+        label: name || '',
+        listIds,
+        memberFilter,
+        itemIndexes,
+        sendSeparator,
+        scheduleType,
+        times,
+        datetimes,
+        intervalMinutes,
+        timesPerDay,
+        windowStart,
+        windowEnd,
+        useDefaultDelay,
+        delayBetweenMsMs,
+        delayBetweenListsMs,
+        enabled
+      }
+    ];
+  }
+  await chrome.storage.local.set({ messages });
+  await chrome.storage.local.remove('campaigns');
+}
+
 async function getState() {
   const data = await chrome.storage.local.get([
     'fetchedChats',
     'lists',
     'messages',
-    'campaigns',
     'log',
     'settings',
     'activeRuns',
@@ -103,7 +170,6 @@ async function getState() {
     fetchedChats: data.fetchedChats || [],
     lists: data.lists || [],
     messages: (data.messages || []).map(migrateMessage),
-    campaigns: (data.campaigns || []).map(migrateCampaign),
     log: data.log || [],
     settings: { ...DEFAULT_SETTINGS, ...(data.settings || {}) },
     activeRuns: data.activeRuns || {},
@@ -629,7 +695,8 @@ async function runDeleteForEveryone(runId, entries) {
 }
 
 // ---------- alarm scheduling ----------
-// A campaign's schedule is one of:
+// A message can carry several schedules (each targeting its own list(s) and
+// timing). A schedule's timing is one of:
 //   'times'    — one or more daily HH:MM times (e.g. 9am, 1pm, 6pm) — each
 //                gets its own recurring alarm, individually rescheduled for
 //                the next day right after it fires.
@@ -640,15 +707,21 @@ async function runDeleteForEveryone(runId, entries) {
 //   'once'     — one or more specific one-off datetimes; each fires once and
 //                is then tombstoned (set to null, keeping array indices
 //                stable for any other still-pending entries).
+// Alarm names are `${kind}:${messageId}:${scheduleId}[:${idx}]` so an alarm
+// firing can be traced straight back to the message + schedule that owns it.
 
-function alarmIdForTime(campaignId, idx) {
-  return `times:${campaignId}:${idx}`;
+function alarmIdForTime(messageId, scheduleId, idx) {
+  return `times:${messageId}:${scheduleId}:${idx}`;
 }
-function alarmIdForInterval(campaignId) {
-  return `interval:${campaignId}`;
+function alarmIdForInterval(messageId, scheduleId) {
+  return `interval:${messageId}:${scheduleId}`;
 }
-function alarmIdForOnce(campaignId, idx) {
-  return `once:${campaignId}:${idx}`;
+function alarmIdForOnce(messageId, scheduleId, idx) {
+  return `once:${messageId}:${scheduleId}:${idx}`;
+}
+
+function scheduleDisplayName(message, schedule) {
+  return schedule.label ? `${message.name} — ${schedule.label}` : message.name;
 }
 
 function nextDailyTimeMs(hhmm, jitterMinutes) {
@@ -662,90 +735,110 @@ function nextDailyTimeMs(hhmm, jitterMinutes) {
   return target.getTime() + jitterMs;
 }
 
-// Does "now" fall inside the campaign's active-hours window? A window
+// Does "now" fall inside the schedule's active-hours window? A window
 // wrapping past midnight (e.g. 22:00–06:00) is handled too. No window
 // configured means "always active".
-function isWithinActiveWindow(campaign) {
-  if (!campaign.windowStart || !campaign.windowEnd) return true;
+function isWithinActiveWindow(schedule) {
+  if (!schedule.windowStart || !schedule.windowEnd) return true;
   const now = new Date();
   const nowMinutes = now.getHours() * 60 + now.getMinutes();
-  const [sh, sm] = campaign.windowStart.split(':').map(Number);
-  const [eh, em] = campaign.windowEnd.split(':').map(Number);
+  const [sh, sm] = schedule.windowStart.split(':').map(Number);
+  const [eh, em] = schedule.windowEnd.split(':').map(Number);
   const startMinutes = sh * 60 + sm;
   const endMinutes = eh * 60 + em;
   if (startMinutes <= endMinutes) return nowMinutes >= startMinutes && nowMinutes <= endMinutes;
   return nowMinutes >= startMinutes || nowMinutes <= endMinutes;
 }
 
-async function clearCampaignAlarms(campaignId) {
+async function clearScheduleAlarms(messageId, scheduleId) {
   const all = await chrome.alarms.getAll();
   await Promise.all(
-    all.filter((a) => a.name.split(':')[1] === campaignId).map((a) => chrome.alarms.clear(a.name))
+    all
+      .filter((a) => {
+        const parts = a.name.split(':');
+        return parts[1] === messageId && parts[2] === scheduleId;
+      })
+      .map((a) => chrome.alarms.clear(a.name))
   );
 }
 
-async function scheduleCampaignAlarm(campaign) {
-  const { settings } = await getState();
-  await clearCampaignAlarms(campaign.id);
-  if (!campaign.enabled) return;
+async function clearAllAlarmsForMessage(messageId) {
+  const all = await chrome.alarms.getAll();
+  await Promise.all(
+    all.filter((a) => a.name.split(':')[1] === messageId).map((a) => chrome.alarms.clear(a.name))
+  );
+}
 
-  if (campaign.scheduleType === 'times') {
-    (campaign.times || []).forEach((time, idx) => {
+async function scheduleMessageAlarm(messageId, schedule) {
+  const { settings } = await getState();
+  await clearScheduleAlarms(messageId, schedule.id);
+  if (!schedule.enabled) return;
+
+  if (schedule.scheduleType === 'times') {
+    (schedule.times || []).forEach((time, idx) => {
       const when = nextDailyTimeMs(time, settings.jitterMinutes);
-      chrome.alarms.create(alarmIdForTime(campaign.id, idx), { when });
+      chrome.alarms.create(alarmIdForTime(messageId, schedule.id, idx), { when });
     });
-  } else if (campaign.scheduleType === 'interval') {
-    const periodInMinutes = Math.max(1, Math.round(campaign.intervalMinutes) || 60);
-    chrome.alarms.create(alarmIdForInterval(campaign.id), { delayInMinutes: periodInMinutes, periodInMinutes });
-  } else if (campaign.scheduleType === 'once') {
-    (campaign.datetimes || []).forEach((dt, idx) => {
+  } else if (schedule.scheduleType === 'interval') {
+    const periodInMinutes = Math.max(1, Math.round(schedule.intervalMinutes) || 60);
+    chrome.alarms.create(alarmIdForInterval(messageId, schedule.id), { delayInMinutes: periodInMinutes, periodInMinutes });
+  } else if (schedule.scheduleType === 'once') {
+    (schedule.datetimes || []).forEach((dt, idx) => {
       if (!dt) return; // tombstoned (already fired)
       const when = new Date(dt).getTime();
       if (when > Date.now()) {
-        chrome.alarms.create(alarmIdForOnce(campaign.id, idx), { when });
+        chrome.alarms.create(alarmIdForOnce(messageId, schedule.id, idx), { when });
       }
     });
   }
 }
 
 async function rebuildAllAlarms() {
+  await migrateLegacyCampaignsIntoMessages();
   await chrome.alarms.clearAll();
-  const { campaigns } = await getState();
-  for (const campaign of campaigns) {
-    if (campaign.enabled) await scheduleCampaignAlarm(campaign);
+  const { messages } = await getState();
+  for (const message of messages) {
+    for (const schedule of message.schedules || []) {
+      if (schedule.enabled) await scheduleMessageAlarm(message.id, schedule);
+    }
   }
 }
 
 chrome.alarms.onAlarm.addListener(async (alarm) => {
-  const { campaigns } = await getState();
-  const [kind, campaignId, idxStr] = alarm.name.split(':');
-  const campaign = campaigns.find((c) => c.id === campaignId);
-  if (!campaign) return;
+  const { messages } = await getState();
+  const [kind, messageId, scheduleId, idxStr] = alarm.name.split(':');
+  const message = messages.find((m) => m.id === messageId);
+  const schedule = message && (message.schedules || []).find((s) => s.id === scheduleId);
+  if (!message || !schedule) return;
 
-  if (kind === 'interval' && !isWithinActiveWindow(campaign)) {
+  if (kind === 'interval' && !isWithinActiveWindow(schedule)) {
     return; // outside the configured hours — the alarm just fires again next period
   }
 
-  await runCampaign(campaign);
+  await runCampaign({ ...schedule, id: `${message.id}:${schedule.id}`, messageId: message.id, name: scheduleDisplayName(message, schedule) });
 
   if (kind === 'times') {
     const idx = Number(idxStr);
-    const time = (campaign.times || [])[idx];
+    const time = (schedule.times || [])[idx];
     if (time) {
       const { settings } = await getState();
-      chrome.alarms.create(alarmIdForTime(campaign.id, idx), { when: nextDailyTimeMs(time, settings.jitterMinutes) });
+      chrome.alarms.create(alarmIdForTime(message.id, schedule.id, idx), { when: nextDailyTimeMs(time, settings.jitterMinutes) });
     }
   } else if (kind === 'once') {
     const idx = Number(idxStr);
-    const { campaigns: current } = await getState();
-    const updated = current.map((c) => {
-      if (c.id !== campaign.id) return c;
-      const datetimes = (c.datetimes || []).slice();
-      datetimes[idx] = null; // tombstone — keeps other pending entries' indices stable
-      const stillPending = datetimes.some(Boolean);
-      return { ...c, datetimes, enabled: stillPending, lastRun: Date.now() };
+    const { messages: current } = await getState();
+    const updated = current.map((m) => {
+      if (m.id !== message.id) return m;
+      const schedules = (m.schedules || []).map((s) => {
+        if (s.id !== schedule.id) return s;
+        const datetimes = (s.datetimes || []).slice();
+        datetimes[idx] = null; // tombstone — keeps other pending entries' indices stable
+        const stillPending = datetimes.some(Boolean);
+        return { ...s, datetimes, enabled: stillPending, lastRun: Date.now() };
+      });
+      return { ...m, schedules };
     });
-    await setState({ campaigns: updated });
+    await setState({ messages: updated });
   }
   // 'interval' alarms repeat on their own via periodInMinutes — nothing to reschedule.
 });
@@ -856,14 +949,21 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
           break;
         }
         case 'deleteList': {
-          const { lists, campaigns } = await getState();
+          const { lists, messages } = await getState();
           sendResponse({
             ok: true,
-            usedByCampaigns: campaigns.filter((c) => c.listIds.includes(msg.id)).map((c) => c.name)
+            usedBySchedules: messages.flatMap((m) =>
+              (m.schedules || [])
+                .filter((s) => (s.listIds || []).includes(msg.id))
+                .map((s) => scheduleDisplayName(m, s))
+            )
           });
           await setState({
             lists: lists.filter((l) => l.id !== msg.id),
-            campaigns: campaigns.map((c) => ({ ...c, listIds: c.listIds.filter((id) => id !== msg.id) }))
+            messages: messages.map((m) => ({
+              ...m,
+              schedules: (m.schedules || []).map((s) => ({ ...s, listIds: (s.listIds || []).filter((id) => id !== msg.id) }))
+            }))
           });
           break;
         }
@@ -884,61 +984,75 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
           break;
         }
         case 'deleteMessage': {
-          const { messages, campaigns } = await getState();
-          await setState({
-            messages: messages.filter((m) => m.id !== msg.id),
-            campaigns: campaigns.filter((c) => c.messageId !== msg.id)
-          });
+          const { messages } = await getState();
+          const message = messages.find((m) => m.id === msg.id);
+          if (message) await clearAllAlarmsForMessage(message.id);
+          await setState({ messages: messages.filter((m) => m.id !== msg.id) });
           sendResponse({ ok: true });
           break;
         }
 
-        // ---- campaigns ----
-        case 'saveCampaign': {
-          const { campaigns } = await getState();
-          const existingIdx = campaigns.findIndex((c) => c.id === msg.campaign.id);
-          let next;
-          const campaign = { ...msg.campaign, id: msg.campaign.id || uid() };
-          if (existingIdx >= 0) {
-            next = campaigns.slice();
-            next[existingIdx] = campaign;
-          } else {
-            next = [...campaigns, campaign];
+        // ---- schedules (per-message auto-send timing) ----
+        case 'saveSchedule': {
+          const { messages } = await getState();
+          const message = messages.find((m) => m.id === msg.messageId);
+          if (!message) {
+            sendResponse({ ok: false, error: 'Message not found.' });
+            break;
           }
-          await setState({ campaigns: next });
-          await scheduleCampaignAlarm(campaign);
+          const schedules = message.schedules || [];
+          const existingIdx = schedules.findIndex((s) => s.id === msg.schedule.id);
+          const schedule = { ...msg.schedule, id: msg.schedule.id || uid() };
+          const nextSchedules =
+            existingIdx >= 0 ? schedules.map((s, i) => (i === existingIdx ? schedule : s)) : [...schedules, schedule];
+          const nextMessages = messages.map((m) => (m.id === message.id ? { ...m, schedules: nextSchedules } : m));
+          await setState({ messages: nextMessages });
+          await scheduleMessageAlarm(message.id, schedule);
+          sendResponse({ ok: true, scheduleId: schedule.id });
+          break;
+        }
+        case 'deleteSchedule': {
+          const { messages } = await getState();
+          await clearScheduleAlarms(msg.messageId, msg.scheduleId);
+          const nextMessages = messages.map((m) =>
+            m.id === msg.messageId ? { ...m, schedules: (m.schedules || []).filter((s) => s.id !== msg.scheduleId) } : m
+          );
+          await setState({ messages: nextMessages });
           sendResponse({ ok: true });
           break;
         }
-        case 'deleteCampaign': {
-          const { campaigns } = await getState();
-          await clearCampaignAlarms(msg.id);
-          await setState({ campaigns: campaigns.filter((c) => c.id !== msg.id) });
-          sendResponse({ ok: true });
-          break;
-        }
-        case 'toggleCampaign': {
-          const { campaigns } = await getState();
-          const next = campaigns.map((c) => (c.id === msg.id ? { ...c, enabled: msg.enabled } : c));
-          await setState({ campaigns: next });
-          // scheduleCampaignAlarm always clears existing alarms first, then
+        case 'toggleSchedule': {
+          const { messages } = await getState();
+          let toggled = null;
+          const nextMessages = messages.map((m) => {
+            if (m.id !== msg.messageId) return m;
+            const schedules = (m.schedules || []).map((s) => {
+              if (s.id !== msg.scheduleId) return s;
+              toggled = { ...s, enabled: msg.enabled };
+              return toggled;
+            });
+            return { ...m, schedules };
+          });
+          await setState({ messages: nextMessages });
+          // scheduleMessageAlarm always clears existing alarms first, then
           // reschedules only if enabled — covers both toggle directions.
-          await scheduleCampaignAlarm(next.find((c) => c.id === msg.id));
+          if (toggled) await scheduleMessageAlarm(msg.messageId, toggled);
           sendResponse({ ok: true });
           break;
         }
-        case 'runCampaignNow': {
-          const { campaigns, settings } = await getState();
+        case 'runScheduleNow': {
+          const { messages, settings } = await getState();
           if (!settings.masterEnabled) {
             sendResponse({ ok: false, error: 'Extension is switched off — turn it back on in the header first.' });
             break;
           }
-          const campaign = campaigns.find((c) => c.id === msg.id);
-          if (!campaign) {
-            sendResponse({ ok: false, error: 'Campaign not found.' });
+          const message = messages.find((m) => m.id === msg.messageId);
+          const schedule = message && (message.schedules || []).find((s) => s.id === msg.scheduleId);
+          if (!schedule) {
+            sendResponse({ ok: false, error: 'Schedule not found.' });
             break;
           }
-          runCampaign(campaign); // fire and forget; log will update
+          runCampaign({ ...schedule, id: `${message.id}:${schedule.id}`, messageId: message.id, name: scheduleDisplayName(message, schedule) }); // fire and forget; log will update
           sendResponse({ ok: true });
           break;
         }

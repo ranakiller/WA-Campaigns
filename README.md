@@ -3,7 +3,9 @@
 A personal-use Chrome/Edge extension for **your own** WhatsApp groups and
 contacts: fetch chats straight from WhatsApp Web's own data (not screen-
 scraping), organize them into reusable named lists, save a library of
-text/image/document messages, and schedule campaigns that send automatically.
+text/image/document messages, and schedule any saved message to send
+automatically — scheduling lives directly on the message itself, there's no
+separate "campaign" object to manage.
 
 ## ⚠️ Please read before using
 
@@ -16,9 +18,9 @@ repeated cases, a ban of your number. Using this only for your own groups
 (not cold-messaging strangers) significantly lowers the risk profile, but
 does **not** eliminate it.
 
-The **Campaigns** tab is locked behind a one-time consent checkbox for this
-reason — you have to explicitly confirm you're only targeting your own
-groups/contacts before you can schedule anything.
+Sending anything — a one-off "Send now" or a schedule — is locked behind a
+one-time consent checkbox on the Settings tab for this reason: you have to
+explicitly confirm you're only targeting your own groups/contacts first.
 
 Ways to reduce risk if you use it anyway:
 - Keep daily volume modest (a handful of sends a day, not hundreds).
@@ -42,9 +44,9 @@ store review, for the same ToS reasons noted above).
 ## What it does
 
 - **Messages tab** — a **Serial number** field (optional; suggests the next
-  unused number by default) controls display order — the Saved Messages
-  list and the Campaigns tab's message picker both sort by it ascending,
-  with unnumbered messages sorted after numbered ones. This only affects
+  unused number by default) controls display order in the Saved Messages
+  list, ascending, with unnumbered messages sorted after numbered ones. This
+  only affects
   ordering/display, not how sending itself works. Each saved message also
   has **▲/▼** buttons to reorder it directly in the list, without typing a
   number by hand — this renumbers every message to a clean 1..N first, so
@@ -70,12 +72,17 @@ store review, for the same ToS reasons noted above).
   captions" button fills in each attached file's own name (extension
   stripped) as its caption, for any media item whose caption is still empty
   (won't overwrite one you've already typed). Each saved message also has a
-  **Send** icon to fire it off immediately — at one or more saved lists
+  **Send** icon that opens a panel with two modes, **Send now** and
+  **Schedule** — everything about who a message goes to and when lives
+  right there on the message itself, there's no separate campaign to build.
+  **Send now** fires it off immediately — at one or more saved lists
   (checkbox for the separator sits right next to Send now/Cancel — it
   remembers its last-used state across popup opens), or via the send-icon
   button at the top-right of the panel (hover for its tooltip) which sends
   the whole message to whatever chat is open right now in the WhatsApp Web
-  tab, no list needed. For a multi-item message, one shared item list
+  tab, no list needed. **Schedule** turns the same list picker into a saved,
+  recurring (or one-off) auto-send — see the bullet on scheduling below. For
+  a multi-item message, one shared item list
   serves the rest: each item has its own checkbox (all checked by default,
   with a "Select all" toggle next to that same top-right button)
   controlling what's included in a list send, and its own ▶ button to send
@@ -151,9 +158,10 @@ store review, for the same ToS reasons noted above).
   happens it comes back blank for every group rather than failing the
   export outright, and the admin column (checked per group individually)
   is unaffected either way.
-- **Campaigns tab** — pick a saved message, pick one or more saved lists,
-  and choose **When**:
-  - **Daily time(s)** — add one or more HH:MM times; the campaign runs at
+- **Scheduling a message** (the **Schedule** mode inside a message's Send
+  panel, Messages tab) — pick one or more saved lists (same checklist as
+  Send now) and choose **When**:
+  - **Daily time(s)** — add one or more HH:MM times; the schedule runs at
     every one of them, every day (e.g. 9am, 1pm, 6pm).
   - **Repeat interval** — runs every N minutes/hours, or set "N times a
     day" instead and it works out the evenly-spaced interval for you.
@@ -163,15 +171,20 @@ store review, for the same ToS reasons noted above).
     runs once, independently, then drops off the list.
   Delay defaults to the Settings tab's settings — untick **Use default delay**
   to set a custom delay range (between messages, and before starting the
-  next list) just for this campaign. A checkbox next to **Save campaign**
+  next list) just for this schedule. A checkbox next to **Save schedule**
   (remembers its last-used state across popup opens) controls whether that
-  campaign's multi-item messages get a separator between threads (see
-  Messages tab above). Pause/resume, run immediately, or
-  delete any campaign. A campaign shows a live progress bar under it
+  schedule's multi-item sends get a separator between threads (see Messages
+  tab above). A message can hold **more than one schedule** — e.g. the same
+  message going to one list every morning and a different list on Fridays —
+  each with its own optional label to tell them apart; a "🕒N" badge on the
+  message row shows how many are currently active. Every schedule for a
+  message is listed right there in its Send panel, with its own
+  pause/resume, run-now, edit, and delete, and its own live progress bar
   whenever it's actively running (scheduled or via Run now).
 - **Log tab** — history of what was sent, when, to which chat, and whether
   it succeeded or failed. A search box (with a "✕" to clear it) matches
-  campaign name, chat name, message text, *and* the shown date/time — so
+  the message/schedule name, chat name, message text, *and* the shown
+  date/time — so
   searching "8/27", "1:13", or "pm" filters by when it ran, too. A status
   filter (success/error) narrows it further. Both remember their last-used
   value across popup opens. **Clear log** wipes it. Every successfully sent
@@ -208,9 +221,9 @@ store review, for the same ToS reasons noted above).
 - **Master on/off switch** (top-right, next to the appearance toggle) — an
   instant kill switch. Turning it off blocks any new send from starting and
   stops whatever's currently running, checked before every single item (not
-  just when a campaign/send starts) so it takes effect within one send, not
+  just when a send starts) so it takes effect within one send, not
   after the whole thing finishes. A red banner shows while it's off.
-- Any active send or campaign shows a live **progress bar** (sent/failed/
+- Any active send shows a live **progress bar** (sent/failed/
   pending, %) with its own **Pause/Resume** button — pausing waits before
   the next item rather than stopping outright, so you can resume right
   where it left off — and a **Reset** button to abandon a run outright
@@ -226,16 +239,18 @@ store review, for the same ToS reasons noted above).
 
 ## Account sync (Firebase)
 
-Turning on **"Sync messages/lists/campaigns/log/settings to my account in
-real time"** (Settings tab) mirrors those five things to your own Firebase
+Turning on **"Sync messages/lists/log/settings to my account in
+real time"** (Settings tab) mirrors those four things to your own Firebase
 project under your signed-in account, so a second device signed into the
-same Google account picks them up automatically. Off by default.
+same Google account picks them up automatically. Off by default. A
+message's schedules travel with it as part of the message itself, so
+there's nothing separate to sync for them.
 
-- **Push is instant**: every save here (a message, a list, a campaign, a
+- **Push is instant**: every save here (a message and its schedules, a list, a
   settings change, a log entry) writes to Firestore right after it writes
   locally.
 - **Pull happens whenever this extension is active** — the popup open, a
-  campaign running, WhatsApp Web tab activity, etc. Manifest V3 shuts down
+  scheduled send running, WhatsApp Web tab activity, etc. Manifest V3 shuts down
   the extension's background service worker after ~30s fully idle (a Chrome
   platform limit, not something an extension can override), so a change made
   on another device while this one has been sitting untouched arrives the
@@ -243,7 +258,7 @@ same Google account picks them up automatically. Off by default.
   the popup — not necessarily the literal instant it happened elsewhere.
 - **Conflict handling is whole-value, last-write-wins**, per key, compared
   by a plain timestamp — not a field-by-field merge. Editing the *same*
-  message/list/campaign on two devices within the same sync round-trip means
+  message or list on two devices within the same sync round-trip means
   whichever save lands later wins outright. For how this tool is actually
   used (one person, mostly one device at a time) that trade-off keeps the
   sync engine simple and predictable rather than adding real-time-collab-grade
@@ -321,16 +336,19 @@ internal data/functions instead of the rendered page.
   see, since they share the same page), and relays the response back.
 - **`background.js`** is the scheduler and data owner: `chrome.alarms` wake
   it up at the right time, it makes sure a WhatsApp Web tab is open, and it
-  drives each campaign's targets (looping lists → chats, applying delays,
+  drives each schedule's targets (looping lists → chats, applying delays,
   logging results) by real WhatsApp chat ID (`waId`, e.g. `1234567890@c.us`
   or `123-456@g.us`) — not by display-name text, so two chats that happen to
-  share a name can never be confused with each other.
-- Everything (messages incl. media, fetched chats, lists, campaigns, logs,
-  settings, last-open tab) is stored locally via `chrome.storage.local`
+  share a name can never be confused with each other. A schedule is just
+  data living on the message it belongs to (`message.schedules[]`) — there's
+  no separate top-level "campaign" entity; `chrome.alarms` names encode
+  which message + schedule they belong to.
+- Everything (messages incl. media and their schedules, fetched chats, lists,
+  logs, settings, last-open tab) is stored locally via `chrome.storage.local`
   (with the `unlimitedStorage` permission, since saved images/documents can
   be a few MB) — that's still true regardless of sync. With account sync
   turned on (off by default — see "Account sync" above), messages/lists/
-  campaigns/log/settings additionally get copied to your own Firebase
+  log/settings additionally get copied to your own Firebase
   project under your signed-in Google account; `fetchedChats` and in-progress
   run state stay device-local either way.
 - **`firebase-init.js`**, **`auth.js`**, and **`sync.js`** are the account
@@ -370,14 +388,20 @@ internal data/functions instead of the rendered page.
 5. Pin the extension (puzzle-piece icon in the toolbar → pin) for easy
    access.
 6. Open a tab to `web.whatsapp.com` and log in if you haven't already.
-7. Click the extension icon: save a message, build a list from the Lists
-   tab, accept the consent checkbox on the Campaigns tab, then create a
-   campaign.
+7. Click the extension icon: build a list from the Lists tab, save a
+   message, accept the consent checkbox on the Settings tab, then use that
+   message's Send icon to send it now or schedule it.
 
 **Upgrading from an older version of this extension:** lists saved before
 this version won't carry their members forward correctly. Rebuild any
 existing lists once: **Scan**, search/select, and re-save each list
 (one-time cleanup).
+
+**Upgrading from a version with a separate Campaigns tab:** any saved
+campaign is migrated automatically, once, the first time this version loads
+— it's moved onto the message it targeted as one of that message's
+schedules (visible in that message's Send panel, under Schedule), and the
+Campaigns tab is gone. Nothing needs to be rebuilt by hand for this one.
 
 ## Known limitations
 
@@ -422,7 +446,7 @@ existing lists once: **Scan**, search/select, and re-save each list
   it never steals focus, it's exactly the kind of tab that targets. Chrome
   doesn't do this by default, which is why the same extension can behave
   differently between the two browsers. If sends start failing partway
-  through a campaign on Edge with "WhatsApp Web tab is not ready," this is
+  through a scheduled send on Edge with "WhatsApp Web tab is not ready," this is
   the likely cause — add `web.whatsapp.com` to Edge's "Never put these
   sites to sleep" list in `edge://settings/system`, or keep the WhatsApp
   tab pinned/active yourself during a run.

@@ -271,8 +271,13 @@ button.ghost.small-inline { padding: 4px 8px; margin: 0; font-size: 11px; }
 .send-panel-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; margin-top: 6px; }
 .send-panel-actions .send-separator-check-row { margin: 0 0 4px; width: 100%; }
 .send-panel-actions button.primary { padding: 6px 10px; font-size: 11px; }
+.schedule-list { margin-bottom: 4px; }
+.send-panel-mode-toggle { margin-top: 8px; }
+.schedule-editor { margin-top: 4px; }
+.schedule-editor button.primary { padding: 6px 10px; font-size: 11px; }
+.schedule-count-badge { font-size: 11px; align-self: center; }
 
-/* Live send/campaign progress. */
+/* Live send/schedule progress. */
 .progress-block { margin: 6px 0; }
 .progress-bar-row { display: flex; align-items: center; gap: 6px; }
 .progress-bar {

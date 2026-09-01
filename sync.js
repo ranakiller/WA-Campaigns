@@ -35,7 +35,7 @@ import {
 } from './vendor/firebase/firebase-firestore.js';
 import { getStorage, ref as storageRef, uploadString, getBytes } from './vendor/firebase/firebase-storage.js';
 
-export const SYNC_KEYS = ['messages', 'lists', 'campaigns', 'settings', 'log'];
+export const SYNC_KEYS = ['messages', 'lists', 'settings', 'log'];
 
 let dbInstance = null;
 function getDb() {

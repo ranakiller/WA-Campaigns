@@ -4,7 +4,7 @@ function call(action, payload = {}) {
   });
 }
 
-let STATE = { fetchedChats: [], lists: [], messages: [], campaigns: [], log: [], settings: {}, activeRuns: {} };
+let STATE = { fetchedChats: [], lists: [], messages: [], log: [], settings: {}, activeRuns: {} };
 // Which "send now" run (a background.js activeRuns id) belongs to which
 // saved message, so the send panel can show that message's own progress
 // bar instead of a generic one — populated when sendNow() returns its runId.
@@ -142,18 +142,18 @@ function activeChatRunPct(run) {
 let composingItems = []; // { kind: 'text', text } | { kind: 'media', media, caption }
 let editingMessageId = null;
 let editingListId = null;
-let editingCampaignId = null;
 
 // The separator checkbox appears in two independent places (the one-off Send
-// panel, and the campaign form) — each remembers its own last-used state
-// across popup opens, not tied to any one message/campaign. Loaded once
-// here (async), with a re-render once it resolves so anything already
-// painted with the checkbox's hardcoded default picks up the real value.
+// panel, and the per-message schedule editor) — each remembers its own
+// last-used state across popup opens, not tied to any one message/schedule.
+// Loaded once here (async), with a re-render once it resolves so anything
+// already painted with the checkbox's hardcoded default picks up the real
+// value.
 let sendPanelSeparatorPref = true;
-let campaignSeparatorPref = true;
-chrome.storage.local.get(['sendPanelSeparatorPref', 'campaignSeparatorPref'], (data) => {
+let scheduleSeparatorPref = true;
+chrome.storage.local.get(['sendPanelSeparatorPref', 'scheduleSeparatorPref'], (data) => {
   if (data.sendPanelSeparatorPref !== undefined) sendPanelSeparatorPref = data.sendPanelSeparatorPref;
-  if (data.campaignSeparatorPref !== undefined) campaignSeparatorPref = data.campaignSeparatorPref;
+  if (data.scheduleSeparatorPref !== undefined) scheduleSeparatorPref = data.scheduleSeparatorPref;
   refresh();
 });
 
@@ -299,8 +299,6 @@ async function refresh() {
   renderMessages();
   renderListBuilder();
   renderLists();
-  renderCampaignForm();
-  renderCampaignList();
   renderLog();
   renderSettings();
 }
@@ -359,7 +357,7 @@ function renderMasterToggle() {
 document.getElementById('masterToggleBtn').addEventListener('click', async () => {
   const enabled = STATE.settings.masterEnabled !== false;
   if (enabled) {
-    if (!confirm('Turn the extension off? This immediately stops any campaign or send in progress.')) return;
+    if (!confirm('Turn the extension off? This immediately stops any scheduled or one-off send in progress.')) return;
   }
   await call('saveSettings', { settings: { masterEnabled: !enabled } });
   refresh();
@@ -404,6 +402,55 @@ chrome.storage.local.get(['openSendPanelMessageId'], (data) => {
     refresh();
   }
 });
+
+// Schedule-editor state for whichever message's send panel is currently
+// open. A message can hold several schedules (each with its own target
+// list(s) and timing); these track which one, if any, is being
+// created/edited right now inside that panel — same "chips" pattern as
+// composingItems, just scoped to one open panel instead of the whole tab.
+let sendPanelMode = 'send'; // 'send' | 'schedule'
+let editingScheduleId = null; // null = creating a new schedule
+let scheduleType = 'times';
+let scheduleTimes = [];
+let scheduleDatetimes = [];
+
+function resetScheduleEditor() {
+  sendPanelMode = 'send';
+  editingScheduleId = null;
+  scheduleType = 'times';
+  scheduleTimes = [];
+  scheduleDatetimes = [];
+}
+
+function startEditingSchedule(schedule) {
+  sendPanelMode = 'schedule';
+  editingScheduleId = schedule.id;
+  scheduleType = schedule.scheduleType || 'times';
+  scheduleTimes = (schedule.times || []).slice();
+  scheduleDatetimes = (schedule.datetimes || []).filter(Boolean).slice();
+}
+
+// Same field names as a schedule object (scheduleType/times/intervalMinutes/
+// windowStart/windowEnd/datetimes) — used both for each schedule's row in
+// "Scheduled sends for this message" and its delete-confirmation text.
+function scheduleSummary(s) {
+  if (!s) return 'unscheduled';
+  if (s.scheduleType === 'times') {
+    const times = s.times || [];
+    return times.length ? `daily at ${times.join(', ')}` : 'no times set';
+  }
+  if (s.scheduleType === 'interval') {
+    const minutes = s.intervalMinutes || 60;
+    const everyText = minutes % 60 === 0 ? `every ${minutes / 60}h` : `every ${minutes}m`;
+    const windowText = s.windowStart && s.windowEnd ? ` (${s.windowStart}–${s.windowEnd})` : '';
+    return `${everyText}${windowText}`;
+  }
+  if (s.scheduleType === 'once') {
+    const pending = (s.datetimes || []).filter(Boolean);
+    return pending.length ? `${pending.length} one-time run(s) pending` : 'no runs pending';
+  }
+  return 'unscheduled';
+}
 
 // The in-progress compose form (label, text box, staged items) is a popup
 // UI concern, not core app data — same pattern as lastTab — so it's read
@@ -698,15 +745,20 @@ function renderMessages() {
     const preview = items.length > 1 ? `${firstPreview} <span class="muted">+${items.length - 1} more item(s)</span>` : firstPreview;
     const lastSent = m.lastSentAt ? `Last sent ${new Date(m.lastSentAt).toLocaleString()}` : 'Never sent';
     const srNoBadge = typeof m.srNo === 'number' ? `<span class="muted">#${m.srNo}</span> ` : '';
+    const enabledScheduleCount = (m.schedules || []).filter((s) => s.enabled).length;
+    const scheduleBadge =
+      enabledScheduleCount > 0
+        ? `<span class="muted schedule-count-badge" title="${enabledScheduleCount} active schedule(s)">🕒${enabledScheduleCount}</span>`
+        : '';
     li.innerHTML = `<div class="item-row">
       <div class="item-text">
-        ${srNoBadge}<b>${escapeHtml(m.name)}</b><br/>${preview}<br/>
+        ${srNoBadge}<b>${escapeHtml(m.name)}</b> ${scheduleBadge}<br/>${preview}<br/>
         <span class="log-time">${lastSent}</span>
       </div>
       <div class="item-actions">
         <button class="icon-btn small-icon-btn" data-act="moveUp" type="button" title="Move up" ${idx === 0 ? 'disabled' : ''}>▲</button>
         <button class="icon-btn small-icon-btn" data-act="moveDown" type="button" title="Move down" ${idx === sortedMessages.length - 1 ? 'disabled' : ''}>▼</button>
-        <button class="icon-btn small-icon-btn" data-act="send" type="button" title="Send now">
+        <button class="icon-btn small-icon-btn" data-act="send" type="button" title="Send now / schedule">
           <svg viewBox="0 0 24 24" width="14" height="14"><path fill="currentColor" d="M2 21l21-9L2 3v7l15 2-15 2z"/></svg>
         </button>
         <button class="icon-btn small-icon-btn" data-act="edit" type="button" title="Edit">${EDIT_ICON_SVG}</button>
@@ -724,10 +776,12 @@ function renderMessages() {
 
     li.querySelector('[data-act="send"]').addEventListener('click', () => {
       if (!STATE.settings.consentAccepted) {
-        alert('Accept the consent checkbox on the Campaigns or Safety tab first — sending is gated behind it, even for a one-off send.');
+        alert('Accept the consent checkbox on the Settings tab first — sending is gated behind it, even for a one-off send.');
         return;
       }
-      setOpenSendPanel(openSendPanelMessageId === m.id ? null : m.id);
+      const opening = openSendPanelMessageId !== m.id;
+      if (opening) resetScheduleEditor();
+      setOpenSendPanel(opening ? m.id : null);
       renderMessages();
     });
     li.querySelector('[data-act="edit"]').addEventListener('click', () => {
@@ -796,6 +850,7 @@ function buildSendPanel(message) {
   }
 
   const items = message.items || [];
+  const schedules = message.schedules || [];
   const wholeSendRun = activeChatRunFor(`msg-${message.id}`);
   const unchecked = uncheckedSetFor(message.id);
   const wholeSendBtnHtml = activeChatBtnHtml({
@@ -806,6 +861,32 @@ function buildSendPanel(message) {
     run: wholeSendRun,
     runKey: `msg-${message.id}`
   });
+  const scheduleListHtml = schedules.length
+    ? `<h3>Scheduled sends</h3>
+    <ul class="item-list schedule-list">
+      ${schedules
+        .map((s) => {
+          const scheduleRun = STATE.activeRuns[`${message.id}:${s.id}`];
+          return `<li class="schedule-row" data-schedule-id="${s.id}">
+            <div class="item-row">
+              <div class="item-text">
+                ${s.label ? `<b>${escapeHtml(s.label)}</b><br/>` : ''}
+                ${escapeHtml(scheduleSummary(s))}<br/>
+                <span class="log-time">${s.enabled ? 'enabled' : 'paused'}</span>
+              </div>
+              <div class="item-actions">
+                <button class="icon-btn small-icon-btn" type="button" data-sched-act="edit" title="Edit">${EDIT_ICON_SVG}</button>
+                <button class="icon-btn small-icon-btn" type="button" data-sched-act="toggle" title="${s.enabled ? 'Pause' : 'Resume'}">${s.enabled ? PAUSE_ICON_SVG : PLAY_ICON_SVG}</button>
+                <button class="icon-btn small-icon-btn" type="button" data-sched-act="run" title="Run now">${RUN_NOW_ICON_SVG}</button>
+                <button class="icon-btn small-icon-btn danger" type="button" data-sched-act="del" title="Delete">${DELETE_ICON_SVG}</button>
+              </div>
+            </div>
+            ${scheduleRun ? renderProgressBlock(scheduleRun) : ''}
+          </li>`;
+        })
+        .join('')}
+    </ul>`
+    : '';
   panel.innerHTML = `
     ${
       items.length <= 1
@@ -852,6 +933,7 @@ function buildSendPanel(message) {
     </div>
     `
     }
+    ${scheduleListHtml}
     ${
       STATE.lists.length === 0
         ? ''
@@ -892,7 +974,11 @@ function buildSendPanel(message) {
         })
         .join('')}
     </div>
-    <div class="send-panel-actions">
+    <div class="kind-toggle send-panel-mode-toggle">
+      <button type="button" class="kind-btn send-mode-btn ${sendPanelMode === 'send' ? 'active' : ''}" data-mode="send">Send now</button>
+      <button type="button" class="kind-btn send-mode-btn ${sendPanelMode === 'schedule' ? 'active' : ''}" data-mode="schedule">Schedule</button>
+    </div>
+    <div class="send-panel-actions" style="display:${sendPanelMode === 'send' ? '' : 'none'}">
       <label class="checkbox-row send-separator-check-row">
         <input type="checkbox" class="send-separator-check" ${sendPanelSeparatorPref ? 'checked' : ''} />
         Send a "➖" separator after each item
@@ -900,23 +986,355 @@ function buildSendPanel(message) {
       <button class="primary" type="button" data-act="confirmSend">Send now</button>
       <button class="ghost small-inline" type="button" data-act="cancelSend">Cancel</button>
     </div>
+    <div class="schedule-editor" style="display:${sendPanelMode === 'schedule' ? '' : 'none'}">
+      <label>When</label>
+      <div class="kind-toggle schedule-type-toggle">
+        <button type="button" class="kind-btn ${scheduleType === 'times' ? 'active' : ''}" data-schedule-type="times">Daily time(s)</button>
+        <button type="button" class="kind-btn ${scheduleType === 'interval' ? 'active' : ''}" data-schedule-type="interval">Repeat interval</button>
+        <button type="button" class="kind-btn ${scheduleType === 'once' ? 'active' : ''}" data-schedule-type="once">Specific date(s)</button>
+      </div>
+
+      <div class="schedule-times-panel" style="display:${scheduleType === 'times' ? '' : 'none'}">
+        <p class="hint">Repeats every day, forever, at each time you add — e.g. add 9:00 AM and 6:00 PM to run twice daily.</p>
+        <div class="when-row">
+          <input type="time" class="schedule-time-input" value="09:00" />
+          <button type="button" class="small schedule-add-time-btn">+ Add time</button>
+        </div>
+        <div class="chip-list schedule-times-list"></div>
+      </div>
+
+      <div class="schedule-interval-panel" style="display:${scheduleType === 'interval' ? '' : 'none'}">
+        <label>Repeat every</label>
+        <div class="when-row">
+          <input type="number" min="1" value="1" class="schedule-interval-value" />
+          <select class="schedule-interval-unit">
+            <option value="minutes">Minutes</option>
+            <option value="hours" selected>Hours</option>
+          </select>
+        </div>
+        <label>Or: times per day instead (overrides "Repeat every" above)</label>
+        <p class="hint">Say how many runs you want today and the spacing is worked out for you — e.g. 5 times a day = one run roughly every 4h48m, evenly spread out.</p>
+        <input type="number" min="0" placeholder="e.g. 5 — leave blank to use the interval above" class="schedule-times-per-day" />
+        <label>Active hours (optional)</label>
+        <p class="hint">Without this, the interval above runs around the clock, including overnight. Set a window to keep runs inside business hours — a tick outside it is silently skipped, not sent late.</p>
+        <div class="when-row">
+          <input type="time" class="schedule-window-start" /> to
+          <input type="time" class="schedule-window-end" />
+        </div>
+      </div>
+
+      <div class="schedule-once-panel" style="display:${scheduleType === 'once' ? '' : 'none'}">
+        <p class="hint">Each date/time you add fires exactly once, then it's done — nothing repeats. Add several for a handful of one-off runs on this schedule without recreating it each time.</p>
+        <div class="when-row">
+          <input type="datetime-local" class="schedule-datetime-input" />
+          <button type="button" class="small schedule-add-datetime-btn">+ Add</button>
+        </div>
+        <div class="chip-list schedule-datetimes-list"></div>
+      </div>
+
+      <label class="checkbox-row">
+        <input type="checkbox" class="schedule-use-default-delay" checked />
+        Use default delay from Safety settings
+      </label>
+      <label>Delay between messages (seconds)</label>
+      <div class="when-row">
+        <input type="number" min="1" max="300" class="schedule-delay-min" disabled /> to
+        <input type="number" min="1" max="300" class="schedule-delay-max" disabled />
+      </div>
+      <label>Delay before starting the next list (seconds)</label>
+      <div class="when-row">
+        <input type="number" min="1" max="600" class="schedule-list-delay-min" disabled /> to
+        <input type="number" min="1" max="600" class="schedule-list-delay-max" disabled />
+      </div>
+      <label>Schedule label (optional — only useful with more than one schedule on this message)</label>
+      <input type="text" class="schedule-label-input" placeholder="e.g. Monday reminder" />
+      <label class="checkbox-row send-separator-check-row">
+        <input type="checkbox" class="schedule-separator-check" ${scheduleSeparatorPref ? 'checked' : ''} />
+        Send a "➖" separator after each item
+      </label>
+      <button class="primary" type="button" data-act="confirmSchedule">${editingScheduleId ? 'Update schedule' : 'Save schedule'}</button>
+      <button class="ghost small-inline" type="button" data-act="cancelSchedule">Cancel</button>
+    </div>
     `
     }
   `;
-  const cancelBtn = panel.querySelector('[data-act="cancelSend"]');
-  if (cancelBtn) {
-    cancelBtn.addEventListener('click', () => {
-      messageRunIds.delete(message.id);
-      saveMessageRunIds();
-      setOpenSendPanel(null);
-      renderMessages();
-    });
+  function closeSendPanel() {
+    messageRunIds.delete(message.id);
+    saveMessageRunIds();
+    resetScheduleEditor();
+    setOpenSendPanel(null);
+    renderMessages();
   }
+  const cancelBtn = panel.querySelector('[data-act="cancelSend"]');
+  if (cancelBtn) cancelBtn.addEventListener('click', closeSendPanel);
+  const cancelScheduleBtn = panel.querySelector('[data-act="cancelSchedule"]');
+  if (cancelScheduleBtn) cancelScheduleBtn.addEventListener('click', closeSendPanel);
   const separatorCheck = panel.querySelector('.send-separator-check');
   if (separatorCheck) {
     separatorCheck.addEventListener('change', () => {
       sendPanelSeparatorPref = separatorCheck.checked;
       chrome.storage.local.set({ sendPanelSeparatorPref });
+    });
+  }
+
+  // ---- schedule editor: mode toggle, "when" sub-toggle, chips, prefill ----
+  panel.querySelectorAll('.send-mode-btn').forEach((btn) => {
+    btn.addEventListener('click', () => {
+      if (btn.dataset.mode === 'schedule' && sendPanelMode !== 'schedule') {
+        // Entering the Schedule tab fresh (not via the pencil on a specific
+        // existing schedule below) always starts a new-schedule draft.
+        editingScheduleId = null;
+        scheduleType = 'times';
+        scheduleTimes = [];
+        scheduleDatetimes = [];
+      }
+      sendPanelMode = btn.dataset.mode;
+      renderMessages();
+    });
+  });
+  function setScheduleType(type) {
+    scheduleType = type;
+    panel.querySelectorAll('.schedule-type-toggle .kind-btn').forEach((b) => b.classList.toggle('active', b.dataset.scheduleType === type));
+    const timesPanel = panel.querySelector('.schedule-times-panel');
+    const intervalPanel = panel.querySelector('.schedule-interval-panel');
+    const oncePanel = panel.querySelector('.schedule-once-panel');
+    if (timesPanel) timesPanel.style.display = type === 'times' ? '' : 'none';
+    if (intervalPanel) intervalPanel.style.display = type === 'interval' ? '' : 'none';
+    if (oncePanel) oncePanel.style.display = type === 'once' ? '' : 'none';
+  }
+  panel.querySelectorAll('.schedule-type-toggle .kind-btn').forEach((btn) => {
+    btn.addEventListener('click', () => setScheduleType(btn.dataset.scheduleType));
+  });
+  function renderScheduleTimesChips() {
+    const box = panel.querySelector('.schedule-times-list');
+    if (!box) return;
+    box.innerHTML = scheduleTimes.length
+      ? scheduleTimes.map((t, i) => `<span class="chip">${escapeHtml(t)}<button type="button" data-idx="${i}">✕</button></span>`).join('')
+      : '<span class="hint">No times added yet.</span>';
+    box.querySelectorAll('button').forEach((btn) => {
+      btn.addEventListener('click', () => {
+        scheduleTimes.splice(Number(btn.dataset.idx), 1);
+        renderScheduleTimesChips();
+      });
+    });
+  }
+  renderScheduleTimesChips();
+  const addTimeBtn = panel.querySelector('.schedule-add-time-btn');
+  if (addTimeBtn) {
+    addTimeBtn.addEventListener('click', () => {
+      const input = panel.querySelector('.schedule-time-input');
+      if (!input.value || scheduleTimes.includes(input.value)) return;
+      scheduleTimes.push(input.value);
+      scheduleTimes.sort();
+      renderScheduleTimesChips();
+    });
+  }
+  function renderScheduleDatetimesChips() {
+    const box = panel.querySelector('.schedule-datetimes-list');
+    if (!box) return;
+    box.innerHTML = scheduleDatetimes.length
+      ? scheduleDatetimes
+          .map((dt, i) => `<span class="chip">${escapeHtml(new Date(dt).toLocaleString())}<button type="button" data-idx="${i}">✕</button></span>`)
+          .join('')
+      : '<span class="hint">No dates added yet.</span>';
+    box.querySelectorAll('button').forEach((btn) => {
+      btn.addEventListener('click', () => {
+        scheduleDatetimes.splice(Number(btn.dataset.idx), 1);
+        renderScheduleDatetimesChips();
+      });
+    });
+  }
+  renderScheduleDatetimesChips();
+  const addDatetimeBtn = panel.querySelector('.schedule-add-datetime-btn');
+  if (addDatetimeBtn) {
+    addDatetimeBtn.addEventListener('click', () => {
+      const input = panel.querySelector('.schedule-datetime-input');
+      if (!input.value) return;
+      scheduleDatetimes.push(input.value);
+      scheduleDatetimes.sort();
+      renderScheduleDatetimesChips();
+    });
+  }
+  function setScheduleDelayFieldsDisabled(disabled) {
+    ['.schedule-delay-min', '.schedule-delay-max', '.schedule-list-delay-min', '.schedule-list-delay-max'].forEach((sel) => {
+      const el = panel.querySelector(sel);
+      if (el) el.disabled = disabled;
+    });
+  }
+  const useDefaultDelayCb = panel.querySelector('.schedule-use-default-delay');
+  if (useDefaultDelayCb) {
+    useDefaultDelayCb.addEventListener('change', () => setScheduleDelayFieldsDisabled(useDefaultDelayCb.checked));
+  }
+  const scheduleSeparatorCheck = panel.querySelector('.schedule-separator-check');
+  if (scheduleSeparatorCheck) {
+    scheduleSeparatorCheck.addEventListener('change', () => {
+      scheduleSeparatorPref = scheduleSeparatorCheck.checked;
+      chrome.storage.local.set({ scheduleSeparatorPref });
+    });
+  }
+  if (sendPanelMode === 'schedule') {
+    const editingSchedule = editingScheduleId ? schedules.find((s) => s.id === editingScheduleId) : null;
+    const setVal = (sel, v) => {
+      const el = panel.querySelector(sel);
+      if (el) el.value = v;
+    };
+    setVal('.schedule-label-input', editingSchedule ? editingSchedule.label || '' : '');
+    const useDefaultDelay = editingSchedule ? editingSchedule.useDefaultDelay !== false : true;
+    if (useDefaultDelayCb) useDefaultDelayCb.checked = useDefaultDelay;
+    setScheduleDelayFieldsDisabled(useDefaultDelay);
+    const [dMin, dMax] = (editingSchedule && editingSchedule.delayBetweenMsMs) || STATE.settings.defaultDelayBetweenMsMs || [20000, 45000];
+    const [lMin, lMax] = (editingSchedule && editingSchedule.delayBetweenListsMs) || STATE.settings.defaultDelayBetweenListsMs || [30000, 60000];
+    setVal('.schedule-delay-min', Math.round(dMin / 1000));
+    setVal('.schedule-delay-max', Math.round(dMax / 1000));
+    setVal('.schedule-list-delay-min', Math.round(lMin / 1000));
+    setVal('.schedule-list-delay-max', Math.round(lMax / 1000));
+    if (scheduleSeparatorCheck) scheduleSeparatorCheck.checked = editingSchedule ? editingSchedule.sendSeparator !== false : scheduleSeparatorPref;
+    if (scheduleType === 'interval') {
+      const minutes = (editingSchedule && editingSchedule.intervalMinutes) || 60;
+      if (minutes % 60 === 0) {
+        setVal('.schedule-interval-value', minutes / 60);
+        setVal('.schedule-interval-unit', 'hours');
+      } else {
+        setVal('.schedule-interval-value', minutes);
+        setVal('.schedule-interval-unit', 'minutes');
+      }
+      setVal('.schedule-window-start', (editingSchedule && editingSchedule.windowStart) || '');
+      setVal('.schedule-window-end', (editingSchedule && editingSchedule.windowEnd) || '');
+    }
+    // Editing an existing schedule loads its target list(s) into the same
+    // shared per-message selection the checklist above (and "Send now")
+    // reads from — same pattern as editing a message loading its content
+    // into the one shared composer, overwriting whatever was there before.
+    if (editingSchedule) {
+      const byList = new Map();
+      for (const listId of editingSchedule.listIds || []) {
+        const list = STATE.lists.find((l) => l.id === listId);
+        if (!list) continue;
+        const allowed = editingSchedule.memberFilter && editingSchedule.memberFilter[listId];
+        const waIds = allowed || (list.members || []).map((m) => m.waId);
+        byList.set(listId, new Set(waIds));
+      }
+      listSelections.set(message.id, byList);
+      saveListSelections();
+    }
+  }
+  panel.querySelectorAll('[data-sched-act="edit"]').forEach((btn) => {
+    btn.addEventListener('click', () => {
+      const scheduleId = btn.closest('[data-schedule-id]').dataset.scheduleId;
+      const schedule = schedules.find((s) => s.id === scheduleId);
+      if (schedule) startEditingSchedule(schedule);
+      renderMessages();
+    });
+  });
+  panel.querySelectorAll('[data-sched-act="toggle"]').forEach((btn) => {
+    btn.addEventListener('click', async () => {
+      const scheduleId = btn.closest('[data-schedule-id]').dataset.scheduleId;
+      const schedule = schedules.find((s) => s.id === scheduleId);
+      if (!schedule) return;
+      await call('toggleSchedule', { messageId: message.id, scheduleId, enabled: !schedule.enabled });
+      refresh();
+    });
+  });
+  panel.querySelectorAll('[data-sched-act="run"]').forEach((btn) => {
+    btn.addEventListener('click', async () => {
+      const scheduleId = btn.closest('[data-schedule-id]').dataset.scheduleId;
+      await call('runScheduleNow', { messageId: message.id, scheduleId });
+      setTimeout(refresh, 1500);
+    });
+  });
+  panel.querySelectorAll('[data-sched-act="del"]').forEach((btn) => {
+    btn.addEventListener('click', async () => {
+      const scheduleId = btn.closest('[data-schedule-id]').dataset.scheduleId;
+      const schedule = schedules.find((s) => s.id === scheduleId);
+      const label = schedule && schedule.label ? schedule.label : scheduleSummary(schedule);
+      if (!confirm(`Delete schedule "${label}"?`)) return;
+      await call('deleteSchedule', { messageId: message.id, scheduleId });
+      if (editingScheduleId === scheduleId) resetScheduleEditor();
+      refresh();
+    });
+  });
+  const confirmScheduleBtn = panel.querySelector('[data-act="confirmSchedule"]');
+  if (confirmScheduleBtn) {
+    confirmScheduleBtn.addEventListener('click', async () => {
+      const memberFilter = {};
+      const listIds = [];
+      for (const l of STATE.lists) {
+        const members = l.members || [];
+        if (members.length === 0) continue;
+        const selected = listSelectionSetFor(message.id, l.id);
+        const selectedWaIds = members.filter((m) => selected.has(m.waId)).map((m) => m.waId);
+        if (selectedWaIds.length === 0) continue;
+        listIds.push(l.id);
+        if (selectedWaIds.length < members.length) memberFilter[l.id] = selectedWaIds;
+      }
+      if (listIds.length === 0) {
+        alert('Select at least one chat to send to.');
+        return;
+      }
+      const itemChecks = panel.querySelectorAll('.send-item-select');
+      let itemIndexes;
+      if (itemChecks.length > 0) {
+        itemIndexes = Array.from(itemChecks)
+          .filter((cb) => cb.checked)
+          .map((cb) => Number(cb.dataset.idx));
+        if (itemIndexes.length === 0) {
+          alert('Select at least one item to send.');
+          return;
+        }
+      }
+      const useDefaultDelay = panel.querySelector('.schedule-use-default-delay').checked;
+      const sendSeparator = panel.querySelector('.schedule-separator-check').checked;
+      const label = panel.querySelector('.schedule-label-input').value.trim();
+      const schedule = {
+        id: editingScheduleId,
+        label,
+        listIds,
+        memberFilter,
+        itemIndexes,
+        scheduleType,
+        enabled: true,
+        useDefaultDelay,
+        sendSeparator,
+        delayBetweenMsMs: [
+          secToMs(panel.querySelector('.schedule-delay-min').value, 20000),
+          secToMs(panel.querySelector('.schedule-delay-max').value, 45000)
+        ],
+        delayBetweenListsMs: [
+          secToMs(panel.querySelector('.schedule-list-delay-min').value, 30000),
+          secToMs(panel.querySelector('.schedule-list-delay-max').value, 60000)
+        ]
+      };
+      if (scheduleType === 'times') {
+        if (scheduleTimes.length === 0) {
+          alert('Add at least one daily time.');
+          return;
+        }
+        schedule.times = scheduleTimes.slice();
+      } else if (scheduleType === 'interval') {
+        const timesPerDay = Number(panel.querySelector('.schedule-times-per-day').value);
+        if (timesPerDay > 0) {
+          schedule.intervalMinutes = Math.round(1440 / timesPerDay);
+        } else {
+          const value = Number(panel.querySelector('.schedule-interval-value').value) || 1;
+          const unit = panel.querySelector('.schedule-interval-unit').value;
+          schedule.intervalMinutes = unit === 'hours' ? value * 60 : value;
+        }
+        schedule.windowStart = panel.querySelector('.schedule-window-start').value || null;
+        schedule.windowEnd = panel.querySelector('.schedule-window-end').value || null;
+      } else if (scheduleType === 'once') {
+        if (scheduleDatetimes.length === 0) {
+          alert('Add at least one date/time.');
+          return;
+        }
+        schedule.datetimes = scheduleDatetimes.slice();
+      }
+      const res = await call('saveSchedule', { messageId: message.id, schedule });
+      if (!res.ok) {
+        alert(res.error || 'Could not save schedule.');
+        return;
+      }
+      resetScheduleEditor();
+      renderMessages();
     });
   }
   panel.querySelectorAll('[data-act="toggleListMembers"]').forEach((btn) => {
@@ -1439,310 +1857,8 @@ function renderLists() {
       btn.disabled = false;
     });
     li.querySelector('[data-act="del"]').addEventListener('click', async () => {
-      if (!confirm(`Delete list "${l.name}"? Campaigns using it will have it removed from their targets.`)) return;
+      if (!confirm(`Delete list "${l.name}"? Any schedules using it will have it removed from their targets.`)) return;
       await call('deleteList', { id: l.id });
-      refresh();
-    });
-    ul.appendChild(li);
-  }
-}
-
-// ============ CAMPAIGNS ============
-
-document.getElementById('consentAcceptBtn').addEventListener('click', async () => {
-  if (!document.getElementById('consentCheckbox').checked) {
-    alert('Please check the box to confirm before enabling campaigns.');
-    return;
-  }
-  await call('saveSettings', { settings: { consentAccepted: true } });
-  refresh();
-});
-
-// Staged schedule data for the campaign currently being built/edited —
-// same "chips" pattern as composing message items.
-let campScheduleType = 'times';
-let campTimes = [];
-let campDatetimes = [];
-
-function setCampScheduleType(type) {
-  campScheduleType = type;
-  document.querySelectorAll('#campScheduleTypeToggle .kind-btn').forEach((b) => b.classList.toggle('active', b.dataset.scheduleType === type));
-  document.getElementById('campTimesPanel').style.display = type === 'times' ? '' : 'none';
-  document.getElementById('campIntervalPanel').style.display = type === 'interval' ? '' : 'none';
-  document.getElementById('campOncePanel').style.display = type === 'once' ? '' : 'none';
-}
-
-document.querySelectorAll('#campScheduleTypeToggle .kind-btn').forEach((btn) => {
-  btn.addEventListener('click', () => setCampScheduleType(btn.dataset.scheduleType));
-});
-
-function renderCampTimesList() {
-  const box = document.getElementById('campTimesList');
-  box.innerHTML = campTimes.length
-    ? campTimes.map((t, i) => `<span class="chip">${escapeHtml(t)}<button type="button" data-idx="${i}">✕</button></span>`).join('')
-    : '<span class="hint">No times added yet.</span>';
-  box.querySelectorAll('button').forEach((btn) => {
-    btn.addEventListener('click', () => {
-      campTimes.splice(Number(btn.dataset.idx), 1);
-      renderCampTimesList();
-    });
-  });
-}
-
-document.getElementById('addTimeBtn').addEventListener('click', () => {
-  const input = document.getElementById('campTimeInput');
-  if (!input.value || campTimes.includes(input.value)) return;
-  campTimes.push(input.value);
-  campTimes.sort();
-  renderCampTimesList();
-});
-
-function renderCampDatetimesList() {
-  const box = document.getElementById('campDatetimesList');
-  box.innerHTML = campDatetimes.length
-    ? campDatetimes
-        .map((dt, i) => `<span class="chip">${escapeHtml(new Date(dt).toLocaleString())}<button type="button" data-idx="${i}">✕</button></span>`)
-        .join('')
-    : '<span class="hint">No dates added yet.</span>';
-  box.querySelectorAll('button').forEach((btn) => {
-    btn.addEventListener('click', () => {
-      campDatetimes.splice(Number(btn.dataset.idx), 1);
-      renderCampDatetimesList();
-    });
-  });
-}
-
-document.getElementById('addDatetimeBtn').addEventListener('click', () => {
-  const input = document.getElementById('campDatetimeInput');
-  if (!input.value) return;
-  campDatetimes.push(input.value);
-  campDatetimes.sort();
-  renderCampDatetimesList();
-});
-
-function setDelayFieldsDisabled(disabled) {
-  ['campDelayMin', 'campDelayMax', 'campListDelayMin', 'campListDelayMax'].forEach((id) => {
-    document.getElementById(id).disabled = disabled;
-  });
-}
-document.getElementById('campUseDefaultDelay').addEventListener('change', (e) => {
-  setDelayFieldsDisabled(e.target.checked);
-});
-document.getElementById('campSendSeparator').addEventListener('change', (e) => {
-  campaignSeparatorPref = e.target.checked;
-  chrome.storage.local.set({ campaignSeparatorPref });
-});
-
-function resetCampaignForm() {
-  editingCampaignId = null;
-  document.getElementById('campName').value = '';
-  campTimes = [];
-  campDatetimes = [];
-  renderCampTimesList();
-  renderCampDatetimesList();
-  setCampScheduleType('times');
-  document.getElementById('campTimeInput').value = '09:00';
-  document.getElementById('campDatetimeInput').value = '';
-  document.getElementById('campIntervalValue').value = 1;
-  document.getElementById('campIntervalUnit').value = 'hours';
-  document.getElementById('campTimesPerDay').value = '';
-  document.getElementById('campWindowStart').value = '';
-  document.getElementById('campWindowEnd').value = '';
-  document.getElementById('campUseDefaultDelay').checked = true;
-  setDelayFieldsDisabled(true);
-  const s = STATE.settings;
-  const [dMin, dMax] = s.defaultDelayBetweenMsMs || [20000, 45000];
-  const [lMin, lMax] = s.defaultDelayBetweenListsMs || [30000, 60000];
-  document.getElementById('campDelayMin').value = Math.round(dMin / 1000);
-  document.getElementById('campDelayMax').value = Math.round(dMax / 1000);
-  document.getElementById('campListDelayMin').value = Math.round(lMin / 1000);
-  document.getElementById('campListDelayMax').value = Math.round(lMax / 1000);
-  document.getElementById('campSendSeparator').checked = campaignSeparatorPref;
-  document.getElementById('addCampaignBtn').textContent = 'Save campaign';
-  document.getElementById('cancelEditCampaignBtn').style.display = 'none';
-  renderCampaignForm();
-}
-document.getElementById('cancelEditCampaignBtn').addEventListener('click', resetCampaignForm);
-
-function renderCampaignForm() {
-  const sel = document.getElementById('campMessageSelect');
-  // Rebuilding <select>'s options resets the browser's selection to the
-  // first one unless explicitly restored — this ran on every refresh()
-  // (e.g. any storage change elsewhere), silently discarding whatever the
-  // user had picked.
-  const desiredMessageId = editingCampaignId
-    ? (STATE.campaigns.find((c) => c.id === editingCampaignId) || {}).messageId
-    : sel.value;
-  sel.innerHTML =
-    sortMessagesBySrNo(STATE.messages)
-      .map((m) => `<option value="${m.id}">${typeof m.srNo === 'number' ? `#${m.srNo} ` : ''}${escapeHtml(m.name)}</option>`)
-      .join('') || '<option value="">No messages saved</option>';
-  if (desiredMessageId) sel.value = desiredMessageId;
-
-  const checklist = document.getElementById('campListChecklist');
-  const checkedIds = editingCampaignId
-    ? new Set((STATE.campaigns.find((c) => c.id === editingCampaignId) || { listIds: [] }).listIds)
-    : new Set(Array.from(document.querySelectorAll('.camp-list-check:checked')).map((cb) => cb.value));
-  checklist.innerHTML =
-    STATE.lists
-      .map(
-        (l) =>
-          `<label><input type="checkbox" class="camp-list-check" value="${l.id}" ${checkedIds.has(l.id) ? 'checked' : ''}/> ${escapeHtml(l.name)} <span class="muted">(${(l.members || []).length})</span></label>`
-      )
-      .join('') || '<span class="hint">Build a list first.</span>';
-
-  const gate = document.getElementById('consentGate');
-  const content = document.getElementById('campaignsContent');
-  const accepted = !!STATE.settings.consentAccepted;
-  gate.style.display = accepted ? 'none' : '';
-  content.style.display = accepted ? '' : 'none';
-}
-
-document.getElementById('addCampaignBtn').addEventListener('click', async () => {
-  const name = document.getElementById('campName').value.trim();
-  const messageId = document.getElementById('campMessageSelect').value;
-  const listIds = Array.from(document.querySelectorAll('.camp-list-check:checked')).map((cb) => cb.value);
-
-  if (!name) { alert('Give this campaign a name.'); return; }
-  if (!messageId) { alert('Pick a saved message.'); return; }
-  if (listIds.length === 0) { alert('Pick at least one list.'); return; }
-
-  const useDefaultDelay = document.getElementById('campUseDefaultDelay').checked;
-  const sendSeparator = document.getElementById('campSendSeparator').checked;
-  const campaign = {
-    id: editingCampaignId,
-    name,
-    messageId,
-    listIds,
-    scheduleType: campScheduleType,
-    enabled: true,
-    useDefaultDelay,
-    sendSeparator,
-    delayBetweenMsMs: [
-      secToMs(document.getElementById('campDelayMin').value, 20000),
-      secToMs(document.getElementById('campDelayMax').value, 45000)
-    ],
-    delayBetweenListsMs: [
-      secToMs(document.getElementById('campListDelayMin').value, 30000),
-      secToMs(document.getElementById('campListDelayMax').value, 60000)
-    ]
-  };
-
-  if (campScheduleType === 'times') {
-    if (campTimes.length === 0) { alert('Add at least one daily time.'); return; }
-    campaign.times = campTimes.slice();
-  } else if (campScheduleType === 'interval') {
-    const timesPerDay = Number(document.getElementById('campTimesPerDay').value);
-    if (timesPerDay > 0) {
-      campaign.intervalMinutes = Math.round(1440 / timesPerDay);
-    } else {
-      const value = Number(document.getElementById('campIntervalValue').value) || 1;
-      const unit = document.getElementById('campIntervalUnit').value;
-      campaign.intervalMinutes = unit === 'hours' ? value * 60 : value;
-    }
-    campaign.windowStart = document.getElementById('campWindowStart').value || null;
-    campaign.windowEnd = document.getElementById('campWindowEnd').value || null;
-  } else if (campScheduleType === 'once') {
-    if (campDatetimes.length === 0) { alert('Add at least one date/time.'); return; }
-    campaign.datetimes = campDatetimes.slice();
-  }
-
-  await call('saveCampaign', { campaign });
-  resetCampaignForm();
-  refresh();
-});
-
-function scheduleSummary(c) {
-  if (c.scheduleType === 'times') {
-    const times = c.times || [];
-    return times.length ? `daily at ${times.join(', ')}` : 'no times set';
-  }
-  if (c.scheduleType === 'interval') {
-    const minutes = c.intervalMinutes || 60;
-    const everyText = minutes % 60 === 0 ? `every ${minutes / 60}h` : `every ${minutes}m`;
-    const windowText = c.windowStart && c.windowEnd ? ` (${c.windowStart}–${c.windowEnd})` : '';
-    return `${everyText}${windowText}`;
-  }
-  if (c.scheduleType === 'once') {
-    const pending = (c.datetimes || []).filter(Boolean);
-    return pending.length ? `${pending.length} one-time run(s) pending` : 'no runs pending';
-  }
-  return 'unscheduled';
-}
-
-function renderCampaignList() {
-  const ul = document.getElementById('campaignList');
-  ul.innerHTML = '';
-  if (STATE.campaigns.length === 0) {
-    ul.innerHTML = '<li class="item-text">No campaigns yet.</li>';
-  }
-  for (const c of STATE.campaigns) {
-    const msg = STATE.messages.find((m) => m.id === c.messageId);
-    const listNames = STATE.lists.filter((l) => c.listIds.includes(l.id)).map((l) => l.name);
-    const li = document.createElement('li');
-    li.innerHTML = `<div class="item-row">
-      <div class="item-text">
-        <b>${escapeHtml(c.name)}</b><br/>
-        ${msg ? escapeHtml(msg.name) : '(deleted message)'} → ${escapeHtml(listNames.join(', ') || '(no lists)')}<br/>
-        <span class="log-time">${escapeHtml(scheduleSummary(c))} · ${c.enabled ? 'enabled' : 'paused'}</span>
-      </div>
-      <div class="item-actions">
-        <button class="icon-btn small-icon-btn" data-act="edit" type="button" title="Edit">${EDIT_ICON_SVG}</button>
-        <button class="icon-btn small-icon-btn" data-act="toggle" type="button" title="${c.enabled ? 'Pause' : 'Resume'}">${c.enabled ? PAUSE_ICON_SVG : PLAY_ICON_SVG}</button>
-        <button class="icon-btn small-icon-btn" data-act="run" type="button" title="Run now">${RUN_NOW_ICON_SVG}</button>
-        <button class="icon-btn small-icon-btn danger" data-act="del" type="button" title="Delete">${DELETE_ICON_SVG}</button>
-      </div>
-    </div>
-    ${STATE.activeRuns[c.id] ? renderProgressBlock(STATE.activeRuns[c.id]) : ''}`;
-    li.querySelector('[data-act="edit"]').addEventListener('click', () => {
-      editingCampaignId = c.id;
-      document.getElementById('campName').value = c.name;
-      setCampScheduleType(c.scheduleType || 'times');
-      campTimes = (c.times || []).slice();
-      campDatetimes = (c.datetimes || []).filter(Boolean).slice();
-      renderCampTimesList();
-      renderCampDatetimesList();
-      document.getElementById('campTimeInput').value = '09:00';
-      document.getElementById('campDatetimeInput').value = '';
-      if (c.scheduleType === 'interval') {
-        const minutes = c.intervalMinutes || 60;
-        if (minutes % 60 === 0) {
-          document.getElementById('campIntervalValue').value = minutes / 60;
-          document.getElementById('campIntervalUnit').value = 'hours';
-        } else {
-          document.getElementById('campIntervalValue').value = minutes;
-          document.getElementById('campIntervalUnit').value = 'minutes';
-        }
-        document.getElementById('campTimesPerDay').value = '';
-        document.getElementById('campWindowStart').value = c.windowStart || '';
-        document.getElementById('campWindowEnd').value = c.windowEnd || '';
-      }
-      const useDefaultDelay = c.useDefaultDelay !== false;
-      document.getElementById('campUseDefaultDelay').checked = useDefaultDelay;
-      setDelayFieldsDisabled(useDefaultDelay);
-      document.getElementById('campSendSeparator').checked = c.sendSeparator !== false;
-      const [dMin, dMax] = c.delayBetweenMsMs || [20000, 45000];
-      const [lMin, lMax] = c.delayBetweenListsMs || [30000, 60000];
-      document.getElementById('campDelayMin').value = Math.round(dMin / 1000);
-      document.getElementById('campDelayMax').value = Math.round(dMax / 1000);
-      document.getElementById('campListDelayMin').value = Math.round(lMin / 1000);
-      document.getElementById('campListDelayMax').value = Math.round(lMax / 1000);
-      document.getElementById('addCampaignBtn').textContent = 'Update campaign';
-      document.getElementById('cancelEditCampaignBtn').style.display = '';
-      renderCampaignForm();
-      document.querySelector('[data-tab="campaigns"]').click();
-    });
-    li.querySelector('[data-act="toggle"]').addEventListener('click', async () => {
-      await call('toggleCampaign', { id: c.id, enabled: !c.enabled });
-      refresh();
-    });
-    li.querySelector('[data-act="run"]').addEventListener('click', async () => {
-      await call('runCampaignNow', { id: c.id });
-      setTimeout(refresh, 1500);
-    });
-    li.querySelector('[data-act="del"]').addEventListener('click', async () => {
-      if (!confirm(`Delete campaign "${c.name}"?`)) return;
-      await call('deleteCampaign', { id: c.id });
       refresh();
     });
     ul.appendChild(li);

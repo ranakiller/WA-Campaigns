@@ -26,7 +26,7 @@
         <hr class="tab-separator" />
         <label class="checkbox-row">
           <input id="syncEnabledCheck" type="checkbox" />
-          Sync messages/lists/campaigns/log/settings to my account in real time
+          Sync messages/lists/log/settings to my account in real time
         </label>
       </div>
     </div>
@@ -65,7 +65,7 @@
     <img src="icons/icon128.png" alt="" class="login-logo" />
     <h2>Sign in to continue</h2>
     <p class="hint">
-      Your messages, lists, campaigns, and log sync to your Google account so you can pick up
+      Your messages, lists, and log sync to your Google account so you can pick up
       on any device — sign in with whichever Google account is already active in this browser.
     </p>
     <button id="googleSignInBtn" class="google-signin-btn" type="button">
@@ -88,7 +88,6 @@
   <nav class="tabs">
     <button class="tab-btn active" data-tab="messages">Messages</button>
     <button class="tab-btn" data-tab="lists">Lists</button>
-    <button class="tab-btn" data-tab="campaigns">Campaigns</button>
     <button class="tab-btn" data-tab="log">Log</button>
     <button class="tab-btn" data-tab="settings">Settings</button>
   </nav>
@@ -183,116 +182,11 @@
       <ul id="listsList" class="item-list"></ul>
     </section>
 
-    <!-- CAMPAIGNS -->
-    <section id="tab-campaigns" class="tab-panel">
-      <div id="consentGate" class="consent-gate" style="display:none">
-        <p class="hint warn">
-          This tool sends automated messages through WhatsApp Web, which is against WhatsApp's Terms
-          of Service even for your own groups/contacts. Automated sending can be flagged by WhatsApp's
-          spam detection and may lead to a temporary restriction or ban of your number. Please confirm
-          this is for your own groups/contacts only — not for messaging people who haven't agreed to
-          receive bulk messages from you.
-        </p>
-        <label class="checkbox-row">
-          <input id="consentCheckbox" type="checkbox" />
-          I understand the risk and will only use this on my own groups/contacts.
-        </label>
-        <button id="consentAcceptBtn" class="primary">Enable campaigns</button>
-      </div>
-
-      <div id="campaignsContent">
-        <h3>New campaign</h3>
-        <label>Campaign name</label>
-        <input id="campName" type="text" placeholder="e.g. Monday reminder" />
-
-        <label>Message</label>
-        <select id="campMessageSelect"></select>
-
-        <label>Send to (one or more lists)</label>
-        <div id="campListChecklist" class="checklist"></div>
-
-        <label>When</label>
-        <div class="kind-toggle" id="campScheduleTypeToggle">
-          <button type="button" class="kind-btn active" data-schedule-type="times">Daily time(s)</button>
-          <button type="button" class="kind-btn" data-schedule-type="interval">Repeat interval</button>
-          <button type="button" class="kind-btn" data-schedule-type="once">Specific date(s)</button>
-        </div>
-
-        <div id="campTimesPanel">
-          <p class="hint">Repeats every day, forever, at each time you add — e.g. add 9:00 AM and 6:00 PM to run twice daily.</p>
-          <div class="when-row">
-            <input id="campTimeInput" type="time" value="09:00" />
-            <button id="addTimeBtn" class="small" type="button">+ Add time</button>
-          </div>
-          <div id="campTimesList" class="chip-list"></div>
-        </div>
-
-        <div id="campIntervalPanel" style="display:none">
-          <label>Repeat every</label>
-          <div class="when-row">
-            <input id="campIntervalValue" type="number" min="1" value="1" />
-            <select id="campIntervalUnit">
-              <option value="minutes">Minutes</option>
-              <option value="hours" selected>Hours</option>
-            </select>
-          </div>
-
-          <label>Or: times per day instead (overrides "Repeat every" above)</label>
-          <p class="hint">Say how many runs you want today and the spacing is worked out for you — e.g. 5 times a day = one run roughly every 4h48m, evenly spread out.</p>
-          <input id="campTimesPerDay" type="number" min="0" placeholder="e.g. 5 — leave blank to use the interval above" />
-
-          <label>Active hours (optional)</label>
-          <p class="hint">Without this, the interval above runs around the clock, including overnight. Set a window (e.g. 9:00 AM–9:00 PM) to keep runs inside business hours — a tick outside it is silently skipped, not sent late.</p>
-          <div class="when-row">
-            <input id="campWindowStart" type="time" /> to
-            <input id="campWindowEnd" type="time" />
-          </div>
-        </div>
-
-        <div id="campOncePanel" style="display:none">
-          <p class="hint">Each date/time you add fires exactly once, then it's done — nothing repeats. Add several for a handful of one-off runs on this campaign without recreating it each time.</p>
-          <div class="when-row">
-            <input id="campDatetimeInput" type="datetime-local" />
-            <button id="addDatetimeBtn" class="small" type="button">+ Add</button>
-          </div>
-          <div id="campDatetimesList" class="chip-list"></div>
-        </div>
-
-        <label class="checkbox-row">
-          <input id="campUseDefaultDelay" type="checkbox" checked />
-          Use default delay from Safety settings
-        </label>
-
-        <label>Delay between messages (seconds)</label>
-        <div class="when-row">
-          <input id="campDelayMin" type="number" min="1" max="300" disabled /> to
-          <input id="campDelayMax" type="number" min="1" max="300" disabled />
-        </div>
-
-        <label>Delay before starting the next list (seconds)</label>
-        <div class="when-row">
-          <input id="campListDelayMin" type="number" min="1" max="600" disabled /> to
-          <input id="campListDelayMax" type="number" min="1" max="600" disabled />
-        </div>
-
-        <label class="checkbox-row">
-          <input id="campSendSeparator" type="checkbox" checked />
-          Send a "➖" separator after each item
-        </label>
-
-        <button id="addCampaignBtn" class="primary">Save campaign</button>
-        <button id="cancelEditCampaignBtn" class="ghost" style="display:none">Cancel edit</button>
-
-        <h3>Active campaigns</h3>
-        <ul id="campaignList" class="item-list"></ul>
-      </div>
-    </section>
-
     <!-- LOG -->
     <section id="tab-log" class="tab-panel">
       <div class="log-filter-row">
         <div class="search-with-clear">
-          <input id="logSearchInput" type="text" placeholder="Search logs (campaign, chat, message, date/time)..." />
+          <input id="logSearchInput" type="text" placeholder="Search logs (message, chat, schedule, date/time)..." />
           <button id="logSearchClearBtn" class="search-clear-btn" type="button" title="Clear search">✕</button>
         </div>
         <select id="logStatusFilter">
@@ -320,7 +214,7 @@
       </p>
       <label class="checkbox-row">
         <input id="consentCheckboxSettings" type="checkbox" />
-        I will only use this on my own groups/contacts (required to run campaigns).
+        I will only use this on my own groups/contacts (required to send anything, including one-off sends).
       </label>
 
       <label>Jitter around scheduled time (± minutes)</label>
