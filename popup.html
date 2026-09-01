@@ -154,7 +154,11 @@
         <input id="manualContactNumber" type="text" placeholder="Or add a contact by phone number, with country code" />
         <button id="manualAddBtn">Add</button>
       </div>
-      <p class="hint">Groups can't be added by typing a name — scan picks up every group automatically.</p>
+      <div class="manual-add">
+        <input id="csvImportInput" type="file" accept=".csv,text/csv" style="display:none" />
+        <button id="csvImportBtn" type="button">Import from CSV</button>
+      </div>
+      <p class="hint">Groups can't be added by typing a name — there's no way to look one up that way, only scanning finds them. A CSV works for both, though: one phone number per row for new contacts (added instantly, no per-number check — whether it's really on WhatsApp only gets checked when you actually send to it, same as any other send), or re-import an "Export fetched chats to CSV" file (below) — trimmed down to whichever rows you want — to pull groups back in by the id it already has.</p>
 
       <h3 id="listBuilderTitle">Build a list</h3>
       <div class="row-with-action">

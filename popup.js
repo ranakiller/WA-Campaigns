@@ -243,13 +243,34 @@ document.addEventListener('click', async (e) => {
   }
 });
 
-function downloadCsv(filename, chats) {
+async function downloadCsv(filename, chats) {
+  // Admin status is checked fresh for whichever groups are actually being
+  // exported (not the whole fetched pool) — one WPP call per group, so this
+  // is the slow part of an export for a large list. getGroupAdminInfo
+  // itself keeps a broken group's failure isolated to that one group/column
+  // rather than failing here.
+  const groupWaIds = (chats || []).filter((c) => c.type === 'group').map((c) => c.waId);
+  let adminInfo = {};
+  if (groupWaIds.length > 0) {
+    const res = await call('getGroupAdminInfo', { waIds: groupWaIds });
+    if (res.ok) adminInfo = res.info || {};
+  }
+  const yesNo = (v) => (v === true ? 'Yes' : v === false ? 'No' : '');
   const escapeCsv = (v) => {
     const s = String(v ?? '');
     return /[",\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
   };
-  const header = ['Name', 'Type', 'ID / Number'];
-  const rows = (chats || []).map((c) => [c.name, c.type, c.type === 'contact' ? c.number || c.waId : c.waId]);
+  const header = ['Name', 'Type', 'ID / Number', "You're Admin", 'Admin-Only Group'];
+  const rows = (chats || []).map((c) => {
+    const info = c.type === 'group' ? adminInfo[c.waId] : null;
+    return [
+      c.name,
+      c.type,
+      c.type === 'contact' ? c.number || c.waId : c.waId,
+      info ? yesNo(info.isAdmin) : '',
+      info ? yesNo(info.announceOnly) : ''
+    ];
+  });
   const csv = [header, ...rows].map((r) => r.map(escapeCsv).join(',')).join('\r\n');
   const blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' });
   const url = URL.createObjectURL(blob);
@@ -1132,6 +1153,159 @@ document.getElementById('manualAddBtn').addEventListener('click', async () => {
   renderListBuilder();
 });
 
+// Minimal RFC4180-ish CSV parser — handles quoted fields, "" escaped
+// quotes, and commas/newlines inside quotes, matching how downloadCsv()
+// above quotes its own output (so re-importing an export round-trips).
+function parseCsvRows(text) {
+  const rows = [];
+  let row = [];
+  let field = '';
+  let inQuotes = false;
+  for (let i = 0; i < text.length; i++) {
+    const ch = text[i];
+    if (inQuotes) {
+      if (ch === '"') {
+        if (text[i + 1] === '"') {
+          field += '"';
+          i++;
+        } else {
+          inQuotes = false;
+        }
+      } else {
+        field += ch;
+      }
+    } else if (ch === '"') {
+      inQuotes = true;
+    } else if (ch === ',') {
+      row.push(field);
+      field = '';
+    } else if (ch === '\n') {
+      row.push(field);
+      rows.push(row);
+      row = [];
+      field = '';
+    } else if (ch !== '\r') {
+      field += ch;
+    }
+  }
+  if (field.length > 0 || row.length > 0) {
+    row.push(field);
+    rows.push(row);
+  }
+  return rows.filter((r) => r.some((c) => c.trim() !== ''));
+}
+
+// Pulls rows out of a CSV shaped either like downloadCsv()'s own export
+// (Name, Type, ID / Number — re-importing a previous export just works,
+// groups included) or a plain "phone number, name" list with no header at
+// all. Two shapes come out:
+//  - { waId, name, type }: the ID column already held a real WhatsApp id
+//    (contains "@") — a group, community, or a previously-exported
+//    contact. Used as-is, no lookup needed — this is what makes
+//    export → trim rows → re-import work for *groups*, since there's no
+//    way to look a group up by name (see the CSV import handler's own
+//    comment for why), but re-using an id we already resolved once before
+//    needs no lookup at all.
+//  - { number, name }: a plain phone number, resolved live via
+//    findContactByNumber the same way the manual add box does.
+function extractContactsFromCsv(text) {
+  const rows = parseCsvRows(text);
+  if (rows.length === 0) return [];
+  const header = rows[0].map((c) => c.trim().toLowerCase());
+  const numHeaderIdx = header.findIndex((h) => /phone|number|id/.test(h));
+  const nameHeaderIdx = header.findIndex((h) => h === 'name');
+  const typeHeaderIdx = header.findIndex((h) => h === 'type');
+  let startIdx, idCol, nameCol, typeCol;
+  if (numHeaderIdx !== -1) {
+    startIdx = 1;
+    idCol = numHeaderIdx;
+    nameCol = nameHeaderIdx;
+    typeCol = typeHeaderIdx;
+  } else {
+    // No recognizable header — guess column 0 is the id/number, column 1
+    // (if present) is the name, and treat row 0 as a header to skip only if
+    // it doesn't itself look like a phone number or a WhatsApp id.
+    const first = rows[0][0] || '';
+    startIdx = /[0-9]{6,}/.test(first) || first.includes('@') ? 0 : 1;
+    idCol = 0;
+    nameCol = rows[0].length > 1 ? 1 : -1;
+    typeCol = -1;
+  }
+  const out = [];
+  for (let i = startIdx; i < rows.length; i++) {
+    const r = rows[i];
+    const raw = (r[idCol] || '').trim();
+    if (!raw) continue;
+    const name = nameCol >= 0 ? (r[nameCol] || '').trim() : '';
+    if (raw.includes('@')) {
+      const declaredType = typeCol >= 0 ? (r[typeCol] || '').trim().toLowerCase() : '';
+      out.push({
+        waId: raw,
+        name,
+        type: declaredType || (raw.endsWith('@g.us') ? 'group' : 'contact')
+      });
+    } else {
+      out.push({ number: raw, name });
+    }
+  }
+  return out;
+}
+
+document.getElementById('csvImportBtn').addEventListener('click', () => {
+  document.getElementById('csvImportInput').click();
+});
+document.getElementById('csvImportInput').addEventListener('change', async (e) => {
+  const file = e.target.files[0];
+  e.target.value = ''; // so selecting the same file again still fires 'change'
+  if (!file) return;
+  const rows = extractContactsFromCsv(await file.text());
+  if (rows.length === 0) {
+    alert('No phone numbers or WhatsApp ids found in that CSV.');
+    return;
+  }
+  // No live WhatsApp lookup for plain phone numbers — a chat id built from
+  // digits alone (number@c.us) is deterministic, and every send already
+  // resolves/verifies its target chat as its own first step regardless
+  // (sendRawMessage's assertFindChat call, which every sendTextMessage/
+  // sendFileMessage goes through) — checking registration again ahead of
+  // time here would just be redundant work done twice. A number that isn't
+  // actually on WhatsApp fails there instead, once you try messaging it,
+  // logged the same as any other per-chat send failure — not here, and not
+  // blocking or slowing down the rest of the import.
+  let added = 0;
+  let alreadyIn = 0;
+  const newlyResolved = [];
+  for (const row of rows) {
+    let contact;
+    if (row.waId) {
+      // Already a real WhatsApp id (a group/community, or a
+      // previously-exported contact) — use it directly, no lookup needed.
+      contact = {
+        waId: row.waId,
+        name: row.name || row.waId,
+        type: row.type,
+        number: row.type === 'contact' && !row.waId.includes('@g.us') ? row.waId.split('@')[0] : ''
+      };
+    } else {
+      const digits = row.number.replace(/[^0-9]/g, '');
+      contact = { waId: `${digits}@c.us`, name: row.name || digits, type: 'contact', number: digits };
+    }
+    if (chatSource.has(contact.waId)) alreadyIn++;
+    else added++;
+    chatSource.set(contact.waId, contact);
+    selectedWaIds.add(contact.waId); // explicitly imported, so pre-select it
+    newlyResolved.push(contact);
+  }
+  if (newlyResolved.length > 0) {
+    await call('saveFetchedChats', { chats: newlyResolved });
+  }
+  renderListBuilder();
+  alert(
+    `CSV import done: ${added} added, ${alreadyIn} already in your fetched chats. ` +
+      `Numbers that turn out not to be on WhatsApp will show up as a failed send in the Log tab when you actually message them, not here.`
+  );
+});
+
 document.getElementById('clearFetchedBtn').addEventListener('click', async () => {
   if (!confirm('Clear the fetched chats list? Saved lists are not affected.')) return;
   await call('clearFetchedChats');
@@ -1140,13 +1314,16 @@ document.getElementById('clearFetchedBtn').addEventListener('click', async () =>
   renderListBuilder();
 });
 
-document.getElementById('exportFetchedBtn').addEventListener('click', () => {
+document.getElementById('exportFetchedBtn').addEventListener('click', async () => {
   const chats = Array.from(chatSource.values());
   if (chats.length === 0) {
     alert('Nothing fetched yet to export.');
     return;
   }
-  downloadCsv('whatsapp-fetched-chats.csv', chats);
+  const btn = document.getElementById('exportFetchedBtn');
+  btn.disabled = true;
+  await downloadCsv('whatsapp-fetched-chats.csv', chats);
+  btn.disabled = false;
 });
 
 document.getElementById('listSearchInput').addEventListener('input', (e) => {
@@ -1255,8 +1432,11 @@ function renderLists() {
       renderListBuilder();
       document.querySelector('[data-tab="lists"]').click();
     });
-    li.querySelector('[data-act="export"]').addEventListener('click', () => {
-      downloadCsv(`${l.name.replace(/[^a-z0-9]+/gi, '_') || 'list'}.csv`, members);
+    li.querySelector('[data-act="export"]').addEventListener('click', async (e) => {
+      const btn = e.currentTarget;
+      btn.disabled = true;
+      await downloadCsv(`${l.name.replace(/[^a-z0-9]+/gi, '_') || 'list'}.csv`, members);
+      btn.disabled = false;
     });
     li.querySelector('[data-act="del"]').addEventListener('click', async () => {
       if (!confirm(`Delete list "${l.name}"? Campaigns using it will have it removed from their targets.`)) return;

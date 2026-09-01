@@ -805,6 +805,22 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
           break;
         }
 
+        case 'getGroupAdminInfo': {
+          const tab = await findWaTab();
+          if (!tab) {
+            sendResponse({ ok: false, error: 'Open web.whatsapp.com in a tab first, then try again.' });
+            break;
+          }
+          const ready = await pingContentScript(tab.id, 2);
+          if (!ready) {
+            sendResponse({ ok: false, error: 'WhatsApp Web tab is not ready yet.' });
+            break;
+          }
+          const res = await sendToTab(tab.id, { action: 'getGroupAdminInfo', waIds: msg.waIds }, 90000);
+          sendResponse(res);
+          break;
+        }
+
         // ---- fetched chats persist (until explicitly cleared) so a popup
         // close/reopen doesn't lose a scan you haven't saved into a list yet ----
         case 'saveFetchedChats': {

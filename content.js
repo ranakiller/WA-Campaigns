@@ -45,6 +45,11 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
       } else if (msg.action === 'getActiveChat') {
         const chat = await bridgeRequest('getActiveChat', {}, 10000);
         sendResponse({ ok: true, chat });
+      } else if (msg.action === 'getGroupAdminInfo') {
+        // Generous timeout — this checks admin status one group at a time,
+        // so a large export can genuinely take a while.
+        const result = await bridgeRequest('getGroupAdminInfo', { waIds: msg.waIds }, 90000);
+        sendResponse({ ok: true, ...result });
       } else if (msg.action === 'sendMessage') {
         const result = await bridgeRequest('sendMessage', { waId: msg.waId, text: msg.text }, 30000);
         sendResponse({ ok: true, ...result });

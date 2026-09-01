@@ -12,7 +12,16 @@ export const firebaseConfig = {
   appId: '1:595199563661:web:9a259eab8f6f2e57744fc4'
 };
 
-// Must match manifest.json's oauth2.client_id exactly — duplicated here
-// because background.js/auth.js need it as a plain JS value, while
-// manifest.json needs its own copy for chrome.identity.getAuthToken to work.
-export const GOOGLE_OAUTH_CLIENT_ID = '435506991606-r7vvjb37pp51o9m00n55emoqghn9kais.apps.googleusercontent.com';
+// Used by auth.js's chrome.identity.launchWebAuthFlow() sign-in — needs an
+// OAuth Client ID of type "Web application" (NOT "Chrome Extension" — that
+// type only works with chrome.identity.getAuthToken(), which is Chrome-only
+// and throws on Edge/other Chromium browsers). In Google Cloud Console →
+// APIs & Services → Credentials → Create Credentials → OAuth client ID →
+// Web application, add this extension's redirect URL under "Authorized
+// redirect URIs":
+//   https://gjacnhihfadbodlcjanankehcfaomlhc.chromiumapp.org/
+// (that's chrome.identity.getRedirectURL() for this extension's pinned ID —
+// see manifest.json's "key" field / README's Account sync section — it's
+// the same on every Chromium browser, not just Chrome, so one client here
+// covers Chrome, Edge, etc.)
+export const GOOGLE_OAUTH_CLIENT_ID = '435506991606-0mon34k21cj43nmb0i9c4mj3arfg7nqs.apps.googleusercontent.com';

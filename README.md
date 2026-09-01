@@ -124,10 +124,33 @@ store review, for the same ToS reasons noted above).
   a list yet. Search the fetched chats, use Select all/Deselect all to work
   through them quickly, and save your picks as a **named list** — e.g.
   "Family groups", "Work team", "Customers". You can also add an individual
-  contact by phone number. Build as many lists as you like, and editing one
-  re-shows its saved members even without rescanning. The small grid icon
-  next to "Fetched chats" (and next to each saved list) **exports to CSV**
-  — Name / Type / ID-or-number columns, opens fine in Excel.
+  contact by phone number, or **import from a CSV**. There's no way to look
+  a group up by name (no API resolves a name to a group — only scanning,
+  since you have to already be a member), but the CSV import isn't limited
+  to contacts: a plain "number, name" list with no header row builds a chat
+  id from each number instantly, with no live check at import time — every
+  send already resolves/verifies its own target chat as its first step
+  regardless (`sendRawMessage`'s `assertFindChat`), so a number that turns
+  out not to be on WhatsApp just fails then, per-chat, logged like any other
+  send failure, rather than the whole import waiting on one-by-one checks it
+  doesn't actually need. The same Name/Type/ID-or-number shape
+  **Export fetched chats to CSV** (the small grid icon, also next to each
+  saved list) produces is *also* accepted, groups included — those rows
+  already carry the group's real id, so re-importing them (after trimming
+  the file down to whichever rows you actually want) works the same way, no
+  lookup either. An end summary shows added / already had it. Imported
+  chats land in "Fetched chats" pre-selected, same as manual add, ready to
+  search/deselect and save as a list. Build as many lists as you like, and
+  editing one re-shows its saved
+  members even without rescanning. Exporting groups also checks (fresh,
+  every export — not cached) and adds two columns: whether you're an admin
+  of that group, and whether the group itself is admin-only/announcement
+  mode — both blank for non-group rows. The admin-only column needs a
+  full group-metadata fetch that can fail if even one group elsewhere in
+  the account has a broken session (see "Known limitations"); when that
+  happens it comes back blank for every group rather than failing the
+  export outright, and the admin column (checked per group individually)
+  is unaffected either way.
 - **Campaigns tab** — pick a saved message, pick one or more saved lists,
   and choose **When**:
   - **Daily time(s)** — add one or more HH:MM times; the campaign runs at
@@ -235,18 +258,27 @@ same Google account picks them up automatically. Off by default.
 This repo ships with placeholders, not real credentials — nobody's Firebase
 project or Google Cloud project can be created on your behalf. Fill in:
 
-1. **`manifest.json`** → `oauth2.client_id`: a Chrome Extension–type OAuth
-   client ID from Google Cloud Console (APIs & Services → Credentials →
-   Create Credentials → OAuth client ID → Application type "Chrome
-   Extension"), using this extension's permanently pinned ID:
-   `gjacnhihfadbodlcjanankehcfaomlhc` (see `manifest.json`'s `key` field —
-   don't lose the private key that produced it, kept *outside* this folder at
+1. **`firebase-config.js`** → `GOOGLE_OAUTH_CLIENT_ID`: a **Web application**
+   type OAuth client ID from Google Cloud Console (APIs & Services →
+   Credentials → Create Credentials → OAuth client ID → Application type
+   "Web application"), with this exact redirect URI added under "Authorized
+   redirect URIs":
+   ```
+   https://gjacnhihfadbodlcjanankehcfaomlhc.chromiumapp.org/
+   ```
+   (that's `chrome.identity.getRedirectURL()` for this extension's
+   permanently pinned ID — see `manifest.json`'s `key` field. Don't lose the
+   private key that produced it, kept *outside* this folder at
    `ext-signing-key-WA-Bulk-Sender.pem` in the parent directory on purpose —
    Chrome warns if a `.pem` sits inside the folder it's loading unpacked, and
-   it must never be committed or shared).
-2. **`firebase-config.js`** → both `firebaseConfig` (Firebase Console →
-   Project settings → General → Your apps → the web app's config) and
-   `GOOGLE_OAUTH_CLIENT_ID` (same value as step 1).
+   it must never be committed or shared. Note this is deliberately **not** a
+   "Chrome Extension" type client — that type only works with
+   `chrome.identity.getAuthToken()`, which is Chrome-only and throws on
+   Edge/other Chromium browsers; `launchWebAuthFlow()` with a Web
+   application client works on all of them, one client covers every
+   browser).
+2. **`firebase-config.js`** → `firebaseConfig` (Firebase Console → Project
+   settings → General → Your apps → the web app's config).
 3. In the Firebase Console, confirm **Authentication → Sign-in method →
    Google** is enabled, and that **Firestore Database** and **Storage** have
    both been created.
@@ -376,12 +408,14 @@ existing lists once: **Scan**, search/select, and re-save each list
   mirroring a human clicking into it, which appears to be what actually
   establishes the session) and retries that one send, rather than doing it
   before every send and slowing all of them down for a problem most sends
-  never hit. The admin-only-group check and Community redirect *do* need
-  real per-group metadata (unlike scanning) to do their job, so if metadata
-  resolution crashes there (e.g. because some other group in the account
-  has broken state, unrelated to the one actually being sent to) it's
-  treated as "couldn't check" and the send proceeds anyway, rather than
-  blocking every send in the account on an unrelated group's problem.
+  never hit. The admin-only-group check, Community redirect, and the CSV
+  export's "Admin-Only Group" column *do* need real per-group metadata
+  (unlike scanning) to do their job, so if metadata resolution crashes there
+  (e.g. because some other group in the account has broken state, unrelated
+  to the one actually being sent to or exported) it's treated as "couldn't
+  check" — a send proceeds anyway rather than blocking on an unrelated
+  group's problem, and a CSV export comes back with that one column blank
+  for every group rather than failing outright.
 - **Edge specifically** can put an inactive background tab to sleep
   ("Sleeping tabs", enabled by default) after a period of idle time — since
   this extension deliberately keeps the WhatsApp tab in the background so

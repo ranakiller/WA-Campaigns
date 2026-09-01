@@ -320,6 +320,38 @@ async function handleRequest(action, payload) {
         number: chat.isGroup ? '' : chat.id.user || ''
       };
     }
+    // For the CSV export's "You're Admin" / "Admin-Only Group" columns.
+    // Admin status is checked per group (WPP.group.iAmAdmin — the same
+    // safe, individually-catchable call assertCanPostToGroup already uses)
+    // so one broken group can't affect any other row. Announce (admin-only)
+    // status needs real group metadata, which only comes back from a single
+    // batched fetch (listGroupsWithMetadata) — if that fails (the same
+    // broken-encryption-session crash risk noted on that helper), every
+    // row's Admin-Only column comes back blank rather than the whole
+    // export failing; the admin column is unaffected either way.
+    case 'getGroupAdminInfo': {
+      const waIds = payload.waIds || [];
+      const info = {};
+      for (const waId of waIds) {
+        let isAdmin = null;
+        try {
+          isAdmin = await window.WPP.group.iAmAdmin(waId);
+        } catch (e) {
+          isAdmin = null;
+        }
+        info[waId] = { isAdmin, announceOnly: null };
+      }
+      const groups = await listGroupsWithMetadata();
+      if (groups) {
+        for (const g of groups) {
+          const id = g.id && g.id._serialized;
+          if (id && info[id]) {
+            info[id].announceOnly = !!(g.groupMetadata && g.groupMetadata.announce);
+          }
+        }
+      }
+      return { info };
+    }
     case 'getActiveChat': {
       const chat = window.WPP.chat.getActiveChat();
       if (!chat || !chat.id) {
