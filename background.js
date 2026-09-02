@@ -185,7 +185,16 @@ async function setState(partial) {
   // sync is turned off.
   for (const key of Object.keys(partial)) {
     if (SYNC_KEYS.includes(key)) {
-      syncPush(key, partial[key]).catch((err) => console.warn('[sync] push failed for', key, err));
+      syncPush(key, partial[key]).catch((err) => {
+        console.warn('[sync] push failed for', key, err);
+        // Best-effort — surfaces as a toast if the popup happens to be open
+        // right now; a rejected sendMessage (nothing listening) is expected
+        // and fine, sync just retries silently on the next reconcile either
+        // way, same as before this existed.
+        chrome.runtime
+          .sendMessage({ action: 'toast', message: `Sync couldn't reach your account just now — it'll retry automatically.`, type: 'warning' })
+          .catch(() => {});
+      });
     }
   }
 }
@@ -424,19 +433,28 @@ async function runCampaign(campaign) {
     await appendLog({ campaignId: campaign.id, campaignName: campaign.name, status: 'error', detail: 'Skipped: extension is switched off.' });
     return;
   }
-  const message = messages.find((m) => m.id === campaign.messageId);
-  if (!message) {
-    await appendLog({ campaignId: campaign.id, campaignName: campaign.name, status: 'error', detail: 'Message no longer exists.' });
-    return;
+  // A send-without-saving pass items straight through (never persisted as a
+  // message), so there's nothing to look up by id — everything else below
+  // (targets, pacing, logging, separators) runs exactly the same either way.
+  let message = null;
+  let items;
+  if (Array.isArray(campaign.items)) {
+    items = campaign.items;
+  } else {
+    message = messages.find((m) => m.id === campaign.messageId);
+    if (!message) {
+      await appendLog({ campaignId: campaign.id, campaignName: campaign.name, status: 'error', detail: 'Message no longer exists.' });
+      return;
+    }
+    // Restricts to a chosen subset of the message's items instead of all of
+    // them — e.g. unchecking a couple of threads before a list send, or the
+    // "send just this one thread to the current chat" flow (a single-index
+    // array). Everything else (targets, pacing, logging, separators) runs
+    // exactly the same either way, just over fewer items.
+    items = Array.isArray(campaign.itemIndexes)
+      ? campaign.itemIndexes.map((i) => (message.items || [])[i]).filter(Boolean)
+      : message.items || [];
   }
-  // Restricts to a chosen subset of the message's items instead of all of
-  // them — e.g. unchecking a couple of threads before a list send, or the
-  // "send just this one thread to the current chat" flow (a single-index
-  // array). Everything else (targets, pacing, logging, separators) runs
-  // exactly the same either way, just over fewer items.
-  const items = Array.isArray(campaign.itemIndexes)
-    ? campaign.itemIndexes.map((i) => (message.items || [])[i]).filter(Boolean)
-    : message.items || [];
   if (items.length === 0) {
     await appendLog({ campaignId: campaign.id, campaignName: campaign.name, status: 'error', detail: 'Message has no content.' });
     return;
@@ -602,9 +620,11 @@ async function runCampaign(campaign) {
     });
   }
 
-  await setState({
-    messages: messages.map((m) => (m.id === message.id ? { ...m, lastSentAt: Date.now() } : m))
-  });
+  if (message) {
+    await setState({
+      messages: messages.map((m) => (m.id === message.id ? { ...m, lastSentAt: Date.now() } : m))
+    });
+  }
   await finishActiveRun(campaign.id);
 
   chrome.notifications.create(uid(), {
@@ -1094,6 +1114,47 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
             listIds: msg.listIds,
             memberFilter: msg.memberFilter,
             itemIndexes: msg.itemIndexes,
+            sendSeparator: msg.sendSeparator !== false,
+            useDefaultDelay: true,
+            delayBetweenMsMs: settings.defaultDelayBetweenMsMs,
+            delayBetweenListsMs: settings.defaultDelayBetweenListsMs
+          });
+          sendResponse({ ok: true, runId });
+          break;
+        }
+
+        // Send-without-saving from the Messages tab compose form — same as
+        // sendNow above, except the items being sent are never persisted as
+        // a saved message; they're passed straight through to runCampaign
+        // (see its `campaign.items` branch).
+        case 'sendNowAdhoc': {
+          const { settings } = await getState();
+          if (!settings.masterEnabled) {
+            sendResponse({ ok: false, error: 'Extension is switched off — turn it back on in the header first.' });
+            break;
+          }
+          if (!Array.isArray(msg.items) || msg.items.length === 0) {
+            sendResponse({ ok: false, error: 'Add at least one text or attachment item first.' });
+            break;
+          }
+          if (!msg.listIds || msg.listIds.length === 0) {
+            sendResponse({ ok: false, error: 'Pick at least one list.' });
+            break;
+          }
+          if (
+            msg.memberFilter &&
+            msg.listIds.every((id) => Array.isArray(msg.memberFilter[id]) && msg.memberFilter[id].length === 0)
+          ) {
+            sendResponse({ ok: false, error: 'Select at least one chat to send to.' });
+            break;
+          }
+          const runId = `adhoc-${uid()}`;
+          runCampaign({
+            id: runId,
+            name: 'One-off send (not saved)',
+            items: msg.items,
+            listIds: msg.listIds,
+            memberFilter: msg.memberFilter,
             sendSeparator: msg.sendSeparator !== false,
             useDefaultDelay: true,
             delayBetweenMsMs: settings.defaultDelayBetweenMsMs,

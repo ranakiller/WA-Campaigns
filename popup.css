@@ -25,6 +25,9 @@
   --shadow-sm: 0 1px 2px rgba(15, 27, 33, 0.06);
   --shadow-md: 0 6px 20px rgba(15, 27, 33, 0.08);
   --shadow-header: 0 2px 10px rgba(0, 96, 76, 0.16);
+  --tooltip-bg: #182229;
+  --tooltip-fg: #f2f6f7;
+  --tooltip-border: rgba(0, 168, 132, 0.35);
 }
 
 @media (prefers-color-scheme: dark) {
@@ -49,6 +52,9 @@
     --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.35);
     --shadow-md: 0 10px 28px rgba(0, 0, 0, 0.45);
     --shadow-header: 0 2px 14px rgba(0, 0, 0, 0.4);
+    --tooltip-bg: #2a3942;
+    --tooltip-fg: #f2f6f7;
+    --tooltip-border: rgba(6, 207, 156, 0.35);
   }
 }
 
@@ -73,6 +79,9 @@
   --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.35);
   --shadow-md: 0 10px 28px rgba(0, 0, 0, 0.45);
   --shadow-header: 0 2px 14px rgba(0, 0, 0, 0.4);
+  --tooltip-bg: #2a3942;
+  --tooltip-fg: #f2f6f7;
+  --tooltip-border: rgba(6, 207, 156, 0.35);
 }
 
 * { box-sizing: border-box; }
@@ -224,56 +233,96 @@ button.ghost.small-inline { padding: 5px 10px; margin: 0; font-size: 11px; }
   margin: 4px 0 10px;
   background: var(--bg-app);
 }
+/* Sits inside the composing-list box itself, above the items — only
+   rendered once there's at least one item, since neither action means
+   anything on an empty list. */
+.composing-toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin: 0 0 8px;
+  padding-bottom: 8px;
+  border-bottom: 1px solid var(--border);
+}
+.composing-toolbar-actions { display: flex; gap: 4px; flex-shrink: 0; }
 .composing-item {
   display: flex;
   align-items: flex-start;
-  gap: 6px;
-  padding: 6px 0;
-  border-bottom: 1px solid var(--border);
+  gap: 8px;
+  padding: 8px;
+  margin-bottom: 6px;
+  border-radius: var(--radius-sm);
+  background: var(--bg-panel);
+  border: 1px solid var(--border);
+  transition: border-color 0.15s ease;
 }
-.composing-item:last-child { border-bottom: none; }
-.composing-item .send-item-select { flex-shrink: 0; margin-top: 3px; width: auto; }
+.composing-item:last-child { margin-bottom: 0; }
+.composing-item:hover { border-color: var(--border-strong); }
+.composing-item.editing { border-color: var(--accent); box-shadow: 0 0 0 1px var(--accent); }
+.composing-item-editing-note { display: block; margin-top: 3px; font-size: 10.5px; font-style: italic; }
+.composing-item .send-item-select { flex-shrink: 0; margin-top: 5px; width: auto; }
 .composing-item .item-srno-input {
-  width: 34px;
+  width: 26px;
+  height: 26px;
   flex-shrink: 0;
   margin: 0;
-  padding: 3px 2px;
+  padding: 0;
+  border: none;
+  border-radius: 50%;
+  background: var(--accent-soft);
+  color: var(--accent);
   font-size: 11px;
+  font-weight: 700;
   text-align: center;
 }
 .send-item-select-all-row { margin: 0; }
 .send-panel-top-row { display: flex; align-items: center; gap: 8px; margin: 6px 0; }
 .composing-list .send-panel-top-row { margin: 0 0 6px; padding-bottom: 6px; border-bottom: 1px solid var(--border); }
 .send-panel-top-row .send-active-chat-btn { margin-left: auto; flex-shrink: 0; }
-.composing-item-icon { flex-shrink: 0; margin-top: 2px; }
-.composing-item-body { flex: 1; min-width: 0; font-size: 12px; color: var(--text-primary); }
-.composing-item-preview { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; word-break: break-word; }
+.composing-item-icon {
+  flex-shrink: 0;
+  width: 26px;
+  height: 26px;
+  border-radius: 50%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: var(--bg-hover);
+  color: var(--text-secondary);
+}
+.composing-item-icon.media { color: var(--accent); }
+.composing-item-body { flex: 1; min-width: 0; font-size: 12px; color: var(--text-primary); padding-top: 4px; }
+.composing-item-preview { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; word-break: break-word; font-weight: 500; }
 .composing-item-body .caption-input {
   width: 100%;
-  margin: 3px 0 0;
-  padding: 3px 6px;
+  margin: 6px 0 0;
+  padding: 5px 8px;
   font-size: 11px;
   font-family: inherit;
   border: 1px solid var(--border);
-  border-radius: 4px;
+  border-radius: 6px;
   background: var(--bg-input);
   color: var(--text-primary);
   resize: vertical;
   min-height: 30px;
 }
-.composing-item-actions { display: flex; gap: 2px; flex-shrink: 0; }
+.composing-item-actions { display: flex; gap: 2px; flex-shrink: 0; padding-top: 2px; }
 .composing-item-actions button {
   border: none;
-  background: var(--bg-hover);
+  background: none;
   color: var(--text-secondary);
-  border-radius: 4px;
-  width: 20px;
-  height: 20px;
-  font-size: 10px;
-  line-height: 1;
+  border-radius: 50%;
+  width: 22px;
+  height: 22px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
   cursor: pointer;
+  transition: background 0.15s ease, color 0.15s ease;
 }
-.composing-item-actions button:hover { background: var(--border); }
+.composing-item-actions button:hover { background: var(--bg-hover); color: var(--text-primary); }
+.composing-item-actions button[data-act="remove"]:hover { background: var(--danger-bg); color: var(--danger-fg); }
 
 /* Chips for added daily times / one-off datetimes in the schedule editor. */
 .chip-list { display: flex; flex-wrap: wrap; gap: 6px; margin: 4px 0 10px; }
@@ -402,10 +451,31 @@ select:focus {
   box-shadow: 0 0 0 3px var(--accent-soft);
 }
 
+/* Vertical-only resize (no horizontal drag handle spilling text outside
+   the panel), and the scrollbar hidden — dragging the box taller is how
+   you see more, the same way the resize handle already implies. */
+textarea {
+  resize: vertical;
+  scrollbar-width: none;
+}
+textarea::-webkit-scrollbar { display: none; }
+
+/* The per-item thread-number badge is a styled circle, not a spinner
+   control — Chrome's native up/down arrows don't fit it and never did
+   anything useful there (typing or using ▲/▼ on the row does the actual
+   reordering). */
+.item-srno-input::-webkit-inner-spin-button,
+.item-srno-input::-webkit-outer-spin-button {
+  -webkit-appearance: none;
+  margin: 0;
+}
+.item-srno-input { -moz-appearance: textfield; }
+
 input:disabled, textarea:disabled, select:disabled {
   opacity: 0.5;
   cursor: not-allowed;
 }
+button:disabled { opacity: 0.45; cursor: not-allowed; pointer-events: none; }
 
 input[type="checkbox"] { accent-color: var(--accent); }
 
@@ -501,6 +571,18 @@ button.ghost {
   transition: border-color 0.15s ease, color 0.15s ease;
 }
 button.ghost:hover { border-color: var(--text-secondary); color: var(--text-primary); }
+
+/* Groups a form's commit actions (Save / Send / Cancel) into one aligned
+   row instead of relying on plain inline text-flow, which wraps buttons of
+   different widths unevenly and looks disjointed. */
+.form-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  margin: 6px 0 16px;
+}
+.form-actions button { margin: 0; }
 
 /* ---------- kind toggle (Messages/Lists tabs) ---------- */
 .kind-toggle { display: flex; gap: 6px; margin: 5px 0 12px; }
@@ -680,8 +762,9 @@ button.danger { background: var(--danger-bg); color: var(--danger-fg); }
 .manual-add { display: flex; gap: 6px; margin: 10px 0; align-items: center; }
 .manual-add input { margin: 0; flex: 1; }
 .manual-add select { margin: 0; width: auto; }
-.manual-add button { padding: 0 14px; border-radius: var(--radius-sm); border: 1px solid var(--border-strong); background: var(--bg-panel); color: var(--text-primary); cursor: pointer; height: 34px; font-size: 12px; }
-.manual-add button:hover { background: var(--bg-hover); }
+.manual-add button:not(.icon-btn) { padding: 0 14px; border-radius: var(--radius-sm); border: 1px solid var(--border-strong); background: var(--bg-panel); color: var(--text-primary); cursor: pointer; height: 34px; font-size: 12px; }
+.manual-add button:not(.icon-btn):hover { background: var(--bg-hover); }
+.manual-add .icon-btn { flex-shrink: 0; }
 
 .select-all-row {
   display: flex;
@@ -726,3 +809,197 @@ button.danger { background: var(--danger-bg); color: var(--danger-fg); }
 .log-status-error { color: var(--danger-fg); font-weight: 600; }
 .log-status-warning { color: var(--warn-fg); font-weight: 600; }
 .log-time { font-size: 10px; color: var(--text-secondary); }
+
+/* ---------- custom tooltips ----------
+   Replaces native browser title tooltips (which can't be styled at all).
+   One shared element, positioned in JS from each trigger's actual measured
+   position (see the CUSTOM TOOLTIPS block near the end of popup.js) —
+   a pure-CSS ::after/::before attempt couldn't adapt to where an element
+   actually sits, so anything near an edge either rendered off-screen or,
+   worse, could trick the popup's own auto-resize into a hover/resize loop.
+   `position: fixed` here is relative to the popup's own viewport, so
+   clamping against document.documentElement.clientWidth/clientHeight in JS
+   keeps it fully on-screen no matter which element triggered it. */
+.custom-tooltip {
+  position: fixed;
+  z-index: 1000;
+  max-width: 220px;
+  padding: 6px 10px;
+  border-radius: 7px;
+  font-size: 11px;
+  font-weight: 500;
+  line-height: 1.35;
+  background: var(--tooltip-bg);
+  color: var(--tooltip-fg);
+  border: 1px solid var(--tooltip-border);
+  box-shadow: var(--shadow-md);
+  pointer-events: none;
+  opacity: 0;
+  visibility: hidden;
+  transition: opacity 0.1s ease;
+}
+.custom-tooltip.visible { opacity: 1; visibility: visible; }
+.custom-tooltip::after {
+  content: '';
+  position: absolute;
+  left: var(--arrow-left, 50%);
+  transform: translateX(-50%);
+  border: 5px solid transparent;
+}
+.custom-tooltip[data-placement="top"]::after { top: 100%; border-top-color: var(--tooltip-bg); }
+.custom-tooltip[data-placement="bottom"]::after { bottom: 100%; border-bottom-color: var(--tooltip-bg); }
+
+/* ---------- toast notifications ----------
+   Replaces alert() everywhere — non-blocking, auto-dismissing, stacked
+   bottom-center, themed like the rest of the app (a card with a colored
+   left accent + matching icon) instead of the OS dialog box. */
+.toast-container {
+  position: fixed;
+  left: 50%;
+  bottom: 14px;
+  transform: translateX(-50%);
+  width: calc(100% - 28px);
+  max-width: 360px;
+  display: flex;
+  flex-direction: column-reverse;
+  gap: 8px;
+  z-index: 500;
+  pointer-events: none;
+}
+.toast {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  padding: 11px 12px;
+  border-radius: var(--radius-md);
+  background: var(--bg-panel);
+  color: var(--text-primary);
+  border: 1px solid var(--border);
+  border-left: 4px solid var(--text-secondary);
+  box-shadow: var(--shadow-md);
+  font-size: 12px;
+  line-height: 1.45;
+  pointer-events: auto;
+  opacity: 0;
+  transform: translateY(14px);
+  transition: opacity 0.22s ease, transform 0.22s ease;
+}
+.toast.show { opacity: 1; transform: translateY(0); }
+.toast.hide { opacity: 0; transform: translateY(10px); }
+.toast.error { border-left-color: var(--danger-fg); }
+.toast.success { border-left-color: var(--success-fg); }
+.toast.warning { border-left-color: var(--warn-fg); }
+.toast.info { border-left-color: var(--accent); }
+.toast-icon { flex-shrink: 0; margin-top: 1px; display: flex; }
+.toast.error .toast-icon { color: var(--danger-fg); }
+.toast.success .toast-icon { color: var(--success-fg); }
+.toast.warning .toast-icon { color: var(--warn-fg); }
+.toast.info .toast-icon { color: var(--accent); }
+.toast-message { flex: 1; word-break: break-word; }
+.toast-close {
+  flex-shrink: 0;
+  background: none;
+  border: none;
+  color: var(--text-secondary);
+  cursor: pointer;
+  font-size: 13px;
+  line-height: 1;
+  padding: 2px;
+}
+.toast-close:hover { color: var(--text-primary); }
+
+/* ---------- confirm dialog ----------
+   Replaces native confirm() — a toast can't ask a yes/no question, so this
+   is a small themed modal instead of the OS dialog box, resolving to a
+   boolean the same way confirm() did (just async — see showConfirmDialog
+   in popup.js). */
+.confirm-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(6, 12, 15, 0.5);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 20px;
+  z-index: 600;
+  opacity: 0;
+  transition: opacity 0.15s ease;
+}
+.confirm-overlay.show { opacity: 1; }
+.confirm-dialog {
+  background: var(--bg-panel);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  box-shadow: var(--shadow-md);
+  padding: 18px;
+  width: 100%;
+  max-width: 300px;
+  transform: scale(0.94) translateY(6px);
+  transition: transform 0.15s ease;
+}
+.confirm-overlay.show .confirm-dialog { transform: scale(1) translateY(0); }
+.confirm-message {
+  margin: 0 0 16px;
+  font-size: 13px;
+  line-height: 1.5;
+  color: var(--text-primary);
+  white-space: pre-line;
+}
+.confirm-actions { display: flex; justify-content: flex-end; gap: 8px; }
+.confirm-actions button { margin: 0; }
+.confirm-actions button:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+button.primary.danger {
+  background: var(--danger-fg);
+  color: #fff;
+  box-shadow: 0 2px 6px rgba(209, 69, 59, 0.3);
+}
+button.primary.danger:hover { filter: brightness(1.08); box-shadow: 0 3px 10px rgba(209, 69, 59, 0.4); }
+
+/* ---------- drag/drop overlay ----------
+   Shown full-popup whenever a file is being dragged over the window (see
+   the dragenter/dragover/dragleave/drop listeners near the end of
+   popup.js) — dropping anywhere on it attaches the file(s) the same way
+   the file picker or a clipboard paste does. */
+.drop-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 800;
+  display: none;
+  align-items: center;
+  justify-content: center;
+  background: rgba(6, 12, 15, 0.6);
+  opacity: 0;
+  transition: opacity 0.15s ease;
+  pointer-events: none;
+}
+.drop-overlay.show { opacity: 1; }
+.drop-overlay-inner {
+  position: relative;
+  width: calc(100% - 22px);
+  height: calc(100% - 22px);
+  margin: 11px;
+}
+.drop-overlay-text {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  color: #fff;
+  font-size: 13.5px;
+  font-weight: 700;
+  text-align: center;
+  text-shadow: 0 2px 10px rgba(0, 0, 0, 0.5);
+}
+.drop-overlay-corner {
+  position: absolute;
+  width: 26px;
+  height: 26px;
+  border: 3px solid var(--accent-bright);
+}
+.drop-overlay-corner.tl { top: 0; left: 0; border-right: none; border-bottom: none; border-radius: 8px 0 0 0; }
+.drop-overlay-corner.tr { top: 0; right: 0; border-left: none; border-bottom: none; border-radius: 0 8px 0 0; }
+.drop-overlay-corner.bl { bottom: 0; left: 0; border-right: none; border-top: none; border-radius: 0 0 0 8px; }
+.drop-overlay-corner.br { bottom: 0; right: 0; border-left: none; border-top: none; border-radius: 0 0 8px 0; }

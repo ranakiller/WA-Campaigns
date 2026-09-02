@@ -4,6 +4,118 @@ function call(action, payload = {}) {
   });
 }
 
+// ============ TOAST NOTIFICATIONS ============
+// Replaces every alert() in this file — non-blocking, auto-dismissing,
+// bottom-anchored, themed (see .toast-container/.toast in popup.css).
+// type: 'error' | 'success' | 'warning' | 'info'. Native confirm() dialogs
+// are replaced too, but by a themed modal (showConfirmDialog, below) rather
+// than a toast — a toast can't ask a yes/no question, that's a different
+// UX pattern (gating a destructive action before it happens).
+const TOAST_ICONS = {
+  error:
+    '<svg viewBox="0 0 24 24" width="16" height="16"><path fill="currentColor" d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2Zm5 13.59L15.59 17 12 13.41 8.41 17 7 15.59 10.59 12 7 8.41 8.41 7 12 10.59 15.59 7 17 8.41 13.41 12 17 15.59Z"/></svg>',
+  success:
+    '<svg viewBox="0 0 24 24" width="16" height="16"><path fill="currentColor" d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2Zm-2 15-5-5 1.41-1.41L10 14.17l7.59-7.59L19 8l-9 9Z"/></svg>',
+  warning:
+    '<svg viewBox="0 0 24 24" width="16" height="16"><path fill="currentColor" d="M1 21h22L12 2 1 21Zm12-3h-2v-2h2v2Zm0-4h-2v-4h2v4Z"/></svg>',
+  info:
+    '<svg viewBox="0 0 24 24" width="16" height="16"><path fill="currentColor" d="M11 7h2v2h-2V7Zm0 4h2v6h-2v-6Zm1-9C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2Zm0 18a8 8 0 1 1 0-16 8 8 0 0 1 0 16Z"/></svg>'
+};
+const TOAST_DURATIONS = { error: 6000, warning: 5000, success: 3500, info: 4000 };
+
+function showToast(message, type = 'info') {
+  const container = document.getElementById('toastContainer');
+  if (!container) return;
+  const toast = document.createElement('div');
+  toast.className = `toast ${type}`;
+  toast.innerHTML = `
+    <span class="toast-icon">${TOAST_ICONS[type] || TOAST_ICONS.info}</span>
+    <span class="toast-message"></span>
+    <button type="button" class="toast-close" aria-label="Dismiss">✕</button>
+  `;
+  toast.querySelector('.toast-message').textContent = message;
+  container.appendChild(toast);
+  requestAnimationFrame(() => toast.classList.add('show'));
+
+  let dismissTimer = null;
+  function dismiss() {
+    clearTimeout(dismissTimer);
+    toast.classList.remove('show');
+    toast.classList.add('hide');
+    toast.addEventListener('transitionend', () => toast.remove(), { once: true });
+  }
+  toast.querySelector('.toast-close').addEventListener('click', dismiss);
+  dismissTimer = setTimeout(dismiss, TOAST_DURATIONS[type] || TOAST_DURATIONS.info);
+}
+
+// ============ CONFIRM DIALOG ============
+// Replaces every confirm() in this file — a themed modal instead of the OS
+// dialog, resolving to a boolean the same way confirm() did (just async).
+// `danger: true` makes the confirm button solid red (destructive actions);
+// otherwise it's the normal green primary.
+function showConfirmDialog(message, options = {}) {
+  const { confirmText = 'OK', cancelText = 'Cancel', danger = false } = options;
+  return new Promise((resolve) => {
+    const overlay = document.createElement('div');
+    overlay.className = 'confirm-overlay';
+    overlay.innerHTML = `
+      <div class="confirm-dialog">
+        <p class="confirm-message"></p>
+        <div class="confirm-actions">
+          <button type="button" class="ghost confirm-cancel">${escapeHtml(cancelText)}</button>
+          <button type="button" class="primary${danger ? ' danger' : ''} confirm-ok">${escapeHtml(confirmText)}</button>
+        </div>
+      </div>
+    `;
+    overlay.querySelector('.confirm-message').textContent = message;
+    document.body.appendChild(overlay);
+    requestAnimationFrame(() => overlay.classList.add('show'));
+
+    // Whatever button opened this (e.g. "Clear log") still has real DOM
+    // focus underneath the overlay — without moving focus onto the dialog
+    // itself, pressing Enter both resolves this promise (via the keydown
+    // listener below) AND re-activates that still-focused button natively,
+    // firing its click handler again and opening a second confirm on top
+    // of the first, which repeats every time Enter is pressed again.
+    const okBtn = overlay.querySelector('.confirm-ok');
+    okBtn.focus();
+
+    let resolved = false;
+    function close(result) {
+      if (resolved) return;
+      resolved = true;
+      document.removeEventListener('keydown', onKeydown);
+      overlay.classList.remove('show');
+      overlay.addEventListener('transitionend', () => overlay.remove(), { once: true });
+      resolve(result);
+    }
+    function onKeydown(e) {
+      if (e.key === 'Escape') {
+        e.preventDefault();
+        close(false);
+      } else if (e.key === 'Enter') {
+        e.preventDefault();
+        close(true);
+      }
+    }
+    overlay.querySelector('.confirm-cancel').addEventListener('click', () => close(false));
+    okBtn.addEventListener('click', () => close(true));
+    overlay.addEventListener('click', (e) => {
+      if (e.target === overlay) close(false);
+    });
+    document.addEventListener('keydown', onKeydown);
+  });
+}
+
+// One-way notifications background.js sends unprompted (not a response to
+// a call() request) — currently just a background sync push failure,
+// surfaced live if the popup happens to be open when it happens.
+chrome.runtime.onMessage.addListener((msg) => {
+  if (msg && msg.action === 'toast') {
+    showToast(msg.message, msg.type || 'info');
+  }
+});
+
 let STATE = { fetchedChats: [], lists: [], messages: [], log: [], settings: {}, activeRuns: {} };
 // Which "send now" run (a background.js activeRuns id) belongs to which
 // saved message, so the send panel can show that message's own progress
@@ -35,6 +147,22 @@ function setDeleteRunId(id) {
 }
 chrome.storage.local.get(['deleteRunEntry'], (data) => {
   if (data.deleteRunEntry && data.deleteRunEntry.runId) deleteRunEntry = data.deleteRunEntry;
+});
+// Same pattern again for the "send without saving" panel on the Messages
+// tab compose form — only one draft/compose form exists, so only one such
+// run can ever be in flight at a time. Its target-list selections live in
+// the same listSelections map as everything else, keyed by this constant
+// instead of a real message id (real ids are UUIDs, so this can never
+// collide with one).
+const ADHOC_DRAFT_KEY = '__adhoc_draft__';
+let adhocSendPanelOpen = false;
+let adhocRunEntry = null; // { runId, assignedAt } | null
+function setAdhocRunId(id) {
+  adhocRunEntry = id ? { runId: id, assignedAt: Date.now() } : null;
+  chrome.storage.local.set({ adhocRunEntry });
+}
+chrome.storage.local.get(['adhocRunEntry'], (data) => {
+  if (data.adhocRunEntry && data.adhocRunEntry.runId) adhocRunEntry = data.adhocRunEntry;
 });
 // Which items are unchecked in a message's send panel — kept in memory (not
 // persisted) so the checkboxes survive the re-render that follows every
@@ -140,7 +268,18 @@ function activeChatRunPct(run) {
 // items, each independently text or media(+its own caption). Sent one after
 // another to each chat before the campaign moves on to the next chat.
 let composingItems = []; // { kind: 'text', text } | { kind: 'media', media, caption }
+// The exact composingItems object (by reference, not index — indexes shift
+// under reordering/removal, object identity doesn't) currently pulled into
+// the text box for editing via a thread's pencil icon, or null if the box
+// is just for composing something new. "+"/Ctrl+Enter updates this item in
+// place instead of adding a new one while it's set.
+let editingThreadItem = null;
 let editingMessageId = null;
+// The srNo (saved-messages list position) of whichever message is being
+// edited, so saving the edit keeps it in the same spot instead of
+// reassigning a new one — there's no input field for this any more (the
+// ▲/▼ buttons on each saved message row handle reordering directly).
+let editingMessageSrNo = null;
 let editingListId = null;
 
 // The separator checkbox appears in two independent places (the one-off Send
@@ -175,6 +314,14 @@ const PLAY_ICON_SVG = '<svg viewBox="0 0 24 24" width="14" height="14"><path fil
 const RUN_NOW_ICON_SVG =
   '<svg viewBox="0 0 24 24" width="14" height="14"><path fill="currentColor" d="M7 2v11h3v9l7-12h-4l4-8z"/></svg>';
 const RESET_ICON_SVG = '<svg viewBox="0 0 24 24" width="14" height="14"><path fill="currentColor" d="M6 6h12v12H6z"/></svg>';
+const MOVE_UP_ICON_SVG = '<svg viewBox="0 0 24 24" width="14" height="14"><path fill="currentColor" d="M12 5.5 5 13h4v6h6v-6h4L12 5.5Z"/></svg>';
+const MOVE_DOWN_ICON_SVG = '<svg viewBox="0 0 24 24" width="14" height="14"><path fill="currentColor" d="M12 18.5 19 11h-4V5H9v6H5l7 7.5Z"/></svg>';
+const REMOVE_ICON_SVG =
+  '<svg viewBox="0 0 24 24" width="14" height="14"><path fill="currentColor" d="M19 6.41 17.59 5 12 10.59 6.41 5 5 6.41 10.59 12 5 17.59 6.41 19 12 13.41 17.59 19 19 17.59 13.41 12Z"/></svg>';
+const MEDIA_ICON_SVG =
+  '<svg viewBox="0 0 24 24" width="14" height="14"><path fill="currentColor" d="M16.5 6.5v9a4 4 0 0 1-8 0v-9a2.5 2.5 0 0 1 5 0v8a1 1 0 0 1-2 0v-8H10v8a2.5 2.5 0 0 0 5 0v-9a4 4 0 0 0-8 0v9.5a5.5 5.5 0 0 0 11 0V6.5Z"/></svg>';
+const TEXT_ICON_SVG =
+  '<svg viewBox="0 0 24 24" width="14" height="14"><path fill="currentColor" d="M4 5v2h16V5H4Zm0 8h16v-2H4v2Zm0 6h10v-2H4v2Z"/></svg>';
 
 function renderProgressBlock(run) {
   const doneCount = run.sent + run.failed;
@@ -191,8 +338,8 @@ function renderProgressBlock(run) {
   // inserted via innerHTML from two different places (message send panel,
   // campaign row).
   const controls = !run.done
-    ? `<button class="icon-btn small-icon-btn progress-pause-btn" type="button" data-run-id="${run.id}" title="${run.paused ? 'Resume' : 'Pause'}">${run.paused ? PLAY_ICON_SVG : PAUSE_ICON_SVG}</button>
-       <button class="icon-btn small-icon-btn danger progress-reset-btn" type="button" data-run-id="${run.id}" title="Reset (stop and clear this run — doesn't re-send to chats already reached)">${RESET_ICON_SVG}</button>`
+    ? `<button class="icon-btn small-icon-btn progress-pause-btn" type="button" data-run-id="${run.id}" data-tooltip="${run.paused ? 'Resume' : 'Pause'}">${run.paused ? PLAY_ICON_SVG : PAUSE_ICON_SVG}</button>
+       <button class="icon-btn small-icon-btn danger progress-reset-btn" type="button" data-run-id="${run.id}" data-tooltip="Reset (stop and clear this run — doesn't re-send to chats already reached)">${RESET_ICON_SVG}</button>`
     : '';
   return `<div class="progress-block">
     <div class="progress-bar-row">
@@ -212,10 +359,10 @@ function renderProgressBlock(run) {
 function activeChatBtnHtml({ act, idx, extraClass = '', title, iconSvg, run, runKey }) {
   const idxAttr = idx === undefined ? '' : ` data-idx="${idx}"`;
   if (!run) {
-    return `<button class="icon-btn small-icon-btn ${extraClass}" type="button" data-act="${act}"${idxAttr} title="${escapeHtml(title)}">${iconSvg}</button>`;
+    return `<button class="icon-btn small-icon-btn ${extraClass}" type="button" data-act="${act}"${idxAttr} data-tooltip="${escapeHtml(title)}">${iconSvg}</button>`;
   }
   const pct = activeChatRunPct(run);
-  return `<button class="icon-btn small-icon-btn sending-ring ${extraClass}" type="button" data-act="stopActiveChatSend" data-run-id="${run.id}" data-run-key="${runKey}" style="--pct:${pct}" title="Sending… ${pct}% — click to stop">
+  return `<button class="icon-btn small-icon-btn sending-ring ${extraClass}" type="button" data-act="stopActiveChatSend" data-run-id="${run.id}" data-run-key="${runKey}" style="--pct:${pct}" data-tooltip="Sending… ${pct}% — click to stop">
     <span class="sending-ring-pct">${run.starting ? '' : pct + '%'}</span>
   </button>`;
 }
@@ -223,7 +370,7 @@ function activeChatBtnHtml({ act, idx, extraClass = '', title, iconSvg, run, run
 document.addEventListener('click', async (e) => {
   const stopBtn = e.target.closest('[data-act="stopActiveChatSend"]');
   if (stopBtn) {
-    if (confirm('Stop this send?')) {
+    if (await showConfirmDialog('Stop this send?', { confirmText: 'Stop', danger: true })) {
       await call('resetRun', { runId: stopBtn.dataset.runId });
       activeChatRunIds.delete(stopBtn.dataset.runKey);
       saveActiveChatRunIds();
@@ -238,7 +385,11 @@ document.addEventListener('click', async (e) => {
   }
   const resetBtn = e.target.closest('.progress-reset-btn');
   if (resetBtn) {
-    if (!confirm("Reset this run? It stops sending the rest — chats already reached won't be re-sent to.")) return;
+    const ok = await showConfirmDialog("Reset this run? It stops sending the rest — chats already reached won't be re-sent to.", {
+      confirmText: 'Reset',
+      danger: true
+    });
+    if (!ok) return;
     await call('resetRun', { runId: resetBtn.dataset.runId });
   }
 });
@@ -297,6 +448,7 @@ async function refresh() {
   }
   renderMasterToggle();
   renderMessages();
+  renderAdhocSendPanel();
   renderListBuilder();
   renderLists();
   renderLog();
@@ -350,14 +502,17 @@ document.querySelectorAll('.theme-option-btn').forEach((btn) => {
 function renderMasterToggle() {
   const enabled = STATE.settings.masterEnabled !== false;
   document.getElementById('masterToggleBtn').classList.toggle('off', !enabled);
-  document.getElementById('masterToggleBtn').title = enabled ? 'Turn the extension off' : 'Turn the extension on';
+  document.getElementById('masterToggleBtn').dataset.tooltip = enabled ? 'Turn the extension off' : 'Turn the extension on';
   document.getElementById('masterOffBanner').style.display = enabled ? 'none' : '';
 }
 
 document.getElementById('masterToggleBtn').addEventListener('click', async () => {
   const enabled = STATE.settings.masterEnabled !== false;
   if (enabled) {
-    if (!confirm('Turn the extension off? This immediately stops any scheduled or one-off send in progress.')) return;
+    const ok = await showConfirmDialog('Turn the extension off? This immediately stops any scheduled or one-off send in progress.', {
+      confirmText: 'Turn off'
+    });
+    if (!ok) return;
   }
   await call('saveSettings', { settings: { masterEnabled: !enabled } });
   refresh();
@@ -461,10 +616,10 @@ function saveDraft() {
   chrome.storage.local.set({
     messageDraft: {
       label: document.getElementById('msgLabel').value,
-      srNo: document.getElementById('msgSrNo').value,
       text: document.getElementById('msgText').value,
       items: composingItems,
-      editingMessageId
+      editingMessageId,
+      editingMessageSrNo
     }
   });
 }
@@ -480,10 +635,11 @@ function restoreDraft() {
     const hasContent = (draft.items && draft.items.length > 0) || draft.label || draft.text;
     if (!hasContent) return;
     document.getElementById('msgLabel').value = draft.label || '';
-    document.getElementById('msgSrNo').value = draft.srNo || '';
     document.getElementById('msgText').value = draft.text || '';
     composingItems = draft.items || [];
     editingMessageId = draft.editingMessageId || null;
+    editingMessageSrNo = typeof draft.editingMessageSrNo === 'number' ? draft.editingMessageSrNo : null;
+    document.getElementById('msgLabelRow').style.display = editingMessageId ? '' : 'none';
     renderComposingItems();
     document.getElementById('saveMessageBtn').textContent = editingMessageId ? 'Update message' : 'Save message';
     document.getElementById('cancelEditMessageBtn').style.display = editingMessageId ? '' : 'none';
@@ -503,12 +659,14 @@ function readFileAsDataUrl(file) {
   });
 }
 
-document.getElementById('msgFile').addEventListener('change', async (e) => {
-  const files = Array.from(e.target.files || []);
+// Shared by the file picker, drag-and-drop, and clipboard paste — every way
+// a file can become an attachment funnels through here.
+async function addMediaFiles(fileList) {
+  const files = Array.from(fileList || []).filter(Boolean);
   if (files.length === 0) return;
   for (const file of files) {
     if (file.size > 15 * 1024 * 1024) {
-      alert(`"${file.name}" is larger than 15MB — WhatsApp Web may reject it.`);
+      showToast(`"${file.name}" is larger than 15MB — WhatsApp Web may reject it.`, 'warning');
     }
   }
   const dataUrls = await Promise.all(files.map(readFileAsDataUrl));
@@ -519,20 +677,129 @@ document.getElementById('msgFile').addEventListener('change', async (e) => {
       caption: ''
     });
   });
-  document.getElementById('msgFile').value = '';
   renderComposingItems();
   saveDraft();
+}
+
+document.getElementById('msgFile').addEventListener('change', async (e) => {
+  await addMediaFiles(e.target.files);
+  document.getElementById('msgFile').value = '';
 });
 
-document.getElementById('addTextItemBtn').addEventListener('click', () => {
+// "Screenshot_ddmmyy-hh.mm.ss" — pasted images have no real filename of
+// their own, so this stands in for one, timestamped to when it was pasted.
+const SCREENSHOT_MONTH_NAMES = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+function screenshotFilename(mimeType) {
+  const now = new Date();
+  const pad = (n) => String(n).padStart(2, '0');
+  const stamp = `${pad(now.getDate())}${SCREENSHOT_MONTH_NAMES[now.getMonth()]}${pad(now.getFullYear() % 100)}-${pad(now.getHours())}.${pad(now.getMinutes())}.${pad(now.getSeconds())}`;
+  const ext = (mimeType && mimeType.split('/')[1]) || 'png';
+  return `Screenshot_${stamp}.${ext}`;
+}
+
+// Only intercepts when the clipboard actually holds image data — plain
+// text paste (into any input, on any tab) is completely untouched.
+document.addEventListener('paste', async (e) => {
+  const items = e.clipboardData && e.clipboardData.items;
+  if (!items) return;
+  const images = [];
+  for (const item of items) {
+    if (item.kind === 'file' && item.type.startsWith('image/')) {
+      const blob = item.getAsFile();
+      if (blob) images.push(new File([blob], screenshotFilename(item.type), { type: item.type }));
+    }
+  }
+  if (images.length === 0) return;
+  e.preventDefault();
+  await addMediaFiles(images);
+});
+
+// Full-popup drag-and-drop: dragenter/dragleave are counted rather than
+// just toggled, since moving over child elements fires both repeatedly as
+// the cursor crosses their boundaries — only hide once the count is back
+// to zero (actually left the window, not just crossed into a child).
+let dragCounter = 0;
+const dropOverlay = document.getElementById('dropOverlay');
+function isFileDrag(e) {
+  return !!(e.dataTransfer && Array.from(e.dataTransfer.types || []).includes('Files'));
+}
+function showDropOverlay() {
+  dropOverlay.style.display = 'flex';
+  requestAnimationFrame(() => dropOverlay.classList.add('show'));
+}
+function hideDropOverlay() {
+  dropOverlay.classList.remove('show');
+  setTimeout(() => {
+    if (dragCounter === 0) dropOverlay.style.display = 'none';
+  }, 150);
+}
+document.addEventListener('dragenter', (e) => {
+  if (!isFileDrag(e)) return;
+  e.preventDefault();
+  dragCounter++;
+  showDropOverlay();
+});
+document.addEventListener('dragover', (e) => {
+  if (!isFileDrag(e)) return;
+  e.preventDefault(); // required for drop to be allowed at all
+});
+document.addEventListener('dragleave', (e) => {
+  if (!isFileDrag(e)) return;
+  dragCounter = Math.max(0, dragCounter - 1);
+  if (dragCounter === 0) hideDropOverlay();
+});
+document.addEventListener('drop', async (e) => {
+  if (!isFileDrag(e)) return;
+  e.preventDefault();
+  dragCounter = 0;
+  hideDropOverlay();
+  await addMediaFiles(e.dataTransfer.files);
+});
+
+// Explicitly adding something (+ / Ctrl+Enter) always makes it a real,
+// visible thread in the list below — even if it's the only one. The
+// "just send whatever's in the box" shortcut (getEffectiveItems, used by
+// Save/Send Now) is a completely separate path for when you *don't* click
+// this at all; the two are no longer allowed to blend into each other.
+function addTextThread() {
   const textarea = document.getElementById('msgText');
   const text = textarea.value.trim();
   if (!text) return;
-  composingItems.push({ kind: 'text', text });
+  if (editingThreadItem) {
+    // Editing an existing thread — update it in place, wherever it
+    // currently sits (it may have been reordered since Edit was clicked).
+    const idx = composingItems.indexOf(editingThreadItem);
+    if (idx !== -1) composingItems[idx] = { kind: 'text', text };
+    else composingItems.push({ kind: 'text', text }); // it was removed meanwhile — just add fresh
+    editingThreadItem = null;
+  } else {
+    composingItems.push({ kind: 'text', text });
+  }
   textarea.value = '';
   renderComposingItems();
   saveDraft();
+}
+document.getElementById('addTextItemBtn').addEventListener('click', addTextThread);
+// Ctrl/Cmd+Enter does the same thing as the + button — plain Enter still
+// just inserts a newline, same as any multi-line text box.
+document.getElementById('msgText').addEventListener('keydown', (e) => {
+  if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) {
+    e.preventDefault();
+    addTextThread();
+  }
 });
+
+// A single quick message shouldn't need the extra "+" click: if nothing's
+// been explicitly added as a thread/attachment yet, Save/Send fall back to
+// whatever's currently typed in the box, used as-is for just that one
+// action. This never touches composingItems or the box itself — nothing
+// gets added to the thread list, nothing gets cleared — building an actual
+// multi-thread message is still entirely up to "+"/attach, done by hand.
+function getEffectiveItems() {
+  if (composingItems.length > 0) return composingItems;
+  const text = document.getElementById('msgText').value.trim();
+  return text ? [{ kind: 'text', text }] : [];
+}
 
 document.getElementById('msgLabel').addEventListener('input', saveDraft);
 document.getElementById('msgText').addEventListener('input', saveDraft);
@@ -545,7 +812,10 @@ function stripExtension(filename) {
   const idx = filename.lastIndexOf('.');
   return idx > 0 ? filename.slice(0, idx) : filename;
 }
-document.getElementById('fillCaptionsBtn').addEventListener('click', () => {
+// Both live inside the composing-list box itself now (a small toolbar row
+// above the items), not as standalone buttons outside it — they only mean
+// anything once there's at least one item, so they only appear then too.
+function handleFillCaptions() {
   let filled = 0;
   composingItems.forEach((item) => {
     if (item.kind === 'media' && !item.caption) {
@@ -554,31 +824,73 @@ document.getElementById('fillCaptionsBtn').addEventListener('click', () => {
     }
   });
   if (filled === 0) {
-    alert('No media items with an empty caption to fill.');
+    showToast('No attachments with an empty caption to fill.', 'info');
     return;
   }
   renderComposingItems();
   saveDraft();
-});
+}
 
-document.getElementById('clearAllItemsBtn').addEventListener('click', () => {
+async function handleClearAllItems() {
   if (composingItems.length === 0) return;
-  if (!confirm('Remove all items from this message?')) return;
+  const ok = await showConfirmDialog('Remove all items from this message?', { confirmText: 'Remove all', danger: true });
+  if (!ok) return;
   composingItems = [];
+  editingThreadItem = null;
   renderComposingItems();
   saveDraft();
-});
+}
+
+// Loads a thread's text into the box for editing — the card stays put in
+// the list (just highlighted) rather than disappearing; "+"/Ctrl+Enter
+// updates it in place wherever it ends up, instead of adding a new one.
+function editTextThread(idx) {
+  const item = composingItems[idx];
+  if (!item || item.kind !== 'text') return;
+  const textarea = document.getElementById('msgText');
+  textarea.value = item.text;
+  editingThreadItem = item;
+  renderComposingItems();
+  saveDraft();
+  textarea.focus();
+}
 
 function renderComposingItems() {
-  document.getElementById('composingCount').textContent = String(composingItems.length);
   const box = document.getElementById('composingItems');
+  // Nothing to show or manage yet — hide the whole section rather than a
+  // box with a placeholder hint inside it; the textarea's own placeholder
+  // already tells you how to add something.
   if (composingItems.length === 0) {
-    box.innerHTML = '<span class="hint">No items yet — write text and tap + or attach a file.</span>';
+    box.style.display = 'none';
+    box.innerHTML = '';
     return;
   }
-  box.innerHTML = composingItems
-    .map((item, i) => {
-      const icon = item.kind === 'media' ? '📎' : '📝';
+  // Once something's been explicitly added (+ / Ctrl+Enter, or an
+  // attachment), it always shows here — even if it's the only one. Only
+  // *not yet added* content skips this and lives purely in the box (see
+  // getEffectiveItems, used by Save/Send Now).
+  box.style.display = '';
+  const hasText = composingItems.some((item) => item.kind === 'text');
+  const hasMedia = composingItems.some((item) => item.kind === 'media');
+  // All-text = "Threads", all-attachments = "Attachments", a mix of both
+  // (or, in principle, neither) = the generic "Items".
+  const sectionLabel = hasText && hasMedia ? 'Items' : hasMedia ? 'Attachments' : hasText ? 'Threads' : 'Items';
+  const toolbarHtml = `<div class="composing-toolbar">
+    <span class="muted">${sectionLabel} (${composingItems.length})</span>
+    <div class="composing-toolbar-actions">
+      <button type="button" class="icon-btn small-icon-btn" data-act="fillCaptions" data-tooltip="Use file names as captions">
+        <svg viewBox="0 0 24 24" width="14" height="14"><path fill="currentColor" d="M17.63 5.84C17.27 5.33 16.67 5 16 5L5 5.01C3.9 5.01 3 5.9 3 7v10c0 1.1.9 1.99 2 1.99L16 19c.67 0 1.27-.33 1.63-.84L22 12l-4.37-6.16Z"/></svg>
+      </button>
+      <button type="button" class="icon-btn small-icon-btn danger" data-act="clearAll" data-tooltip="Remove all items from this message">
+        <svg viewBox="0 0 24 24" width="14" height="14"><path fill="currentColor" d="M6 19a2 2 0 0 0 2 2h8a2 2 0 0 0 2-2V7H6v12ZM19 4h-3.5l-1-1h-5l-1 1H5v2h14V4Z"/></svg>
+      </button>
+    </div>
+  </div>`;
+  box.innerHTML =
+    toolbarHtml +
+    composingItems
+      .map((item, i) => {
+      const icon = item.kind === 'media' ? MEDIA_ICON_SVG : TEXT_ICON_SVG;
       const preview =
         item.kind === 'media'
           ? escapeHtml(item.media.filename)
@@ -587,21 +899,29 @@ function renderComposingItems() {
         item.kind === 'media'
           ? `<textarea class="caption-input" data-idx="${i}" placeholder="Caption (optional)" rows="2">${escapeHtml(item.caption || '')}</textarea>`
           : '';
-      return `<div class="composing-item">
-        <input type="number" class="item-srno-input" data-idx="${i}" min="1" max="${composingItems.length}" value="${i + 1}" title="Thread number — change it to move this item to that position" />
-        <span class="composing-item-icon">${icon}</span>
+      const isEditing = item === editingThreadItem;
+      return `<div class="composing-item${isEditing ? ' editing' : ''}">
+        <input type="number" class="item-srno-input" data-idx="${i}" min="1" max="${composingItems.length}" value="${i + 1}" data-tooltip="Thread number — change it to move this item to that position" />
+        <span class="composing-item-icon ${item.kind}">${icon}</span>
         <div class="composing-item-body">
           <div class="composing-item-preview">${preview}</div>
+          ${isEditing ? '<span class="muted composing-item-editing-note">Editing — update or Ctrl+Enter above</span>' : ''}
           ${captionField}
         </div>
         <div class="composing-item-actions">
-          <button type="button" data-act="up" data-idx="${i}" title="Move up">▲</button>
-          <button type="button" data-act="down" data-idx="${i}" title="Move down">▼</button>
-          <button type="button" data-act="remove" data-idx="${i}" title="Remove">✕</button>
+          ${item.kind === 'text' ? `<button type="button" data-act="edit" data-idx="${i}" data-tooltip="Edit this thread">${EDIT_ICON_SVG}</button>` : ''}
+          <button type="button" data-act="up" data-idx="${i}" data-tooltip="Move up">${MOVE_UP_ICON_SVG}</button>
+          <button type="button" data-act="down" data-idx="${i}" data-tooltip="Move down">${MOVE_DOWN_ICON_SVG}</button>
+          <button type="button" data-act="remove" data-idx="${i}" data-tooltip="Remove">${REMOVE_ICON_SVG}</button>
         </div>
       </div>`;
     })
     .join('');
+
+  const fillCaptionsBtn = box.querySelector('[data-act="fillCaptions"]');
+  if (fillCaptionsBtn) fillCaptionsBtn.addEventListener('click', handleFillCaptions);
+  const clearAllBtn = box.querySelector('[data-act="clearAll"]');
+  if (clearAllBtn) clearAllBtn.addEventListener('click', handleClearAllItems);
 
   box.querySelectorAll('.caption-input').forEach((input) => {
     input.addEventListener('input', (e) => {
@@ -626,9 +946,13 @@ function renderComposingItems() {
       renderComposingItems();
     });
   });
+  box.querySelectorAll('[data-act="edit"]').forEach((btn) => {
+    btn.addEventListener('click', () => editTextThread(Number(btn.dataset.idx)));
+  });
   box.querySelectorAll('[data-act="remove"]').forEach((btn) => {
     btn.addEventListener('click', () => {
-      composingItems.splice(Number(btn.dataset.idx), 1);
+      const [removed] = composingItems.splice(Number(btn.dataset.idx), 1);
+      if (removed === editingThreadItem) editingThreadItem = null;
       renderComposingItems();
       saveDraft();
     });
@@ -663,30 +987,178 @@ function nextSrNo() {
 
 function resetMessageForm() {
   editingMessageId = null;
+  editingMessageSrNo = null;
+  editingThreadItem = null;
   composingItems = [];
   document.getElementById('msgLabel').value = '';
-  document.getElementById('msgSrNo').value = nextSrNo();
+  document.getElementById('msgLabelRow').style.display = 'none';
   document.getElementById('msgText').value = '';
   document.getElementById('msgFile').value = '';
   renderComposingItems();
   document.getElementById('saveMessageBtn').textContent = 'Save message';
   document.getElementById('cancelEditMessageBtn').style.display = 'none';
+  adhocSendPanelOpen = false;
+  renderAdhocSendPanel();
   clearDraft();
 }
 
 document.getElementById('cancelEditMessageBtn').addEventListener('click', resetMessageForm);
 
-document.getElementById('saveMessageBtn').addEventListener('click', async () => {
-  const label = document.getElementById('msgLabel').value.trim();
-  if (composingItems.length === 0) {
-    alert('Add at least one text or attachment item first.');
+// "Send Now" — sends whatever's currently staged in the composer straight
+// out via sendNowAdhoc, without ever creating a saved message. Only
+// whole-list targeting (no per-chat member picking, no per-item selection)
+// — this is the fast path, not a replacement for the full send panel a
+// saved message gets.
+document.getElementById('sendWithoutSavingBtn').addEventListener('click', () => {
+  if (getEffectiveItems().length === 0) {
+    showToast('Add at least one text thread or attachment first.', 'error');
     return;
   }
-  const first = composingItems[0];
+  if (!STATE.settings.consentAccepted) {
+    showToast('Accept the consent checkbox on the Settings tab first — sending is gated behind it, even for a one-off send.', 'error');
+    return;
+  }
+  adhocSendPanelOpen = !adhocSendPanelOpen;
+  renderAdhocSendPanel();
+});
+
+function renderAdhocSendPanel() {
+  const container = document.getElementById('adhocSendPanelContainer');
+  if (!container) return;
+  container.innerHTML = '';
+  if (!adhocSendPanelOpen && !adhocRunEntry) return;
+
+  const panel = document.createElement('div');
+  panel.className = 'send-panel';
+
+  const run = adhocRunEntry ? STATE.activeRuns[adhocRunEntry.runId] : null;
+  if (adhocRunEntry && !run) {
+    // Same short grace window as messageRunIds/deleteRunEntry — background.js
+    // hasn't necessarily written the run's progress record yet.
+    if (Date.now() - (adhocRunEntry.assignedAt || 0) < 8000) {
+      panel.innerHTML = '<p class="hint">Starting…</p>';
+      container.appendChild(panel);
+      return;
+    }
+    setAdhocRunId(null);
+  }
+  if (run) {
+    panel.innerHTML = `
+      ${renderProgressBlock(run)}
+      ${run.done ? '<button class="ghost small-inline" type="button" data-act="closeAdhoc">Close</button>' : '<p class="hint">Sending — this updates live.</p>'}
+    `;
+    const closeBtn = panel.querySelector('[data-act="closeAdhoc"]');
+    if (closeBtn) {
+      closeBtn.addEventListener('click', () => {
+        setAdhocRunId(null);
+        adhocSendPanelOpen = false;
+        renderAdhocSendPanel();
+      });
+    }
+    container.appendChild(panel);
+    return;
+  }
+
+  if (STATE.lists.length === 0) {
+    panel.innerHTML = '<p class="hint">Build a list first (Lists tab) before you can send.</p>';
+    container.appendChild(panel);
+    return;
+  }
+
+  panel.innerHTML = `
+    <p class="hint">Sends the ${getEffectiveItems().length} item(s) above once, right now — nothing is saved to your message library.</p>
+    <div class="checklist">
+      ${STATE.lists
+        .map((l) => {
+          const members = l.members || [];
+          const selected = listSelectionSetFor(ADHOC_DRAFT_KEY, l.id);
+          const selectedCount = members.filter((m) => selected.has(m.waId)).length;
+          return `<label class="checkbox-row list-check-label">
+            <input type="checkbox" class="adhoc-list-check" value="${l.id}" ${selectedCount === members.length && members.length > 0 ? 'checked' : ''} ${selectedCount > 0 && selectedCount < members.length ? 'data-indeterminate="1"' : ''} />
+            ${escapeHtml(l.name)} <span class="muted">(${selectedCount}/${members.length})</span>
+          </label>`;
+        })
+        .join('')}
+    </div>
+    <div class="send-panel-actions">
+      <label class="checkbox-row send-separator-check-row">
+        <input type="checkbox" class="send-separator-check" ${sendPanelSeparatorPref ? 'checked' : ''} />
+        Send a "➖" separator after each item
+      </label>
+      <button class="primary" type="button" data-act="confirmAdhocSend">Send now</button>
+      <button class="ghost small-inline" type="button" data-act="cancelAdhocSend">Cancel</button>
+    </div>
+  `;
+  panel.querySelectorAll('.adhoc-list-check').forEach((cb) => {
+    cb.indeterminate = cb.hasAttribute('data-indeterminate');
+    cb.addEventListener('change', () => {
+      const list = STATE.lists.find((l) => l.id === cb.value);
+      const selected = listSelectionSetFor(ADHOC_DRAFT_KEY, cb.value);
+      selected.clear();
+      if (cb.checked) (list.members || []).forEach((m) => selected.add(m.waId));
+      saveListSelections();
+    });
+  });
+  const cancelBtn = panel.querySelector('[data-act="cancelAdhocSend"]');
+  if (cancelBtn) {
+    cancelBtn.addEventListener('click', () => {
+      adhocSendPanelOpen = false;
+      renderAdhocSendPanel();
+    });
+  }
+  const separatorCheck = panel.querySelector('.send-separator-check');
+  if (separatorCheck) {
+    separatorCheck.addEventListener('change', () => {
+      sendPanelSeparatorPref = separatorCheck.checked;
+      chrome.storage.local.set({ sendPanelSeparatorPref });
+    });
+  }
+  const confirmBtn = panel.querySelector('[data-act="confirmAdhocSend"]');
+  if (confirmBtn) {
+    confirmBtn.addEventListener('click', async () => {
+      const memberFilter = {};
+      const listIds = [];
+      for (const l of STATE.lists) {
+        const members = l.members || [];
+        if (members.length === 0) continue;
+        const selected = listSelectionSetFor(ADHOC_DRAFT_KEY, l.id);
+        const selectedWaIds = members.filter((m) => selected.has(m.waId)).map((m) => m.waId);
+        if (selectedWaIds.length === 0) continue;
+        listIds.push(l.id);
+        if (selectedWaIds.length < members.length) memberFilter[l.id] = selectedWaIds;
+      }
+      if (listIds.length === 0) {
+        showToast('Select at least one chat to send to.', 'error');
+        return;
+      }
+      const sendSeparator = panel.querySelector('.send-separator-check').checked;
+      const res = await call('sendNowAdhoc', { items: getEffectiveItems(), listIds, memberFilter, sendSeparator });
+      if (res.ok && res.runId) {
+        setAdhocRunId(res.runId);
+      } else if (!res.ok) {
+        showToast(res.error || 'Could not send.', 'error');
+      }
+      renderAdhocSendPanel();
+    });
+  }
+
+  container.appendChild(panel);
+}
+
+document.getElementById('saveMessageBtn').addEventListener('click', async () => {
+  const label = document.getElementById('msgLabel').value.trim();
+  const items = getEffectiveItems();
+  if (items.length === 0) {
+    showToast('Add at least one text thread or attachment first.', 'error');
+    return;
+  }
+  const first = items[0];
   const name = label || (first.kind === 'media' ? first.media.filename : first.text.slice(0, 30));
-  const srNoRaw = document.getElementById('msgSrNo').value;
-  const srNo = srNoRaw !== '' ? Number(srNoRaw) : undefined;
-  const message = { id: editingMessageId, name, srNo, items: composingItems };
+  // Editing an existing message keeps its current list position; a new one
+  // is appended after whatever's already there. Reordering after the fact
+  // is what the ▲/▼ buttons on the saved-message row are for.
+  const srNo = editingMessageId ? editingMessageSrNo : nextSrNo();
+  const message = { id: editingMessageId, name, srNo, items };
   await call('saveMessage', { message });
   resetMessageForm();
   refresh();
@@ -748,7 +1220,7 @@ function renderMessages() {
     const enabledScheduleCount = (m.schedules || []).filter((s) => s.enabled).length;
     const scheduleBadge =
       enabledScheduleCount > 0
-        ? `<span class="muted schedule-count-badge" title="${enabledScheduleCount} active schedule(s)">🕒${enabledScheduleCount}</span>`
+        ? `<span class="muted schedule-count-badge" data-tooltip="${enabledScheduleCount} active schedule(s)">🕒${enabledScheduleCount}</span>`
         : '';
     li.innerHTML = `<div class="item-row">
       <div class="item-text">
@@ -756,13 +1228,13 @@ function renderMessages() {
         <span class="log-time">${lastSent}</span>
       </div>
       <div class="item-actions">
-        <button class="icon-btn small-icon-btn" data-act="moveUp" type="button" title="Move up" ${idx === 0 ? 'disabled' : ''}>▲</button>
-        <button class="icon-btn small-icon-btn" data-act="moveDown" type="button" title="Move down" ${idx === sortedMessages.length - 1 ? 'disabled' : ''}>▼</button>
-        <button class="icon-btn small-icon-btn" data-act="send" type="button" title="Send now / schedule">
+        <button class="icon-btn small-icon-btn" data-act="moveUp" type="button" data-tooltip="Move up" ${idx === 0 ? 'disabled' : ''}>${MOVE_UP_ICON_SVG}</button>
+        <button class="icon-btn small-icon-btn" data-act="moveDown" type="button" data-tooltip="Move down" ${idx === sortedMessages.length - 1 ? 'disabled' : ''}>${MOVE_DOWN_ICON_SVG}</button>
+        <button class="icon-btn small-icon-btn" data-act="send" type="button" data-tooltip="Send now / schedule">
           <svg viewBox="0 0 24 24" width="14" height="14"><path fill="currentColor" d="M2 21l21-9L2 3v7l15 2-15 2z"/></svg>
         </button>
-        <button class="icon-btn small-icon-btn" data-act="edit" type="button" title="Edit">${EDIT_ICON_SVG}</button>
-        <button class="icon-btn small-icon-btn danger" data-act="del" type="button" title="Delete">${DELETE_ICON_SVG}</button>
+        <button class="icon-btn small-icon-btn" data-act="edit" type="button" data-tooltip="Edit">${EDIT_ICON_SVG}</button>
+        <button class="icon-btn small-icon-btn danger" data-act="del" type="button" data-tooltip="Delete">${DELETE_ICON_SVG}</button>
       </div>
     </div>`;
 
@@ -776,7 +1248,7 @@ function renderMessages() {
 
     li.querySelector('[data-act="send"]').addEventListener('click', () => {
       if (!STATE.settings.consentAccepted) {
-        alert('Accept the consent checkbox on the Settings tab first — sending is gated behind it, even for a one-off send.');
+        showToast('Accept the consent checkbox on the Settings tab first — sending is gated behind it, even for a one-off send.', 'error');
         return;
       }
       const opening = openSendPanelMessageId !== m.id;
@@ -786,8 +1258,10 @@ function renderMessages() {
     });
     li.querySelector('[data-act="edit"]').addEventListener('click', () => {
       editingMessageId = m.id;
+      editingMessageSrNo = typeof m.srNo === 'number' ? m.srNo : null;
+      editingThreadItem = null;
       document.getElementById('msgLabel').value = m.name;
-      document.getElementById('msgSrNo').value = typeof m.srNo === 'number' ? m.srNo : '';
+      document.getElementById('msgLabelRow').style.display = '';
       document.getElementById('msgText').value = '';
       composingItems = (m.items || []).map((item) => ({ ...item })); // clone so cancel doesn't mutate the saved copy
       renderComposingItems();
@@ -875,10 +1349,10 @@ function buildSendPanel(message) {
                 <span class="log-time">${s.enabled ? 'enabled' : 'paused'}</span>
               </div>
               <div class="item-actions">
-                <button class="icon-btn small-icon-btn" type="button" data-sched-act="edit" title="Edit">${EDIT_ICON_SVG}</button>
-                <button class="icon-btn small-icon-btn" type="button" data-sched-act="toggle" title="${s.enabled ? 'Pause' : 'Resume'}">${s.enabled ? PAUSE_ICON_SVG : PLAY_ICON_SVG}</button>
-                <button class="icon-btn small-icon-btn" type="button" data-sched-act="run" title="Run now">${RUN_NOW_ICON_SVG}</button>
-                <button class="icon-btn small-icon-btn danger" type="button" data-sched-act="del" title="Delete">${DELETE_ICON_SVG}</button>
+                <button class="icon-btn small-icon-btn" type="button" data-sched-act="edit" data-tooltip="Edit">${EDIT_ICON_SVG}</button>
+                <button class="icon-btn small-icon-btn" type="button" data-sched-act="toggle" data-tooltip="${s.enabled ? 'Pause' : 'Resume'}">${s.enabled ? PAUSE_ICON_SVG : PLAY_ICON_SVG}</button>
+                <button class="icon-btn small-icon-btn" type="button" data-sched-act="run" data-tooltip="Run now">${RUN_NOW_ICON_SVG}</button>
+                <button class="icon-btn small-icon-btn danger" type="button" data-sched-act="del" data-tooltip="Delete">${DELETE_ICON_SVG}</button>
               </div>
             </div>
             ${scheduleRun ? renderProgressBlock(scheduleRun) : ''}
@@ -913,7 +1387,7 @@ function buildSendPanel(message) {
             <div class="composing-item-actions">
               ${
                 item.kind === 'media'
-                  ? `<button class="icon-btn small-icon-btn" type="button" data-act="openItemTab" data-idx="${idx}" title="Open this file in a new tab">
+                  ? `<button class="icon-btn small-icon-btn" type="button" data-act="openItemTab" data-idx="${idx}" data-tooltip="Open this file in a new tab">
                 <svg viewBox="0 0 24 24" width="14" height="14"><path fill="currentColor" d="M19 19H5V5h7V3H5c-1.1 0-2 .9-2 2v14c0 1.1.9 2 2 2h14c1.1 0 2-.9 2-2v-7h-2v7zM14 3v2h3.59l-9.83 9.83 1.41 1.41L19 6.41V10h2V3h-7z"/></svg>
               </button>`
                   : ''
@@ -953,7 +1427,7 @@ function buildSendPanel(message) {
             </label>
             ${
               members.length > 0
-                ? `<button class="icon-btn small-icon-btn list-expand-btn" type="button" data-act="toggleListMembers" data-list-id="${l.id}" title="Choose which chats in this list">
+                ? `<button class="icon-btn small-icon-btn list-expand-btn" type="button" data-act="toggleListMembers" data-list-id="${l.id}" data-tooltip="Choose which chats in this list">
               <svg viewBox="0 0 24 24" width="14" height="14"><path fill="currentColor" d="M7 10l5 5 5-5z"/></svg>
             </button>`
                 : ''
@@ -1119,14 +1593,22 @@ function buildSendPanel(message) {
     });
   }
   renderScheduleTimesChips();
+  function addScheduleTime() {
+    const input = panel.querySelector('.schedule-time-input');
+    if (!input.value || scheduleTimes.includes(input.value)) return;
+    scheduleTimes.push(input.value);
+    scheduleTimes.sort();
+    renderScheduleTimesChips();
+  }
   const addTimeBtn = panel.querySelector('.schedule-add-time-btn');
-  if (addTimeBtn) {
-    addTimeBtn.addEventListener('click', () => {
-      const input = panel.querySelector('.schedule-time-input');
-      if (!input.value || scheduleTimes.includes(input.value)) return;
-      scheduleTimes.push(input.value);
-      scheduleTimes.sort();
-      renderScheduleTimesChips();
+  if (addTimeBtn) addTimeBtn.addEventListener('click', addScheduleTime);
+  const scheduleTimeInput = panel.querySelector('.schedule-time-input');
+  if (scheduleTimeInput) {
+    scheduleTimeInput.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) {
+        e.preventDefault();
+        addScheduleTime();
+      }
     });
   }
   function renderScheduleDatetimesChips() {
@@ -1145,14 +1627,22 @@ function buildSendPanel(message) {
     });
   }
   renderScheduleDatetimesChips();
+  function addScheduleDatetime() {
+    const input = panel.querySelector('.schedule-datetime-input');
+    if (!input.value) return;
+    scheduleDatetimes.push(input.value);
+    scheduleDatetimes.sort();
+    renderScheduleDatetimesChips();
+  }
   const addDatetimeBtn = panel.querySelector('.schedule-add-datetime-btn');
-  if (addDatetimeBtn) {
-    addDatetimeBtn.addEventListener('click', () => {
-      const input = panel.querySelector('.schedule-datetime-input');
-      if (!input.value) return;
-      scheduleDatetimes.push(input.value);
-      scheduleDatetimes.sort();
-      renderScheduleDatetimesChips();
+  if (addDatetimeBtn) addDatetimeBtn.addEventListener('click', addScheduleDatetime);
+  const scheduleDatetimeInput = panel.querySelector('.schedule-datetime-input');
+  if (scheduleDatetimeInput) {
+    scheduleDatetimeInput.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) {
+        e.preventDefault();
+        addScheduleDatetime();
+      }
     });
   }
   function setScheduleDelayFieldsDisabled(disabled) {
@@ -1247,7 +1737,7 @@ function buildSendPanel(message) {
       const scheduleId = btn.closest('[data-schedule-id]').dataset.scheduleId;
       const schedule = schedules.find((s) => s.id === scheduleId);
       const label = schedule && schedule.label ? schedule.label : scheduleSummary(schedule);
-      if (!confirm(`Delete schedule "${label}"?`)) return;
+      if (!(await showConfirmDialog(`Delete schedule "${label}"?`, { confirmText: 'Delete', danger: true }))) return;
       await call('deleteSchedule', { messageId: message.id, scheduleId });
       if (editingScheduleId === scheduleId) resetScheduleEditor();
       refresh();
@@ -1268,7 +1758,7 @@ function buildSendPanel(message) {
         if (selectedWaIds.length < members.length) memberFilter[l.id] = selectedWaIds;
       }
       if (listIds.length === 0) {
-        alert('Select at least one chat to send to.');
+        showToast('Select at least one chat to send to.', 'error');
         return;
       }
       const itemChecks = panel.querySelectorAll('.send-item-select');
@@ -1278,7 +1768,7 @@ function buildSendPanel(message) {
           .filter((cb) => cb.checked)
           .map((cb) => Number(cb.dataset.idx));
         if (itemIndexes.length === 0) {
-          alert('Select at least one item to send.');
+          showToast('Select at least one item to send.', 'error');
           return;
         }
       }
@@ -1306,7 +1796,7 @@ function buildSendPanel(message) {
       };
       if (scheduleType === 'times') {
         if (scheduleTimes.length === 0) {
-          alert('Add at least one daily time.');
+          showToast('Add at least one daily time.', 'error');
           return;
         }
         schedule.times = scheduleTimes.slice();
@@ -1323,14 +1813,14 @@ function buildSendPanel(message) {
         schedule.windowEnd = panel.querySelector('.schedule-window-end').value || null;
       } else if (scheduleType === 'once') {
         if (scheduleDatetimes.length === 0) {
-          alert('Add at least one date/time.');
+          showToast('Add at least one date/time.', 'error');
           return;
         }
         schedule.datetimes = scheduleDatetimes.slice();
       }
       const res = await call('saveSchedule', { messageId: message.id, schedule });
       if (!res.ok) {
-        alert(res.error || 'Could not save schedule.');
+        showToast(res.error || 'Could not save schedule.', 'error');
         return;
       }
       resetScheduleEditor();
@@ -1439,7 +1929,7 @@ function buildSendPanel(message) {
         if (selectedWaIds.length < members.length) memberFilter[l.id] = selectedWaIds;
       }
       if (listIds.length === 0) {
-        alert('Select at least one chat to send to.');
+        showToast('Select at least one chat to send to.', 'error');
         return;
       }
       const itemChecks = panel.querySelectorAll('.send-item-select');
@@ -1449,7 +1939,7 @@ function buildSendPanel(message) {
           .filter((cb) => cb.checked)
           .map((cb) => Number(cb.dataset.idx));
         if (itemIndexes.length === 0) {
-          alert('Select at least one item to send.');
+          showToast('Select at least one item to send.', 'error');
           return;
         }
       }
@@ -1474,7 +1964,7 @@ function buildSendPanel(message) {
           .filter((cb) => cb.checked)
           .map((cb) => Number(cb.dataset.idx));
         if (itemIndexes.length === 0) {
-          alert('Select at least one item to send.');
+          showToast('Select at least one item to send.', 'error');
           return;
         }
       }
@@ -1483,7 +1973,7 @@ function buildSendPanel(message) {
         activeChatRunIds.set(`msg-${message.id}`, { runId: res.runId, assignedAt: Date.now() });
         saveActiveChatRunIds();
       } else if (!res.ok) {
-        alert(res.error || 'Could not send to the currently open chat.');
+        showToast(res.error || 'Could not send to the currently open chat.', 'error');
       }
       renderMessages();
     });
@@ -1496,7 +1986,7 @@ function buildSendPanel(message) {
         activeChatRunIds.set(`msg-${message.id}:${itemIndex}`, { runId: res.runId, assignedAt: Date.now() });
         saveActiveChatRunIds();
       } else if (!res.ok) {
-        alert(res.error || 'Could not send that item to the currently open chat.');
+        showToast(res.error || 'Could not send that item to the currently open chat.', 'error');
       }
       renderMessages();
     });
@@ -1537,7 +2027,7 @@ document.getElementById('scanChatsBtn').addEventListener('click', async () => {
   btn.disabled = false;
   btn.textContent = 'Scan';
   if (!res.ok) {
-    alert(res.error || 'Could not scan chats.');
+    showToast(res.error || 'Could not scan chats.', 'error');
     return;
   }
   const chats = res.chats || [];
@@ -1545,14 +2035,14 @@ document.getElementById('scanChatsBtn').addEventListener('click', async () => {
     if (c.waId) chatSource.set(c.waId, c);
   }
   if (chats.length === 0) {
-    alert('No chats found — is web.whatsapp.com open and logged in?');
+    showToast('No chats found — is web.whatsapp.com open and logged in?', 'info');
   } else {
     await call('saveFetchedChats', { chats });
   }
   renderListBuilder();
 });
 
-document.getElementById('manualAddBtn').addEventListener('click', async () => {
+async function addManualContact() {
   const input = document.getElementById('manualContactNumber');
   const number = input.value.trim();
   if (!number) return;
@@ -1561,7 +2051,7 @@ document.getElementById('manualAddBtn').addEventListener('click', async () => {
   const res = await call('findContactByNumber', { number });
   btn.disabled = false;
   if (!res.ok) {
-    alert(res.error || 'Could not find that contact.');
+    showToast(res.error || 'Could not find that contact.', 'error');
     return;
   }
   chatSource.set(res.contact.waId, res.contact);
@@ -1569,6 +2059,13 @@ document.getElementById('manualAddBtn').addEventListener('click', async () => {
   await call('saveFetchedChats', { chats: [res.contact] });
   input.value = '';
   renderListBuilder();
+}
+document.getElementById('manualAddBtn').addEventListener('click', addManualContact);
+document.getElementById('manualContactNumber').addEventListener('keydown', (e) => {
+  if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) {
+    e.preventDefault();
+    addManualContact();
+  }
 });
 
 // Minimal RFC4180-ish CSV parser — handles quoted fields, "" escaped
@@ -1678,7 +2175,7 @@ document.getElementById('csvImportInput').addEventListener('change', async (e) =
   if (!file) return;
   const rows = extractContactsFromCsv(await file.text());
   if (rows.length === 0) {
-    alert('No phone numbers or WhatsApp ids found in that CSV.');
+    showToast('No phone numbers or WhatsApp ids found in that CSV.', 'error');
     return;
   }
   // No live WhatsApp lookup for plain phone numbers — a chat id built from
@@ -1718,14 +2215,15 @@ document.getElementById('csvImportInput').addEventListener('change', async (e) =
     await call('saveFetchedChats', { chats: newlyResolved });
   }
   renderListBuilder();
-  alert(
+  showToast(
     `CSV import done: ${added} added, ${alreadyIn} already in your fetched chats. ` +
-      `Numbers that turn out not to be on WhatsApp will show up as a failed send in the Log tab when you actually message them, not here.`
+      `Numbers that turn out not to be on WhatsApp will show up as a failed send in the Log tab when you actually message them, not here.`,
+    'success'
   );
 });
 
 document.getElementById('clearFetchedBtn').addEventListener('click', async () => {
-  if (!confirm('Clear the fetched chats list? Saved lists are not affected.')) return;
+  if (!(await showConfirmDialog('Clear the fetched chats list? Saved lists are not affected.', { confirmText: 'Clear', danger: true }))) return;
   await call('clearFetchedChats');
   chatSource = new Map();
   selectedWaIds = new Set();
@@ -1735,7 +2233,7 @@ document.getElementById('clearFetchedBtn').addEventListener('click', async () =>
 document.getElementById('exportFetchedBtn').addEventListener('click', async () => {
   const chats = Array.from(chatSource.values());
   if (chats.length === 0) {
-    alert('Nothing fetched yet to export.');
+    showToast('Nothing fetched yet to export.', 'info');
     return;
   }
   const btn = document.getElementById('exportFetchedBtn');
@@ -1803,11 +2301,11 @@ document.getElementById('cancelEditListBtn').addEventListener('click', resetList
 document.getElementById('saveListBtn').addEventListener('click', async () => {
   const name = document.getElementById('listName').value.trim();
   if (!name) {
-    alert('Give this list a name.');
+    showToast('Give this list a name.', 'error');
     return;
   }
   if (selectedWaIds.size === 0) {
-    alert('Select at least one group/contact.');
+    showToast('Select at least one group/contact.', 'error');
     return;
   }
   const members = Array.from(selectedWaIds).map((waId) => chatSource.get(waId)).filter(Boolean);
@@ -1832,9 +2330,9 @@ function renderLists() {
         <span class="log-time">${escapeHtml(names.slice(0, 4).join(', '))}${names.length > 4 ? '…' : ''}</span>
       </div>
       <div class="item-actions">
-        <button class="icon-btn small-icon-btn" data-act="edit" type="button" title="Edit">${EDIT_ICON_SVG}</button>
-        <button class="icon-btn small-icon-btn" data-act="export" type="button" title="Export to CSV">${EXPORT_ICON_SVG}</button>
-        <button class="icon-btn small-icon-btn danger" data-act="del" type="button" title="Delete">${DELETE_ICON_SVG}</button>
+        <button class="icon-btn small-icon-btn" data-act="edit" type="button" data-tooltip="Edit">${EDIT_ICON_SVG}</button>
+        <button class="icon-btn small-icon-btn" data-act="export" type="button" data-tooltip="Export to CSV">${EXPORT_ICON_SVG}</button>
+        <button class="icon-btn small-icon-btn danger" data-act="del" type="button" data-tooltip="Delete">${DELETE_ICON_SVG}</button>
       </div>
     </div>`;
     li.querySelector('[data-act="edit"]').addEventListener('click', () => {
@@ -1857,7 +2355,11 @@ function renderLists() {
       btn.disabled = false;
     });
     li.querySelector('[data-act="del"]').addEventListener('click', async () => {
-      if (!confirm(`Delete list "${l.name}"? Any schedules using it will have it removed from their targets.`)) return;
+      const ok = await showConfirmDialog(`Delete list "${l.name}"? Any schedules using it will have it removed from their targets.`, {
+        confirmText: 'Delete',
+        danger: true
+      });
+      if (!ok) return;
       await call('deleteList', { id: l.id });
       refresh();
     });
@@ -1867,7 +2369,7 @@ function renderLists() {
 
 // ============ LOG ============
 document.getElementById('clearLogBtn').addEventListener('click', async () => {
-  if (!confirm('Clear the entire activity log?')) return;
+  if (!(await showConfirmDialog('Clear the entire activity log?', { confirmText: 'Clear', danger: true }))) return;
   await call('clearLog');
   refresh();
 });
@@ -1975,7 +2477,7 @@ function renderLog() {
     const eligible = filtered.filter((l) => l.status === 'success' && l.waId && l.msgId && !l.deletedForEveryone);
     if (eligible.length > 1) {
       bulkBtn.style.display = '';
-      bulkBtn.title = `Delete for everyone — filtered messages (${eligible.length})`;
+      bulkBtn.dataset.tooltip = `Delete for everyone — filtered messages (${eligible.length})`;
       bulkBtn.dataset.mode = 'filtered';
       bulkBtn.dataset.logIds = JSON.stringify(eligible.map((l) => l.id));
       bulkBtn.dataset.count = eligible.length;
@@ -1988,7 +2490,7 @@ function renderLog() {
     if (newestDeletable) {
       const count = deletableCounts.get(newestDeletable.campaignId);
       bulkBtn.style.display = '';
-      bulkBtn.title = `Delete for everyone — this send (${count} messages)`;
+      bulkBtn.dataset.tooltip = `Delete for everyone — this send (${count} messages)`;
       bulkBtn.dataset.mode = 'campaign';
       bulkBtn.dataset.campaignId = newestDeletable.campaignId;
       bulkBtn.dataset.count = count;
@@ -2015,7 +2517,7 @@ function renderLog() {
     ${
       canDeleteThis
         ? `<div class="log-entry-actions">
-      <button class="icon-btn small-icon-btn danger" type="button" data-act="deleteForEveryone" data-log-id="${l.id}" title="Delete for everyone">
+      <button class="icon-btn small-icon-btn danger" type="button" data-act="deleteForEveryone" data-log-id="${l.id}" data-tooltip="Delete for everyone">
         <svg viewBox="0 0 24 24" width="14" height="14"><path fill="currentColor" d="M6 19a2 2 0 0 0 2 2h8a2 2 0 0 0 2-2V7H6v12ZM19 4h-3.5l-1-1h-5l-1 1H5v2h14V4Z"/></svg>
       </button>
     </div>`
@@ -2025,10 +2527,14 @@ function renderLog() {
   }
   ul.querySelectorAll('[data-act="deleteForEveryone"]').forEach((btn) => {
     btn.addEventListener('click', async () => {
-      if (!confirm('Delete this message for everyone? This only works if WhatsApp still allows it (a limited time after sending).')) return;
+      const ok = await showConfirmDialog(
+        'Delete this message for everyone? This only works if WhatsApp still allows it (a limited time after sending).',
+        { confirmText: 'Delete', danger: true }
+      );
+      if (!ok) return;
       const res = await call('deleteForEveryone', { logId: btn.dataset.logId });
       if (res.ok && res.runId) setDeleteRunId(res.runId);
-      else if (!res.ok) alert(res.error || 'Could not start delete.');
+      else if (!res.ok) showToast(res.error || 'Could not start delete.', 'error');
       refresh();
     });
   });
@@ -2040,18 +2546,17 @@ document.getElementById('bulkDeleteForEveryoneBtn').addEventListener('click', as
   const count = btn.dataset.count;
   if (!mode) return;
   const scopeText = mode === 'filtered' ? 'filtered' : 'from this send';
-  if (
-    !confirm(
-      `Delete all ${count} messages ${scopeText} for everyone? This only works if WhatsApp still allows it (a limited time after sending) — chats past that window will be skipped and logged as failed.`
-    )
-  )
-    return;
+  const okBulk = await showConfirmDialog(
+    `Delete all ${count} messages ${scopeText} for everyone? This only works if WhatsApp still allows it (a limited time after sending) — chats past that window will be skipped and logged as failed.`,
+    { confirmText: 'Delete all', danger: true }
+  );
+  if (!okBulk) return;
   const res =
     mode === 'filtered'
       ? await call('deleteForEveryoneByIds', { logIds: JSON.parse(btn.dataset.logIds || '[]') })
       : await call('deleteForEveryoneBulk', { campaignId: btn.dataset.campaignId });
   if (res.ok && res.runId) setDeleteRunId(res.runId);
-  else if (!res.ok) alert(res.error || 'Could not start delete.');
+  else if (!res.ok) showToast(res.error || 'Could not start delete.', 'error');
   refresh();
 });
 
@@ -2086,7 +2591,7 @@ document.getElementById('googleSignInBtn').addEventListener('click', async () =>
 });
 
 document.getElementById('signOutBtn').addEventListener('click', async () => {
-  if (!confirm('Sign out? Sync (if on) will stop until you sign back in.')) return;
+  if (!(await showConfirmDialog('Sign out? Sync (if on) will stop until you sign back in.', { confirmText: 'Sign out' }))) return;
   await call('signOut');
   refresh();
 });
@@ -2200,13 +2705,91 @@ async function checkWaStatusLive() {
   if (res.ok && res.ready) {
     dot.className = 'wa-status-dot ready';
     text.textContent = 'WhatsApp Status: ready';
-    document.getElementById('waStatusLine').title = 'WhatsApp Web is ready — sends should go through.';
+    document.getElementById('waStatusLine').dataset.tooltip = 'WhatsApp Web is ready — sends should go through.';
   } else {
     dot.className = 'wa-status-dot not-ready';
     text.textContent = 'WhatsApp Status: not ready';
-    document.getElementById('waStatusLine').title = res.reason || 'WhatsApp Web is not ready — a send would fail right now.';
+    document.getElementById('waStatusLine').dataset.tooltip = res.reason || 'WhatsApp Web is not ready — a send would fail right now.';
   }
 }
+
+// ============ CUSTOM TOOLTIPS ============
+// One shared element, positioned from each trigger's real measured
+// position at hover time — see popup.css's ".custom-tooltip" for why a
+// pure-CSS approach couldn't do this safely (an element near an edge would
+// either render off-screen, or overflow in a way that could trick the
+// extension popup's own auto-resize into a hover/resize jitter loop).
+// Self-contained: touches nothing else in this file, and any element
+// anywhere just needs a `data-tooltip="..."` attribute to get one — no
+// per-element CSS or wiring required.
+(function () {
+  const tooltip = document.createElement('div');
+  tooltip.className = 'custom-tooltip';
+  document.body.appendChild(tooltip);
+  let currentTarget = null;
+  let showTimer = null;
+  const MARGIN = 6;
+
+  function hideTooltip() {
+    clearTimeout(showTimer);
+    tooltip.classList.remove('visible');
+    currentTarget = null;
+  }
+
+  function showTooltip(target) {
+    const text = target.dataset.tooltip;
+    if (!text) return;
+    tooltip.textContent = text;
+    tooltip.classList.add('visible');
+
+    const targetRect = target.getBoundingClientRect();
+    const viewportWidth = document.documentElement.clientWidth;
+    const viewportHeight = document.documentElement.clientHeight;
+    const tipRect = tooltip.getBoundingClientRect();
+
+    // Prefer centered above the target; flip below if there's no room.
+    let top = targetRect.top - tipRect.height - MARGIN;
+    let placement = 'top';
+    if (top < MARGIN) {
+      top = targetRect.bottom + MARGIN;
+      placement = 'bottom';
+    }
+    top = Math.min(top, viewportHeight - tipRect.height - MARGIN);
+
+    // Clamp horizontally so the box itself never runs off either edge —
+    // this is what actually fixes "too far right/left" for every element,
+    // not just a hand-picked few.
+    let left = targetRect.left + targetRect.width / 2 - tipRect.width / 2;
+    left = Math.max(MARGIN, Math.min(left, viewportWidth - tipRect.width - MARGIN));
+
+    tooltip.style.left = `${left}px`;
+    tooltip.style.top = `${top}px`;
+    tooltip.dataset.placement = placement;
+    // Keep the little arrow pointing at the real button center even after
+    // the box above got shifted to stay on-screen.
+    const arrowLeft = Math.max(8, Math.min(targetRect.left + targetRect.width / 2 - left, tipRect.width - 8));
+    tooltip.style.setProperty('--arrow-left', `${arrowLeft}px`);
+  }
+
+  document.addEventListener('pointerover', (e) => {
+    // Self-heals if a re-render (refresh()) swapped out the element a
+    // tooltip was showing for, since that element no longer exists to
+    // ever fire a matching pointerout.
+    if (currentTarget && !document.body.contains(currentTarget)) hideTooltip();
+    const target = e.target.closest('[data-tooltip]');
+    if (!target || target === currentTarget) return;
+    hideTooltip();
+    currentTarget = target;
+    showTimer = setTimeout(() => showTooltip(target), 300);
+  });
+  document.addEventListener('pointerout', (e) => {
+    const target = e.target.closest('[data-tooltip]');
+    if (!target || target !== currentTarget) return;
+    if (e.relatedTarget && target.contains(e.relatedTarget)) return;
+    hideTooltip();
+  });
+  document.addEventListener('scroll', hideTooltip, true);
+})();
 
 restoreDraft();
 refresh();
