@@ -282,6 +282,23 @@ let editingMessageId = null;
 let editingMessageSrNo = null;
 let editingListId = null;
 
+// Header/footer for the message currently being composed — 'default' (use
+// the global Settings-tab text), 'custom' (this message's own text below),
+// or 'off' (never add one here, even if the global settings have one).
+// Saved onto the message alongside its items; also honored by an unsaved
+// "Send Now" so the override doesn't require saving to take effect. A
+// single item/thread can further override this via its own
+// headerFooterMode/headerText/footerText (see composing-item HF panel) —
+// resolution order is item -> message -> global, done in background.js.
+let composingHfMode = 'default';
+let composingHfHeaderText = '';
+let composingHfFooterText = '';
+let messageHfPanelOpen = false;
+// Which single composing item (by reference) currently has its own HF
+// panel expanded, or null. Only one open at a time, same pattern as
+// editingThreadItem.
+let hfPanelItem = null;
+
 // The separator checkbox appears in two independent places (the one-off Send
 // panel, and the per-message schedule editor) — each remembers its own
 // last-used state across popup opens, not tied to any one message/schedule.
@@ -322,6 +339,12 @@ const MEDIA_ICON_SVG =
   '<svg viewBox="0 0 24 24" width="14" height="14"><path fill="currentColor" d="M16.5 6.5v9a4 4 0 0 1-8 0v-9a2.5 2.5 0 0 1 5 0v8a1 1 0 0 1-2 0v-8H10v8a2.5 2.5 0 0 0 5 0v-9a4 4 0 0 0-8 0v9.5a5.5 5.5 0 0 0 11 0V6.5Z"/></svg>';
 const TEXT_ICON_SVG =
   '<svg viewBox="0 0 24 24" width="14" height="14"><path fill="currentColor" d="M4 5v2h16V5H4Zm0 8h16v-2H4v2Zm0 6h10v-2H4v2Z"/></svg>';
+// Header/footer glyph — top and bottom bars solid, the body bar between them
+// dimmed, so it reads as "a header and a footer around content" at a glance.
+const HF_ICON_SVG =
+  '<svg viewBox="0 0 24 24" width="14" height="14"><path fill="currentColor" opacity="0.35" d="M4 10.5h16v3H4z"/><path fill="currentColor" d="M4 4h16v3H4V4Zm0 13h16v3H4v-3Z"/></svg>';
+const REFRESH_ICON_SVG =
+  '<svg viewBox="0 0 24 24" width="14" height="14"><path fill="currentColor" d="M17.65 6.35A7.958 7.958 0 0 0 12 4c-4.42 0-7.99 3.58-7.99 8s3.57 8 7.99 8c3.73 0 6.84-2.55 7.73-6h-2.08c-.82 2.33-3.04 4-5.65 4-3.31 0-6-2.69-6-6s2.69-6 6-6c1.66 0 3.14.69 4.22 1.78L13 11h7V4l-2.35 2.35z"/></svg>';
 
 function renderProgressBlock(run) {
   const doneCount = run.sent + run.failed;
@@ -619,7 +642,10 @@ function saveDraft() {
       text: document.getElementById('msgText').value,
       items: composingItems,
       editingMessageId,
-      editingMessageSrNo
+      editingMessageSrNo,
+      headerFooterMode: composingHfMode,
+      headerText: composingHfHeaderText,
+      footerText: composingHfFooterText
     }
   });
 }
@@ -639,6 +665,9 @@ function restoreDraft() {
     composingItems = draft.items || [];
     editingMessageId = draft.editingMessageId || null;
     editingMessageSrNo = typeof draft.editingMessageSrNo === 'number' ? draft.editingMessageSrNo : null;
+    composingHfMode = draft.headerFooterMode || 'default';
+    composingHfHeaderText = draft.headerText || '';
+    composingHfFooterText = draft.footerText || '';
     document.getElementById('msgLabelRow').style.display = editingMessageId ? '' : 'none';
     renderComposingItems();
     document.getElementById('saveMessageBtn').textContent = editingMessageId ? 'Update message' : 'Save message';
@@ -664,6 +693,20 @@ function readFileAsDataUrl(file) {
 async function addMediaFiles(fileList) {
   const files = Array.from(fileList || []).filter(Boolean);
   if (files.length === 0) return;
+  // If there's text sitting in the box that was never explicitly added as
+  // its own thread (composingItems is still empty — either a fresh
+  // message, or a single-text saved message being edited straight in the
+  // box), commit it as a real thread first. Otherwise the moment an
+  // attachment lands, composingItems stops being "empty" and
+  // getEffectiveItems() would silently ignore that text at save/send time.
+  if (composingItems.length === 0) {
+    const textarea = document.getElementById('msgText');
+    const pendingText = textarea.value.trim();
+    if (pendingText) {
+      composingItems.push({ kind: 'text', text: pendingText });
+      textarea.value = '';
+    }
+  }
   for (const file of files) {
     if (file.size > 15 * 1024 * 1024) {
       showToast(`"${file.name}" is larger than 15MB — WhatsApp Web may reject it.`, 'warning');
@@ -837,6 +880,7 @@ async function handleClearAllItems() {
   if (!ok) return;
   composingItems = [];
   editingThreadItem = null;
+  hfPanelItem = null;
   renderComposingItems();
   saveDraft();
 }
@@ -855,7 +899,69 @@ function editTextThread(idx) {
   textarea.focus();
 }
 
+// Shared chip+textarea markup for a header/footer override panel — used by
+// both the whole-message control and each per-thread one below it.
+// `inheritHint` names what "Default" falls back to, for the hint text.
+function hfPanelHtml(mode, headerText, footerText, scopeLabel, inheritHint) {
+  const chips = ['default', 'custom', 'off']
+    .map(
+      (m) =>
+        `<button type="button" class="kind-btn hf-mode-btn${mode === m ? ' active' : ''}" data-hf-mode="${m}">${
+          m === 'default' ? 'Default' : m === 'custom' ? 'Custom' : 'Off'
+        }</button>`
+    )
+    .join('');
+  let body;
+  if (mode === 'custom') {
+    body = `<textarea class="hf-header-input" placeholder="Header text" rows="2">${escapeHtml(headerText || '')}</textarea><textarea class="hf-footer-input" placeholder="Footer text" rows="2">${escapeHtml(footerText || '')}</textarea>`;
+  } else if (mode === 'off') {
+    body = `<p class="hf-panel-hint">No header or footer will be added to ${scopeLabel}.</p>`;
+  } else {
+    body = `<p class="hf-panel-hint">Uses ${inheritHint}.</p>`;
+  }
+  return `<div class="hf-panel"><div class="kind-toggle hf-mode-chips">${chips}</div>${body}</div>`;
+}
+
+// Header/footer for the whole message being composed — see the
+// composingHfMode declaration above for the resolution order.
+function renderMessageHfControl() {
+  const container = document.getElementById('msgHeaderFooterControl');
+  if (!container) return;
+  const modeLabel = composingHfMode === 'custom' ? 'Custom' : composingHfMode === 'off' ? 'Off' : 'Default';
+  container.innerHTML = `<div class="hf-control">
+      <button type="button" class="hf-toggle-btn${messageHfPanelOpen ? ' open' : ''}" id="msgHfToggleBtn" data-tooltip="Header/footer for this message — overrides the global Settings default">${HF_ICON_SVG}<span>Header/Footer</span></button>
+      <span class="hf-mode-badge ${composingHfMode}">${modeLabel}</span>
+    </div>${messageHfPanelOpen ? hfPanelHtml(composingHfMode, composingHfHeaderText, composingHfFooterText, 'this message', 'the global header/footer set on the Settings tab') : ''}`;
+  document.getElementById('msgHfToggleBtn').addEventListener('click', () => {
+    messageHfPanelOpen = !messageHfPanelOpen;
+    renderMessageHfControl();
+  });
+  if (!messageHfPanelOpen) return;
+  container.querySelectorAll('.hf-mode-btn').forEach((btn) => {
+    btn.addEventListener('click', () => {
+      composingHfMode = btn.dataset.hfMode;
+      saveDraft();
+      renderMessageHfControl();
+    });
+  });
+  const headerInput = container.querySelector('.hf-header-input');
+  const footerInput = container.querySelector('.hf-footer-input');
+  if (headerInput) {
+    headerInput.addEventListener('input', (e) => {
+      composingHfHeaderText = e.target.value;
+      saveDraft();
+    });
+  }
+  if (footerInput) {
+    footerInput.addEventListener('input', (e) => {
+      composingHfFooterText = e.target.value;
+      saveDraft();
+    });
+  }
+}
+
 function renderComposingItems() {
+  renderMessageHfControl();
   const box = document.getElementById('composingItems');
   // Nothing to show or manage yet — hide the whole section rather than a
   // box with a placeholder hint inside it; the textarea's own placeholder
@@ -900,16 +1006,28 @@ function renderComposingItems() {
           ? `<textarea class="caption-input" data-idx="${i}" placeholder="Caption (optional)" rows="2">${escapeHtml(item.caption || '')}</textarea>`
           : '';
       const isEditing = item === editingThreadItem;
+      const hfMode = item.headerFooterMode || 'default';
+      const hfBadge =
+        hfMode !== 'default'
+          ? `<span class="hf-mode-badge ${hfMode}">${hfMode === 'custom' ? 'Custom H/F' : 'No H/F'}</span>`
+          : '';
+      const hfPanelOpen = item === hfPanelItem;
+      const hfPanel = hfPanelOpen
+        ? hfPanelHtml(hfMode, item.headerText, item.footerText, 'this thread', "this message's header/footer setting")
+        : '';
       return `<div class="composing-item${isEditing ? ' editing' : ''}">
         <input type="number" class="item-srno-input" data-idx="${i}" min="1" max="${composingItems.length}" value="${i + 1}" data-tooltip="Thread number — change it to move this item to that position" />
         <span class="composing-item-icon ${item.kind}">${icon}</span>
         <div class="composing-item-body">
           <div class="composing-item-preview">${preview}</div>
           ${isEditing ? '<span class="muted composing-item-editing-note">Editing — update or Ctrl+Enter above</span>' : ''}
+          ${hfBadge}
           ${captionField}
+          ${hfPanel}
         </div>
         <div class="composing-item-actions">
           ${item.kind === 'text' ? `<button type="button" data-act="edit" data-idx="${i}" data-tooltip="Edit this thread">${EDIT_ICON_SVG}</button>` : ''}
+          <button type="button" data-act="hf" data-idx="${i}" class="hf-item-toggle${hfPanelOpen ? ' open' : ''}" data-tooltip="Header/footer for this thread — overrides the message setting">${HF_ICON_SVG}</button>
           <button type="button" data-act="up" data-idx="${i}" data-tooltip="Move up">${MOVE_UP_ICON_SVG}</button>
           <button type="button" data-act="down" data-idx="${i}" data-tooltip="Move down">${MOVE_DOWN_ICON_SVG}</button>
           <button type="button" data-act="remove" data-idx="${i}" data-tooltip="Remove">${REMOVE_ICON_SVG}</button>
@@ -953,6 +1071,7 @@ function renderComposingItems() {
     btn.addEventListener('click', () => {
       const [removed] = composingItems.splice(Number(btn.dataset.idx), 1);
       if (removed === editingThreadItem) editingThreadItem = null;
+      if (removed === hfPanelItem) hfPanelItem = null;
       renderComposingItems();
       saveDraft();
     });
@@ -975,6 +1094,36 @@ function renderComposingItems() {
       saveDraft();
     });
   });
+  box.querySelectorAll('[data-act="hf"]').forEach((btn) => {
+    btn.addEventListener('click', () => {
+      const item = composingItems[Number(btn.dataset.idx)];
+      hfPanelItem = hfPanelItem === item ? null : item;
+      renderComposingItems();
+    });
+  });
+  if (hfPanelItem) {
+    box.querySelectorAll('.hf-mode-btn').forEach((btn) => {
+      btn.addEventListener('click', () => {
+        hfPanelItem.headerFooterMode = btn.dataset.hfMode;
+        renderComposingItems();
+        saveDraft();
+      });
+    });
+    const hfHeaderInput = box.querySelector('.hf-header-input');
+    const hfFooterInput = box.querySelector('.hf-footer-input');
+    if (hfHeaderInput) {
+      hfHeaderInput.addEventListener('input', (e) => {
+        hfPanelItem.headerText = e.target.value;
+        saveDraft();
+      });
+    }
+    if (hfFooterInput) {
+      hfFooterInput.addEventListener('input', (e) => {
+        hfPanelItem.footerText = e.target.value;
+        saveDraft();
+      });
+    }
+  }
 }
 
 // Next unused serial number, suggested as the default for a new message so
@@ -989,7 +1138,12 @@ function resetMessageForm() {
   editingMessageId = null;
   editingMessageSrNo = null;
   editingThreadItem = null;
+  hfPanelItem = null;
   composingItems = [];
+  composingHfMode = 'default';
+  composingHfHeaderText = '';
+  composingHfFooterText = '';
+  messageHfPanelOpen = false;
   document.getElementById('msgLabel').value = '';
   document.getElementById('msgLabelRow').style.display = 'none';
   document.getElementById('msgText').value = '';
@@ -1132,7 +1286,11 @@ function renderAdhocSendPanel() {
         return;
       }
       const sendSeparator = panel.querySelector('.send-separator-check').checked;
-      const res = await call('sendNowAdhoc', { items: getEffectiveItems(), listIds, memberFilter, sendSeparator });
+      // Not saved as a message, so there's no message row to carry the
+      // header/footer mode set in the compose form above — passed through
+      // directly instead, so it still takes effect for this one send.
+      const messageOverride = { headerFooterMode: composingHfMode, headerText: composingHfHeaderText, footerText: composingHfFooterText };
+      const res = await call('sendNowAdhoc', { items: getEffectiveItems(), listIds, memberFilter, sendSeparator, messageOverride });
       if (res.ok && res.runId) {
         setAdhocRunId(res.runId);
       } else if (!res.ok) {
@@ -1158,7 +1316,15 @@ document.getElementById('saveMessageBtn').addEventListener('click', async () => 
   // is appended after whatever's already there. Reordering after the fact
   // is what the ▲/▼ buttons on the saved-message row are for.
   const srNo = editingMessageId ? editingMessageSrNo : nextSrNo();
-  const message = { id: editingMessageId, name, srNo, items };
+  const message = {
+    id: editingMessageId,
+    name,
+    srNo,
+    items,
+    headerFooterMode: composingHfMode,
+    headerText: composingHfHeaderText,
+    footerText: composingHfFooterText
+  };
   await call('saveMessage', { message });
   resetMessageForm();
   refresh();
@@ -1260,10 +1426,33 @@ function renderMessages() {
       editingMessageId = m.id;
       editingMessageSrNo = typeof m.srNo === 'number' ? m.srNo : null;
       editingThreadItem = null;
+      hfPanelItem = null;
+      composingHfMode = m.headerFooterMode || 'default';
+      composingHfHeaderText = m.headerText || '';
+      composingHfFooterText = m.footerText || '';
+      messageHfPanelOpen = false;
       document.getElementById('msgLabel').value = m.name;
       document.getElementById('msgLabelRow').style.display = '';
-      document.getElementById('msgText').value = '';
-      composingItems = (m.items || []).map((item) => ({ ...item })); // clone so cancel doesn't mutate the saved copy
+      const items = m.items || [];
+      // A saved message that's just one text thread with no thread-level
+      // header/footer override of its own edits like plain text — straight
+      // in the box, no thread list to open first. Leaving composingItems
+      // empty here (not populated with that one item) is what does it:
+      // it's the exact same shape as "typed something, never clicked +"
+      // for a brand-new message, so getEffectiveItems() already picks up
+      // whatever's currently in the box when you save, no extra wiring
+      // needed. A thread-level override wouldn't survive that (a fresh
+      // plain-text item has nowhere to carry it), so it keeps the item
+      // visible in the list instead, same as multi-thread/mixed messages.
+      const singleItem = items.length === 1 ? items[0] : null;
+      const singleItemHasOwnHf = singleItem && singleItem.headerFooterMode && singleItem.headerFooterMode !== 'default';
+      if (singleItem && singleItem.kind === 'text' && !singleItemHasOwnHf) {
+        document.getElementById('msgText').value = singleItem.text;
+        composingItems = [];
+      } else {
+        document.getElementById('msgText').value = '';
+        composingItems = items.map((item) => ({ ...item })); // clone so cancel doesn't mutate the saved copy
+      }
       renderComposingItems();
       document.getElementById('saveMessageBtn').textContent = 'Update message';
       document.getElementById('cancelEditMessageBtn').style.display = '';
@@ -2314,6 +2503,110 @@ document.getElementById('saveListBtn').addEventListener('click', async () => {
   refresh();
 });
 
+// ---------- refreshing saved lists against live WhatsApp state ----------
+// A saved list stores each member's chat data (waId/name/type/number)
+// as of whenever it was built — it never hears about a group rename, a
+// group you've since left/been removed from, or a contact you deleted.
+// Refreshing re-scans WhatsApp the same way "Scan" does (groups/contacts/
+// communities via scope 'all', plus every open 1:1 chat via scope 'chats'
+// so manually-added non-contact numbers aren't false-flagged) and diffs
+// each member's waId against that fresh set: found → adopt the live
+// name/number (rename), not found → drop it (left/removed/deleted — a
+// group or contact chat.list() would no longer surface).
+async function fetchLiveChatMap() {
+  const [allRes, chatsRes] = await Promise.all([
+    call('listOpenChats', { scope: 'all' }),
+    call('listOpenChats', { scope: 'chats', contactFilter: 'all' })
+  ]);
+  if (!allRes.ok && !chatsRes.ok) {
+    return { ok: false, error: allRes.error || chatsRes.error || 'Could not reach WhatsApp Web.' };
+  }
+  const map = new Map();
+  for (const c of [...(allRes.chats || []), ...(chatsRes.chats || [])]) {
+    if (c.waId) map.set(c.waId, c);
+  }
+  for (const c of map.values()) chatSource.set(c.waId, c); // benefit the list builder too
+  return { ok: true, map };
+}
+
+function diffListAgainstLive(list, liveMap) {
+  const kept = [];
+  const removed = [];
+  let renamed = 0;
+  for (const m of list.members || []) {
+    const live = liveMap.get(m.waId);
+    if (!live) {
+      removed.push(m);
+      continue;
+    }
+    if (live.name !== m.name || (live.number || '') !== (m.number || '')) renamed++;
+    kept.push({ ...m, name: live.name, number: live.number || '' });
+  }
+  return { kept, removed, renamed };
+}
+
+async function refreshList(list, btn) {
+  if (btn) btn.disabled = true;
+  const live = await fetchLiveChatMap();
+  if (btn) btn.disabled = false;
+  if (!live.ok) {
+    showToast(live.error, 'error');
+    return;
+  }
+  const { kept, removed, renamed } = diffListAgainstLive(list, live.map);
+  if (renamed === 0 && removed.length === 0) {
+    showToast(`"${list.name}" is already up to date.`, 'success');
+    return;
+  }
+  if (removed.length > 0) {
+    const names = removed.map((m) => m.name).slice(0, 5).join(', ') + (removed.length > 5 ? '…' : '');
+    const emptyWarning = kept.length === 0 ? ' This list will end up empty.' : '';
+    const ok = await showConfirmDialog(
+      `Refreshing "${list.name}": ${renamed > 0 ? `${renamed} renamed, ` : ''}${removed.length} no longer reachable (left, removed, or deleted) and will be dropped — ${names}.${emptyWarning}`,
+      { confirmText: 'Refresh', danger: true }
+    );
+    if (!ok) return;
+  }
+  await call('saveList', { list: { id: list.id, name: list.name, members: kept } });
+  showToast(`"${list.name}" refreshed — ${renamed} renamed, ${removed.length} removed.`, 'success');
+  refresh();
+}
+
+document.getElementById('refreshAllListsBtn').addEventListener('click', async (e) => {
+  if (STATE.lists.length === 0) {
+    showToast('No saved lists yet.', 'info');
+    return;
+  }
+  const btn = e.currentTarget;
+  btn.disabled = true;
+  const live = await fetchLiveChatMap();
+  btn.disabled = false;
+  if (!live.ok) {
+    showToast(live.error, 'error');
+    return;
+  }
+  const diffs = STATE.lists.map((list) => ({ list, ...diffListAgainstLive(list, live.map) }));
+  const changed = diffs.filter((d) => d.renamed > 0 || d.removed.length > 0);
+  if (changed.length === 0) {
+    showToast('All lists are already up to date.', 'success');
+    return;
+  }
+  const totalRenamed = changed.reduce((sum, d) => sum + d.renamed, 0);
+  const totalRemoved = changed.reduce((sum, d) => sum + d.removed.length, 0);
+  if (totalRemoved > 0) {
+    const ok = await showConfirmDialog(
+      `Refresh ${changed.length} list${changed.length > 1 ? 's' : ''}: ${totalRenamed} renamed, ${totalRemoved} member${totalRemoved > 1 ? 's' : ''} no longer reachable and will be dropped across them.`,
+      { confirmText: 'Refresh all', danger: true }
+    );
+    if (!ok) return;
+  }
+  for (const d of changed) {
+    await call('saveList', { list: { id: d.list.id, name: d.list.name, members: d.kept } });
+  }
+  showToast(`Refreshed ${changed.length} list${changed.length > 1 ? 's' : ''} — ${totalRenamed} renamed, ${totalRemoved} removed.`, 'success');
+  refresh();
+});
+
 function renderLists() {
   const ul = document.getElementById('listsList');
   ul.innerHTML = '';
@@ -2330,11 +2623,15 @@ function renderLists() {
         <span class="log-time">${escapeHtml(names.slice(0, 4).join(', '))}${names.length > 4 ? '…' : ''}</span>
       </div>
       <div class="item-actions">
+        <button class="icon-btn small-icon-btn" data-act="refresh" type="button" data-tooltip="Refresh from WhatsApp (names, removed groups/contacts)">${REFRESH_ICON_SVG}</button>
         <button class="icon-btn small-icon-btn" data-act="edit" type="button" data-tooltip="Edit">${EDIT_ICON_SVG}</button>
         <button class="icon-btn small-icon-btn" data-act="export" type="button" data-tooltip="Export to CSV">${EXPORT_ICON_SVG}</button>
         <button class="icon-btn small-icon-btn danger" data-act="del" type="button" data-tooltip="Delete">${DELETE_ICON_SVG}</button>
       </div>
     </div>`;
+    li.querySelector('[data-act="refresh"]').addEventListener('click', async (e) => {
+      await refreshList(l, e.currentTarget);
+    });
     li.querySelector('[data-act="edit"]').addEventListener('click', () => {
       editingListId = l.id;
       selectedWaIds = new Set(members.map((m) => m.waId));

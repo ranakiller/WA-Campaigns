@@ -158,6 +158,7 @@ body::-webkit-scrollbar-thumb:hover { background: var(--text-secondary); }
 .row-with-action { display: flex; align-items: center; gap: 6px; margin: 10px 0 4px; }
 .row-with-action .muted { font-size: 11px; font-weight: 600; margin-right: auto; }
 .row-with-action label { margin-right: auto; }
+.row-with-action h3 { margin: 0; margin-right: auto; }
 .small-icon-btn {
   background: var(--bg-hover);
   color: var(--accent);
@@ -323,6 +324,64 @@ button.ghost.small-inline { padding: 5px 10px; margin: 0; font-size: 11px; }
 }
 .composing-item-actions button:hover { background: var(--bg-hover); color: var(--text-primary); }
 .composing-item-actions button[data-act="remove"]:hover { background: var(--danger-bg); color: var(--danger-fg); }
+.composing-item-actions button.hf-item-toggle.open { background: var(--accent-soft); color: var(--accent); }
+
+/* ---------- header/footer override controls (message-level + per-thread) ---------- */
+.hf-control { display: flex; align-items: center; gap: 8px; margin: 12px 0; }
+.hf-toggle-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  border: 1px solid var(--border);
+  background: var(--bg-panel);
+  color: var(--text-secondary);
+  border-radius: var(--radius-sm);
+  padding: 6px 10px;
+  cursor: pointer;
+  font-size: 11.5px;
+  font-weight: 600;
+  transition: border-color 0.15s ease, color 0.15s ease, background 0.15s ease;
+}
+.hf-toggle-btn:hover { border-color: var(--border-strong); }
+.hf-toggle-btn.open { border-color: var(--accent); color: var(--accent); background: var(--accent-soft); }
+.hf-mode-badge {
+  display: inline-block;
+  font-size: 10px;
+  padding: 2px 7px;
+  border-radius: 10px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.02em;
+  background: var(--bg-hover);
+  color: var(--text-secondary);
+}
+.hf-mode-badge.custom { background: var(--accent-soft); color: var(--accent); }
+.hf-mode-badge.off { background: var(--danger-bg); color: var(--danger-fg); }
+.hf-panel {
+  margin-top: 8px;
+  padding: 10px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--bg-panel);
+}
+.hf-panel .hf-mode-chips { margin: 0 0 8px; }
+.hf-panel textarea {
+  width: 100%;
+  margin: 0 0 6px;
+  padding: 6px 8px;
+  font-size: 11.5px;
+  font-family: inherit;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--bg-input);
+  color: var(--text-primary);
+  resize: vertical;
+  min-height: 34px;
+}
+.hf-panel textarea:last-child { margin-bottom: 0; }
+.hf-panel-hint { font-size: 10.5px; color: var(--text-secondary); margin: 0; }
+.composing-item-body .hf-mode-badge { display: inline-block; margin: 4px 0; }
+.composing-item-body .hf-panel { margin-top: 6px; }
 
 /* Chips for added daily times / one-off datetimes in the schedule editor. */
 .chip-list { display: flex; flex-wrap: wrap; gap: 6px; margin: 4px 0 10px; }

@@ -15,8 +15,8 @@ const DEFAULT_SETTINGS = {
   consentAccepted: false,
   theme: 'system', // 'system' | 'light' | 'dark'
   masterEnabled: true, // instant kill switch — off blocks new sends and stops any run in progress
-  headerText: '', // prepended to the first item of every sent message (its caption, if the first item is media)
-  footerText: '', // appended to the last item of every sent message (its caption, if the last item is media)
+  headerText: '', // global default header — prepended to every item's text/caption, unless overridden per-message or per-thread (see resolveHeaderFooter)
+  footerText: '', // global default footer — appended to every item's text/caption, unless overridden per-message or per-thread (see resolveHeaderFooter)
   syncEnabled: false // real-time Firebase sync of messages/lists/log/settings, off by default
 };
 
@@ -376,14 +376,34 @@ function withHeaderFooter(content, headerText, footerText) {
   return parts.join('\n\n');
 }
 
-// Applies the global header/footer to every item of a message (text goes in
-// .text, media goes in .caption) — a fresh array so the underlying stored
-// message/items are never mutated.
-function applyHeaderFooter(items, settings) {
-  const headerText = (settings.headerText || '').trim();
-  const footerText = (settings.footerText || '').trim();
-  if (!headerText && !footerText) return items;
+// Header/footer resolve through three layers, each able to opt out of the
+// one above it: a thread/item ('default' | 'custom' | 'off') falls back to
+// its message ('default' | 'custom' | 'off'), which falls back to the
+// global Settings-tab text. 'off' at any layer wins outright — it means
+// "no header/footer here", not "fall through". A layer that doesn't apply
+// (e.g. an ad-hoc send with no saved message) is treated as 'default' and
+// simply skipped.
+function resolveHeaderFooter(item, message, settings) {
+  const itemMode = item.headerFooterMode || 'default';
+  if (itemMode === 'off') return { headerText: '', footerText: '' };
+  if (itemMode === 'custom') {
+    return { headerText: (item.headerText || '').trim(), footerText: (item.footerText || '').trim() };
+  }
+  const msgMode = (message && message.headerFooterMode) || 'default';
+  if (msgMode === 'off') return { headerText: '', footerText: '' };
+  if (msgMode === 'custom') {
+    return { headerText: (message.headerText || '').trim(), footerText: (message.footerText || '').trim() };
+  }
+  return { headerText: (settings.headerText || '').trim(), footerText: (settings.footerText || '').trim() };
+}
+
+// Applies the resolved header/footer to every item of a message (text goes
+// in .text, media goes in .caption) — a fresh array so the underlying
+// stored message/items are never mutated.
+function applyHeaderFooter(items, settings, message) {
   return items.map((item) => {
+    const { headerText, footerText } = resolveHeaderFooter(item, message, settings);
+    if (!headerText && !footerText) return item;
     if (item.kind === 'media') {
       return { ...item, caption: withHeaderFooter(item.caption || '', headerText, footerText) };
     }
@@ -459,9 +479,14 @@ async function runCampaign(campaign) {
     await appendLog({ campaignId: campaign.id, campaignName: campaign.name, status: 'error', detail: 'Message has no content.' });
     return;
   }
-  // Header/footer come from the global Safety-tab settings, not the campaign,
-  // and wrap every item/thread individually (text or, for media, caption).
-  const sendItems = applyHeaderFooter(items, settings);
+  // Header/footer wrap every item/thread individually (text or, for media,
+  // caption) — see resolveHeaderFooter for the item→message→global
+  // fallback. A send-without-saving has no real message to carry this, so
+  // its compose-form setting rides along as messageOverride instead (a
+  // plain {headerFooterMode, headerText, footerText}, not a saved message
+  // — must stay out of `message` itself, which line ~646 below also uses
+  // to decide whether to stamp a real message's lastSentAt).
+  const sendItems = applyHeaderFooter(items, settings, message || campaign.messageOverride || null);
   // A one-off "send to whatever chat is open right now" send bypasses saved
   // lists entirely — it's given its single target directly instead of a
   // listId to look up, wrapped as one synthetic list so every loop below
@@ -1153,6 +1178,7 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
             id: runId,
             name: 'One-off send (not saved)',
             items: msg.items,
+            messageOverride: msg.messageOverride,
             listIds: msg.listIds,
             memberFilter: msg.memberFilter,
             sendSeparator: msg.sendSeparator !== false,
