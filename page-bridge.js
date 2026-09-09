@@ -352,6 +352,50 @@ async function handleRequest(action, payload) {
       }
       return { info };
     }
+    // Group & Contact Extractor — the group's actual WhatsApp membership,
+    // not a saved list. getParticipants resolves the group then reads
+    // groupMetadata.participants, giving each member's id + admin flags
+    // — no display name, which is why a resolvable name below (or
+    // popup.js's own chatSource cache as a second fallback) matters.
+    //
+    // Many groups now mask a member's real number behind an opaque
+    // "@lid" (Linked ID) instead of their actual "@c.us" number — .id/
+    // .number below is that lid's own digits when so, NOT a callable
+    // phone number, even though it's exactly what sending a message
+    // still needs to address them (that part is deliberately left
+    // alone). getPnLidEntry resolves the REAL phone number (and often a
+    // name) for a lid, but only from what this WhatsApp account already
+    // knows locally — no live network lookup for this direction — so a
+    // lid-masked stranger you have no history with can legitimately
+    // resolve to nothing. That's an expected gap, not a bug.
+    case 'getGroupMembers': {
+      const participants = await window.WPP.group.getParticipants(payload.waId);
+      const members = [];
+      for (const p of participants || []) {
+        const id = p.id;
+        const member = {
+          waId: id && id._serialized,
+          number: id && id.user,
+          phoneNumber: null,
+          name: null,
+          isAdmin: !!p.isAdmin,
+          isSuperAdmin: !!p.isSuperAdmin
+        };
+        if (id && isLidWid(id)) {
+          try {
+            const entry = await window.WPP.contact.getPnLidEntry(id);
+            if (entry && entry.phoneNumber && entry.phoneNumber.id) member.phoneNumber = entry.phoneNumber.id;
+            if (entry && entry.contact) member.name = entry.contact.pushname || entry.contact.name || entry.contact.shortName || null;
+          } catch (e) {
+            // best-effort — waId/number (the lid) still work fine for sending
+          }
+        } else if (id) {
+          member.phoneNumber = id.user; // already a real @c.us id, no resolution needed
+        }
+        members.push(member);
+      }
+      return { members };
+    }
     case 'getActiveChat': {
       const chat = window.WPP.chat.getActiveChat();
       if (!chat || !chat.id) {
@@ -412,6 +456,40 @@ async function handleRequest(action, payload) {
       throw new Error(`Unknown bridge action: ${action}`);
   }
 }
+
+// ---------- incoming-message hook (auto-reply) ----------
+// A one-way push, not a request/response round trip — background.js has no
+// way to poll for new messages, so this forwards WPP's own event the
+// instant it fires. `id.fromMe` filters out anything this account sent,
+// including a prior auto-reply itself or a bulk campaign send — WPP's own
+// `chat` getter defines the owning chat as `id.fromMe ? to : from`, so an
+// incoming message (fromMe false) always has its chat in `from`, which for
+// a group is the group's id, not the individual member who actually typed
+// it (exactly the chat auto-replying should go back into).
+let incomingMessageHookInstalled = false;
+async function installIncomingMessageHook() {
+  if (incomingMessageHookInstalled) return;
+  const ready = await waitForWppReady();
+  if (!ready || incomingMessageHookInstalled) return;
+  incomingMessageHookInstalled = true;
+  window.WPP.on('chat.new_message', (msg) => {
+    try {
+      if (!msg || (msg.id && msg.id.fromMe)) return;
+      const chatId = msg.from && (msg.from._serialized || String(msg.from));
+      if (!chatId) return;
+      const text = msg.body || msg.caption || '';
+      if (!text) return;
+      document.dispatchEvent(
+        new CustomEvent('wa-ext-notify', {
+          detail: { type: 'incomingMessage', chatId, text, isGroup: !!msg.isGroupMsg, msgId: msg.id && msg.id._serialized }
+        })
+      );
+    } catch (_) {
+      // never let a malformed event break WPP's own listener chain
+    }
+  });
+}
+installIncomingMessageHook();
 
 document.addEventListener('wa-ext-request', async (event) => {
   const { id, action, payload } = event.detail || {};

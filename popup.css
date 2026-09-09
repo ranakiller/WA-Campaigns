@@ -28,6 +28,21 @@
   --tooltip-bg: #182229;
   --tooltip-fg: #f2f6f7;
   --tooltip-border: rgba(0, 168, 132, 0.35);
+  /* Neumorphic nav keys (see .tab-btn below). Light mode: the cap can
+     share bg-app exactly — a soft shadow pair reads fine on a light
+     surface. */
+  --cap-bg: var(--bg-app);
+  --neu-light: rgba(255, 255, 255, 0.9);
+  --neu-dark: rgba(163, 177, 198, 0.55);
+  --neu-light-weak: rgba(255, 255, 255, 0.55);
+  --neu-dark-weak: rgba(163, 177, 198, 0.35);
+  /* Inputs read as pressed-IN (inset), the opposite of a button's raised
+     look — same shadow pair, flipped via the "inset" keyword at the point
+     of use rather than needing separate tokens; --neu-inset-* are just a
+     gentler-contrast pair so a whole textarea's edge doesn't look as
+     sharply carved as a small button's. */
+  --neu-inset-l: rgba(255, 255, 255, 0.7);
+  --neu-inset-d: rgba(163, 177, 198, 0.4);
 }
 
 @media (prefers-color-scheme: dark) {
@@ -55,6 +70,17 @@
     --tooltip-bg: #2a3942;
     --tooltip-fg: #f2f6f7;
     --tooltip-border: rgba(6, 207, 156, 0.35);
+    /* A highlight this close to black is nearly invisible next to a
+       near-black shadow — true same-hue neumorphism breaks down at this
+       extreme. bg-panel (a visibly lighter navy step) gives the cap real
+       presence on its own; the shadow pair adds depth on top of that. */
+    --cap-bg: var(--bg-panel);
+    --neu-light: rgba(255, 255, 255, 0.06);
+    --neu-dark: rgba(0, 0, 0, 0.75);
+    --neu-light-weak: rgba(255, 255, 255, 0.04);
+    --neu-dark-weak: rgba(0, 0, 0, 0.5);
+    --neu-inset-l: rgba(255, 255, 255, 0.04);
+    --neu-inset-d: rgba(0, 0, 0, 0.55);
   }
 }
 
@@ -82,6 +108,13 @@
   --tooltip-bg: #2a3942;
   --tooltip-fg: #f2f6f7;
   --tooltip-border: rgba(6, 207, 156, 0.35);
+  --cap-bg: var(--bg-panel);
+  --neu-light: rgba(255, 255, 255, 0.06);
+  --neu-dark: rgba(0, 0, 0, 0.75);
+  --neu-light-weak: rgba(255, 255, 255, 0.04);
+  --neu-dark-weak: rgba(0, 0, 0, 0.5);
+  --neu-inset-l: rgba(255, 255, 255, 0.04);
+  --neu-inset-d: rgba(0, 0, 0, 0.55);
 }
 
 * { box-sizing: border-box; }
@@ -114,7 +147,27 @@ body::-webkit-scrollbar-thumb:hover { background: var(--text-secondary); }
   position: relative;
   z-index: 3;
 }
-.app-header img { width: 30px; height: 30px; border-radius: 50%; background: #fff; flex-shrink: 0; }
+/* The header logo is a real Lottie animation now (icons/header-logo.json,
+   downloaded from LottieFiles — "WhatsApp Default State" by its original
+   creator), played by the vendored lottie-light player (vendor/lottie-
+   light.min.js, MIT — see its own .LICENSE.txt). A toolbar/extension icon
+   has to be a static PNG (icons/icon16|48|128.png, see manifest.json), but
+   this copy lives in the popup's own DOM and isn't bound by that. Playback
+   is wired up in popup.js (search "Lottie"), which also honors
+   prefers-reduced-motion by freezing on the animation's final frame
+   instead of looping. */
+.app-logo-icon { width: 50px; height: 50px; flex-shrink: 0; }
+/* The animation's bubble (icons/header-logo.svg) was baked-in as a raster
+   PNG using WhatsApp's classic bright green (#25d366) — its pixels were
+   recolored directly (every opaque pixel set to a target RGB, alpha
+   untouched), not approximated via a CSS filter. First pass used the exact
+   --accent (#00a884), but that blends into the header's own gradient right
+   where the logo sits; switched to --accent-bright (#06cf9c) instead — an
+   existing palette token for exactly this (something that needs to read
+   as accent-colored but stand out against the base accent), not a color
+   invented for this. The phone glyph and flash overlay in the same file
+   are plain white and were never green, so they didn't need touching. */
+.app-logo-icon svg { display: block; width: 100%; height: 100%; }
 .app-header-text { flex: 1; min-width: 0; }
 .app-header h1 { font-size: 14.5px; margin: 0; font-weight: 700; letter-spacing: 0.01em; }
 .app-header .subtitle { margin: 3px 0 0; font-size: 11px; opacity: 0.9; }
@@ -127,6 +180,13 @@ body::-webkit-scrollbar-thumb:hover { background: var(--text-secondary); }
   0%, 100% { opacity: 1; }
   50% { opacity: 0.45; }
 }
+/* Header buttons (theme toggle, master switch) sit on the green gradient,
+   not the app's neutral surface, so the mono-hue shadow-pair trick used
+   everywhere else doesn't apply here directly — same soft-UI idea, tuned
+   for a colored surface instead: a lighter translucent-white highlight on
+   one side, a darker shade of the header's own green on the other,
+   reading as a soft glass button raised off the gradient rather than a
+   flat icon. Presses inset on :active, same as every other button now. */
 .icon-btn {
   background: rgba(255, 255, 255, 0.14);
   border: none;
@@ -139,12 +199,51 @@ body::-webkit-scrollbar-thumb:hover { background: var(--text-secondary); }
   justify-content: center;
   cursor: pointer;
   flex-shrink: 0;
-  transition: background 0.15s ease, transform 0.1s ease;
+  box-shadow: 3px 3px 6px rgba(0, 60, 48, 0.35), -2px -2px 5px rgba(255, 255, 255, 0.22);
+  transition: background 0.15s ease, box-shadow 0.2s ease, transform 0.1s ease;
 }
-.icon-btn:hover { background: rgba(255, 255, 255, 0.26); }
-.icon-btn:active { transform: scale(0.94); }
-#masterToggleBtn.off { background: var(--danger-fg); color: #fff; }
-#masterToggleBtn.off:hover { filter: brightness(0.94); }
+.icon-btn svg { transform-origin: 50% 50%; }
+.icon-btn:hover {
+  background: rgba(255, 255, 255, 0.26);
+  box-shadow: 2px 2px 4px rgba(0, 60, 48, 0.25), -1px -1px 3px rgba(255, 255, 255, 0.18),
+              3px 3px 6px rgba(0, 60, 48, 0.35), -2px -2px 5px rgba(255, 255, 255, 0.22);
+}
+.icon-btn:hover svg { animation: famPop 0.4s ease; }
+.icon-btn:active {
+  transform: scale(0.94);
+  box-shadow: inset 2px 2px 4px rgba(0, 60, 48, 0.4), inset -2px -2px 4px rgba(255, 255, 255, 0.15);
+}
+/* The kill switch reads as "power/danger" even before it's actually
+   switched off — a soft red tint at rest (not full alarm-red, this is a
+   normal state most of the time), reusing the same red already sitting
+   right next to it in the header (the WhatsApp-status dot, #ff6961) rather
+   than inventing a new one or reaching for the app's theme-dependent
+   --danger-fg, which would drift between light/dark while this header
+   itself never changes. Researched neumorphic power-toggle patterns
+   confirm this "flash of red against the neutral/glass surface, glowing
+   stronger in the active-danger state" as the standard treatment. */
+#masterToggleBtn { color: #ffb3ad; }
+#masterToggleBtn:hover { color: #ff6961; }
+#masterToggleBtn.off {
+  background: #ff6961;
+  color: #fff;
+  box-shadow: 3px 3px 6px rgba(0, 60, 48, 0.35), -2px -2px 5px rgba(255, 255, 255, 0.22),
+              0 0 9px rgba(255, 105, 97, 0.55);
+}
+#masterToggleBtn.off:hover { filter: brightness(1.08); }
+#masterToggleBtn.off:hover svg { animation: famShake 0.45s ease !important; }
+/* Privacy blur — unlike the kill switch, "on" here is a protective/normal
+   state (you turned on privacy), not a danger state, so it glows with the
+   same accent-bright used elsewhere for "this is active" rather than red. */
+#privacyBlurBtn.on {
+  background: rgba(6, 207, 156, 0.3);
+  box-shadow: 3px 3px 6px rgba(0, 60, 48, 0.35), -2px -2px 5px rgba(255, 255, 255, 0.22),
+              0 0 9px rgba(6, 207, 156, 0.55);
+}
+#privacyBlurBtn.on svg { filter: drop-shadow(0 0 3px rgba(6, 207, 156, 0.7)); }
+@media (prefers-reduced-motion: reduce) {
+  .icon-btn svg { animation: none !important; }
+}
 
 .master-off-banner {
   background: var(--danger-bg);
@@ -159,15 +258,60 @@ body::-webkit-scrollbar-thumb:hover { background: var(--text-secondary); }
 .row-with-action .muted { font-size: 11px; font-weight: 600; margin-right: auto; }
 .row-with-action label { margin-right: auto; }
 .row-with-action h3 { margin: 0; margin-right: auto; }
-.small-icon-btn {
-  background: var(--bg-hover);
-  color: var(--accent);
-  width: 28px;
-  height: 28px;
+/* Neumorphic cap — every small action icon (edit/delete/pause/attach/etc)
+   across every tab, EXCEPT .sending-ring: that one is a circular
+   conic-gradient progress ring, a different component entirely, and
+   squaring its border-radius here would break the ring shape. */
+.small-icon-btn:not(.sending-ring) {
+  background: var(--cap-bg);
+  color: var(--text-secondary);
+  width: 30px;
+  height: 30px;
+  border-radius: 9px;
+  box-shadow: 3px 3px 6px var(--neu-dark), -3px -3px 6px var(--neu-light);
+  transition: box-shadow 0.2s ease, color 0.2s ease, transform 0.1s ease;
 }
-.small-icon-btn:hover { background: var(--accent-soft); }
-.small-icon-btn.danger { background: var(--danger-bg); color: var(--danger-fg); }
-.small-icon-btn.danger:hover { filter: brightness(0.95); }
+.small-icon-btn:not(.sending-ring):hover {
+  color: var(--accent);
+  box-shadow: 2px 2px 4px var(--neu-dark-weak), -2px -2px 4px var(--neu-light-weak),
+              3px 3px 6px var(--neu-dark), -3px -3px 6px var(--neu-light);
+}
+.small-icon-btn:not(.sending-ring):active {
+  box-shadow: inset 2px 2px 5px var(--neu-dark), inset -2px -2px 5px var(--neu-light);
+  transform: scale(0.96);
+}
+/* Danger (delete-type) buttons stay visibly tinted at rest, not just on
+   hover — a deliberate "handle with care" cue, kept from the pre-neumorphic
+   design. Breaking the monochrome cap pattern here is intentional: it's
+   what makes a delete button read as different from every other action. */
+.small-icon-btn.danger:not(.sending-ring) {
+  background: var(--danger-bg);
+  color: var(--danger-fg);
+  box-shadow: 3px 3px 6px var(--neu-dark), -3px -3px 6px var(--neu-light);
+}
+.small-icon-btn.danger:not(.sending-ring):hover { filter: brightness(0.95); color: var(--danger-fg); }
+
+/* Animation "families" — small icon buttons share one of a few motions
+   grouped by what they mean, rather than every single icon getting fully
+   bespoke treatment (impractical at ~20+ distinct small-icon-btn glyphs
+   across the app) — same principle as the nav's per-icon motion, just
+   applied at the semantic-group level here. Hover previews it; :active
+   (the CSS pseudo-class, not a JS-added class) handles the click-press
+   feel via the box-shadow/scale rules above instead of replaying the full
+   keyframe — that's reserved for the nav's tab *selection*, a case where
+   there's no hover on touch input and a definite "which one is now active"
+   moment worth confirming. */
+@keyframes famPop { 0%{transform:scale(1)} 40%{transform:scale(0.82)} 70%{transform:scale(1.18)} 100%{transform:scale(1)} }
+@keyframes famShake { 0%,100%{transform:translateX(0) rotate(0)} 20%{transform:translateX(-2px) rotate(-6deg)} 40%{transform:translateX(2px) rotate(6deg)} 60%{transform:translateX(-2px) rotate(-4deg)} 80%{transform:translateX(2px) rotate(3deg)} }
+@keyframes famRotate { 0%{transform:rotate(0)} 100%{transform:rotate(180deg)} }
+@keyframes famPaperclipBounce { 0%,100%{transform:translateY(0) rotate(0)} 30%{transform:translateY(-3px) rotate(-8deg)} 60%{transform:translateY(0) rotate(5deg)} }
+@keyframes famFly { 0%{transform:translate(0,0) rotate(0); opacity:1} 45%{transform:translate(7px,-5px) rotate(18deg); opacity:0.4} 46%{transform:translate(-7px,5px) rotate(18deg); opacity:0} 55%{transform:translate(-7px,5px) rotate(18deg); opacity:0} 100%{transform:translate(0,0) rotate(0); opacity:1} }
+.small-icon-btn:not(.sending-ring):not(.danger):hover svg { animation: famPop 0.4s ease; }
+.small-icon-btn.danger:not(.sending-ring):hover svg { animation: famShake 0.45s ease; }
+#attachToggleBtn:hover svg { animation: famPaperclipBounce 0.5s ease; }
+@media (prefers-reduced-motion: reduce) {
+  .small-icon-btn svg { animation: none !important; }
+}
 .icon-btn.sending-ring {
   position: relative;
   background: conic-gradient(var(--accent) calc(var(--pct) * 1%), var(--border) 0);
@@ -197,7 +341,8 @@ body::-webkit-scrollbar-thumb:hover { background: var(--text-secondary); }
   font-weight: 700;
   color: var(--danger-fg);
 }
-button.ghost.small-inline { padding: 5px 10px; margin: 0; font-size: 11px; }
+button.ghost.small-inline { padding: 5px 10px; margin: 0; font-size: 11px; gap: 5px; }
+button.ghost.small-inline svg { width: 12px; height: 12px; }
 
 /* A label row with one or more icon-button actions docked to its right. */
 .field-row-with-actions {
@@ -233,7 +378,9 @@ button.ghost.small-inline { padding: 5px 10px; margin: 0; font-size: 11px; }
   padding: 6px 8px;
   margin: 4px 0 10px;
   background: var(--bg-app);
+  scrollbar-width: none;
 }
+.composing-list::-webkit-scrollbar { display: none; }
 /* Sits inside the composing-list box itself, above the items — only
    rendered once there's at least one item, since neither action means
    anything on an empty list. */
@@ -247,6 +394,9 @@ button.ghost.small-inline { padding: 5px 10px; margin: 0; font-size: 11px; }
   border-bottom: 1px solid var(--border);
 }
 .composing-toolbar-actions { display: flex; gap: 4px; flex-shrink: 0; }
+.composing-toolbar-actions button.open { background: var(--accent-soft); color: var(--accent); }
+.bulk-hf-wrap { margin-bottom: 10px; }
+.bulk-hf-wrap .hf-bulk-apply-btn { margin-top: 2px; }
 .composing-item {
   display: flex;
   align-items: flex-start;
@@ -262,7 +412,7 @@ button.ghost.small-inline { padding: 5px 10px; margin: 0; font-size: 11px; }
 .composing-item:hover { border-color: var(--border-strong); }
 .composing-item.editing { border-color: var(--accent); box-shadow: 0 0 0 1px var(--accent); }
 .composing-item-editing-note { display: block; margin-top: 3px; font-size: 10.5px; font-style: italic; }
-.composing-item .send-item-select { flex-shrink: 0; margin-top: 5px; width: auto; }
+.composing-item .send-item-select { flex-shrink: 0; margin-top: 5px; }
 .composing-item .item-srno-input {
   width: 26px;
   height: 26px;
@@ -280,7 +430,6 @@ button.ghost.small-inline { padding: 5px 10px; margin: 0; font-size: 11px; }
 .send-item-select-all-row { margin: 0; }
 .send-panel-top-row { display: flex; align-items: center; gap: 8px; margin: 6px 0; }
 .composing-list .send-panel-top-row { margin: 0 0 6px; padding-bottom: 6px; border-bottom: 1px solid var(--border); }
-.send-panel-top-row .send-active-chat-btn { margin-left: auto; flex-shrink: 0; }
 .composing-item-icon {
   flex-shrink: 0;
   width: 26px;
@@ -327,23 +476,24 @@ button.ghost.small-inline { padding: 5px 10px; margin: 0; font-size: 11px; }
 .composing-item-actions button.hf-item-toggle.open { background: var(--accent-soft); color: var(--accent); }
 
 /* ---------- header/footer override controls (message-level + per-thread) ---------- */
-.hf-control { display: flex; align-items: center; gap: 8px; margin: 12px 0; }
-.hf-toggle-btn {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  border: 1px solid var(--border);
-  background: var(--bg-panel);
-  color: var(--text-secondary);
-  border-radius: var(--radius-sm);
-  padding: 6px 10px;
-  cursor: pointer;
-  font-size: 11.5px;
-  font-weight: 600;
-  transition: border-color 0.15s ease, color 0.15s ease, background 0.15s ease;
+/* The message-level toggle lives right in the +/attach icon row (static
+   markup in popup.html, id msgHfToggleBtn) so it's always visible, not
+   conjured by JS only once a thread exists. "Open" just reuses the same
+   accent-soft highlight .small-icon-btn already gets on hover; a small dot
+   shows the current mode (custom/off) without needing the panel open. */
+#msgHfToggleBtn, #msgAutoReplyToggleBtn { position: relative; }
+#msgHfToggleBtn.open, #msgAutoReplyToggleBtn.open, #campaignNewToggleBtn.open { background: var(--accent-soft); }
+.hf-dot {
+  position: absolute;
+  top: 2px;
+  right: 2px;
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  border: 1.5px solid var(--bg-panel);
 }
-.hf-toggle-btn:hover { border-color: var(--border-strong); }
-.hf-toggle-btn.open { border-color: var(--accent); color: var(--accent); background: var(--accent-soft); }
+.hf-dot.custom { background: var(--accent); }
+.hf-dot.off { background: var(--danger-fg); }
 .hf-mode-badge {
   display: inline-block;
   font-size: 10px;
@@ -358,13 +508,24 @@ button.ghost.small-inline { padding: 5px 10px; margin: 0; font-size: 11px; }
 .hf-mode-badge.custom { background: var(--accent-soft); color: var(--accent); }
 .hf-mode-badge.off { background: var(--danger-bg); color: var(--danger-fg); }
 .hf-panel {
+  width: 100%;
   margin-top: 8px;
   padding: 10px;
   border: 1px solid var(--border);
   border-radius: var(--radius-sm);
   background: var(--bg-panel);
 }
-.hf-panel .hf-mode-chips { margin: 0 0 8px; }
+.hf-mode-radios { display: flex; gap: 16px; margin: 0 0 10px; }
+.hf-radio-option {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text-primary);
+  cursor: pointer;
+}
+.hf-radio-option input[type="radio"] { margin: 0; width: 14px; height: 14px; accent-color: var(--accent); cursor: pointer; }
 .hf-panel textarea {
   width: 100%;
   margin: 0 0 6px;
@@ -382,6 +543,81 @@ button.ghost.small-inline { padding: 5px 10px; margin: 0; font-size: 11px; }
 .hf-panel-hint { font-size: 10.5px; color: var(--text-secondary); margin: 0; }
 .composing-item-body .hf-mode-badge { display: inline-block; margin: 4px 0; }
 .composing-item-body .hf-panel { margin-top: 6px; }
+
+/* ---------- auto-reply panel (compose form) ---------- */
+.ar-panel { display: flex; flex-direction: column; gap: 8px; }
+.ar-enable-row {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text-primary);
+  cursor: pointer;
+}
+.ar-enable-row input[type="checkbox"] { margin: 2px 0 0; width: 14px; height: 14px; accent-color: var(--accent); cursor: pointer; flex-shrink: 0; }
+.ar-triggers { display: flex; flex-direction: column; gap: 6px; }
+.ar-trigger-row { display: flex; align-items: center; gap: 6px; }
+.ar-trigger-row select {
+  flex-shrink: 0;
+  font-size: 11px;
+  padding: 5px 4px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--bg-input);
+  color: var(--text-primary);
+}
+.ar-trigger-row .ar-trigger-value {
+  flex: 1;
+  min-width: 0;
+  font-size: 11.5px;
+  padding: 6px 8px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--bg-input);
+  color: var(--text-primary);
+}
+.ar-case-label {
+  display: flex;
+  align-items: center;
+  gap: 3px;
+  font-size: 10px;
+  font-weight: 700;
+  color: var(--text-secondary);
+  cursor: pointer;
+  flex-shrink: 0;
+}
+.ar-case-label input[type="checkbox"] { margin: 0; width: 12px; height: 12px; accent-color: var(--accent); cursor: pointer; }
+.ar-trigger-remove { flex-shrink: 0; color: var(--danger-fg); }
+.ar-cooldown-row {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px;
+  font-size: 11px;
+  color: var(--text-primary);
+  padding-top: 4px;
+  border-top: 1px solid var(--border);
+}
+.ar-cooldown-row label { display: flex; align-items: center; gap: 6px; font-weight: 600; }
+.ar-cooldown-row input[type="checkbox"] { margin: 0; width: 14px; height: 14px; accent-color: var(--accent); cursor: pointer; }
+.ar-cooldown-row input[type="number"] {
+  width: 56px;
+  font-size: 11.5px;
+  padding: 5px 6px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--bg-input);
+  color: var(--text-primary);
+}
+.ar-cooldown-row select {
+  font-size: 11px;
+  padding: 5px 6px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--bg-input);
+  color: var(--text-primary);
+}
 
 /* Chips for added daily times / one-off datetimes in the schedule editor. */
 .chip-list { display: flex; flex-wrap: wrap; gap: 6px; margin: 4px 0 10px; }
@@ -407,20 +643,92 @@ button.ghost.small-inline { padding: 5px 10px; margin: 0; font-size: 11px; }
 }
 .chip button:hover { color: var(--danger-fg); }
 
-/* Inline "send this saved message now / schedule it" panel under a message row. */
+/* Inline "send this saved message now / schedule it" panel under a message
+   row — labeled zones (h3s reuse the app's standard section-label look):
+   "What to send" (item picker, multi-item messages only) -> "Send" (list
+   picker, then existing "Scheduled sends" right before the Now/Schedule
+   toggle, then the toggle + commit). The quick "send to whatever chat is
+   open" action lives up on the collapsed card itself now (see
+   .quick-send-btn below), not in here — it needs no configuration, so it
+   doesn't need the panel open at all. */
 .send-panel {
   margin-top: 10px;
   padding-top: 10px;
   border-top: 1px solid var(--border);
 }
+
+/* Rotates to point "up" when the thing it labels is expanded — shared by
+   the item-picker summary row and the schedule editor's Advanced toggle. */
+.chevron-icon { flex-shrink: 0; color: var(--text-secondary); transition: transform 0.15s ease; }
+.chevron-icon.expanded { transform: rotate(180deg); }
+/* The collapsed message card's "expand the send panel" icon — same chevron
+   rotation as above, just applied to a whole small-icon-btn instead of a
+   bare svg (list-expand-btn already does this for list-member rows; this
+   is the same idea for the message row's own expand toggle). */
+.chevron-toggle-btn svg { transition: transform 0.15s ease; }
+.chevron-toggle-btn.expanded svg { transform: rotate(180deg); }
+
+/* "What to send" collapses to this one-line summary by default (most sends
+   want every item) — the whole row is the toggle, not a separate button
+   inside it, for a bigger/clearer tap target. */
+.item-picker-summary {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  width: 100%;
+  margin: 0 0 12px;
+  padding: 9px 10px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--bg-app);
+  color: var(--text-primary);
+  font-family: inherit;
+  font-size: 12px;
+  text-align: left;
+  cursor: pointer;
+  transition: border-color 0.15s ease;
+}
+.item-picker-summary:hover { border-color: var(--border-strong); }
+
 .send-panel-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin-top: 8px; }
 .send-panel-actions .send-separator-check-row { margin: 0 0 4px; width: 100%; }
 .send-panel-actions button.primary { padding: 7px 12px; font-size: 11px; }
 .schedule-list { margin-bottom: 4px; }
 .send-panel-mode-toggle { margin-top: 10px; }
-.schedule-editor { margin-top: 6px; }
+/* Boxed as its own form (header/body/footer, not a bare flat stack) so it
+   reads as one distinct step, separate from the list-picker/mode-toggle
+   above it. */
+.schedule-editor {
+  margin-top: 10px;
+  padding: 12px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  background: var(--bg-panel);
+}
+.schedule-editor > label:first-child { margin-top: 0; }
 .schedule-editor button.primary { padding: 7px 12px; font-size: 11px; }
-.schedule-count-badge { font-size: 11px; align-self: center; }
+/* Rarely-changed delay-override + label fields, tucked behind this until
+   opened — keeps the common case (pick a time, save) short. */
+.advanced-toggle-btn {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  margin: 12px 0 2px;
+  padding: 0;
+  border: none;
+  background: none;
+  color: var(--text-secondary);
+  font-size: 11px;
+  font-weight: 600;
+  cursor: pointer;
+}
+.advanced-toggle-btn:hover { color: var(--text-primary); }
+.schedule-advanced-fields { margin-top: 8px; padding-top: 2px; }
+/* Schedule summary line on a saved message's collapsed row — accent-colored
+   (unlike the plain-muted "Last sent" line above it) since it's telling you
+   something will happen automatically, not just recapping history. */
+.schedule-line { display: block; margin-top: 2px; color: var(--accent); font-weight: 600; }
 
 /* Live send/schedule progress. */
 .progress-block { margin: 8px 0; }
@@ -441,32 +749,88 @@ button.ghost.small-inline { padding: 5px 10px; margin: 0; font-size: 11px; }
 .progress-label.done { color: var(--success-fg); font-weight: 600; }
 
 /* ---------- tabs ---------- */
+/* Icon "key" nav — replaced the old text tab row. Each .tab-btn keeps its
+   original role (data-tab, .active, the click handler in popup.js, and
+   #keysTabBtn's show/hide) completely unchanged; only what's INSIDE it and
+   how it's styled changed, so no JS here needed touching. Neumorphic: the
+   cap shares the surrounding surface color (--cap-bg) and is shaped purely
+   by a soft light/dark shadow pair — raised at rest, pressed in (inset)
+   when active. Labels moved to hover tooltips (data-tooltip, the existing
+   shared tooltip system) instead of sitting under each icon. */
 .tabs {
   display: flex;
+  justify-content: space-between;
+  gap: 4px;
   background: var(--bg-panel);
   border-bottom: 1px solid var(--border);
   position: sticky;
   top: 0;
   z-index: 2;
-  padding: 0 4px;
+  padding: 10px 12px 9px;
 }
 .tab-btn {
   flex: 1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
   background: none;
   border: none;
-  padding: 11px 2px 9px;
-  font-size: 11.5px;
-  font-weight: 500;
   cursor: pointer;
-  color: var(--text-secondary);
-  border-bottom: 2px solid transparent;
-  transition: color 0.15s ease;
+  padding: 0;
 }
-.tab-btn:hover { color: var(--text-primary); }
-.tab-btn.active {
+.tab-btn .neu-cap {
+  width: 36px;
+  height: 36px;
+  border-radius: 11px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: var(--cap-bg);
+  box-shadow: 4px 4px 8px var(--neu-dark), -4px -4px 8px var(--neu-light);
+  color: var(--text-secondary);
+  transition: box-shadow 0.25s ease, color 0.25s ease;
+}
+.tab-btn .neu-cap svg { width: 17px; height: 17px; transition: transform 0.15s ease; transform-origin: 50% 50%; }
+.tab-btn:hover .neu-cap {
+  box-shadow: 2px 2px 5px var(--neu-dark-weak), -2px -2px 5px var(--neu-light-weak),
+              4px 4px 8px var(--neu-dark), -4px -4px 8px var(--neu-light);
+  color: var(--text-primary);
+}
+.tab-btn.active .neu-cap {
   color: var(--accent);
-  font-weight: 700;
-  border-bottom: 2px solid var(--accent);
+  box-shadow: inset 3px 3px 6px var(--neu-dark), inset -3px -3px 6px var(--neu-light);
+}
+.tab-btn.active .neu-cap svg { filter: drop-shadow(0 0 4px var(--accent-soft)); }
+
+/* Each icon gets its own hover/click motion matched to what it depicts —
+   same spirit as the header logo's phone-wiggle — instead of one generic
+   effect on all of them. Reusing one keyframe for hover and the one-shot
+   click (.just-selected, added/removed by popup.js) keeps hover and click
+   consistent: hovering previews the same motion a click commits to. */
+@keyframes navIconWiggle { 0%,100%{transform:rotate(0)} 20%{transform:rotate(-12deg)} 50%{transform:rotate(9deg)} 75%{transform:rotate(-5deg)} }
+@keyframes navIconBlast { 0%{transform:scale(1) rotate(0)} 35%{transform:scale(0.82) rotate(-3deg)} 65%{transform:scale(1.22) rotate(2deg)} 100%{transform:scale(1) rotate(0)} }
+@keyframes navIconFlash { 0%,100%{opacity:1; transform:scale(1) skewX(0);} 30%{opacity:0.3; transform:scale(0.88) skewX(-6deg);} 55%{opacity:1; transform:scale(1.28) skewX(4deg);} 78%{transform:scale(0.95) skewX(0);} }
+@keyframes navIconBounce { 0%,100%{transform:translateY(0)} 30%{transform:translateY(-4px)} 50%{transform:translateY(0)} 65%{transform:translateY(-2px)} 80%{transform:translateY(0)} }
+@keyframes navIconSweep { 0%{transform:rotate(0)} 100%{transform:rotate(-340deg)} }
+@keyframes navIconSpin { 0%{transform:rotate(0)} 100%{transform:rotate(130deg)} }
+@keyframes navIconKeyTurn { 0%,100%{transform:rotate(0)} 25%{transform:rotate(-25deg)} 55%{transform:rotate(18deg)} 80%{transform:rotate(-8deg)} }
+.tab-btn:hover .icon-bubble, .tab-btn.just-selected .icon-bubble { animation: navIconWiggle 0.5s ease; }
+.tab-btn:hover .icon-megaphone, .tab-btn.just-selected .icon-megaphone { animation: navIconBlast 0.5s ease; }
+.tab-btn:hover .icon-bolt, .tab-btn.just-selected .icon-bolt { animation: navIconFlash 0.5s ease; }
+.tab-btn:hover .icon-groups, .tab-btn.just-selected .icon-groups { animation: navIconBounce 0.6s ease; }
+.tab-btn:hover .icon-history, .tab-btn.just-selected .icon-history { animation: navIconSweep 0.6s ease; }
+.tab-btn:hover .icon-gear, .tab-btn.just-selected .icon-gear { animation: navIconSpin 0.5s ease; }
+.tab-btn:hover .icon-key, .tab-btn.just-selected .icon-key { animation: navIconKeyTurn 0.5s ease; }
+@keyframes tabKeyPop {
+  0% { transform: scale(1); }
+  40% { transform: scale(0.86); }
+  72% { transform: scale(1.14); }
+  100% { transform: scale(1); }
+}
+.tab-btn.just-selected .neu-cap { animation: tabKeyPop 0.42s cubic-bezier(.34,1.56,.64,1); }
+@media (prefers-reduced-motion: reduce) {
+  .tab-btn .neu-cap svg { animation: none !important; }
+  .tab-btn.just-selected .neu-cap { animation: none !important; }
 }
 
 main { padding: 12px 14px 18px; background: var(--bg-app); }
@@ -484,6 +848,9 @@ h3 {
 h3:first-child { margin-top: 4px; }
 
 /* ---------- form controls ---------- */
+/* Inset/pressed-in surface — the other half of neumorphism alongside the
+   raised buttons: a container you type INTO reads as carved into the
+   surface, not sitting on top of it like something you'd press. */
 textarea,
 input[type="text"],
 input[type="time"],
@@ -494,20 +861,20 @@ select {
   width: 100%;
   padding: 9px 11px;
   margin: 5px 0 12px;
-  border: 1px solid var(--border);
+  border: none;
   border-radius: var(--radius-sm);
   font-size: 12.5px;
   font-family: inherit;
-  background: var(--bg-input);
+  background: var(--cap-bg);
   color: var(--text-primary);
-  transition: border-color 0.15s ease, box-shadow 0.15s ease;
+  box-shadow: inset 3px 3px 6px var(--neu-inset-d), inset -3px -3px 6px var(--neu-inset-l);
+  transition: box-shadow 0.15s ease;
 }
 textarea:focus,
 input:focus,
 select:focus {
   outline: none;
-  border-color: var(--accent);
-  box-shadow: 0 0 0 3px var(--accent-soft);
+  box-shadow: inset 3px 3px 6px var(--neu-inset-d), inset -3px -3px 6px var(--neu-inset-l), 0 0 0 3px var(--accent-soft);
 }
 
 /* Vertical-only resize (no horizontal drag handle spilling text outside
@@ -536,7 +903,109 @@ input:disabled, textarea:disabled, select:disabled {
 }
 button:disabled { opacity: 0.45; cursor: not-allowed; pointer-events: none; }
 
-input[type="checkbox"] { accent-color: var(--accent); }
+/* Custom neumorphic checkbox/radio — native controls can't take a
+   box-shadow (each browser/OS renders its own chrome), so appearance:none
+   swaps in a hand-built inset "carved into the surface" square/circle,
+   filling with --accent (checkbox) or showing an --accent dot (radio)
+   when checked. Chromium-only (this is a Chrome/Edge extension), so no
+   cross-browser appearance fallback is needed. */
+input[type="checkbox"] {
+  appearance: none;
+  -webkit-appearance: none;
+  width: 16px;
+  height: 16px;
+  margin: 0;
+  border-radius: 5px;
+  background: var(--cap-bg);
+  box-shadow: inset 2px 2px 4px var(--neu-inset-d), inset -2px -2px 4px var(--neu-inset-l);
+  cursor: pointer;
+  position: relative;
+  flex-shrink: 0;
+  transition: box-shadow 0.15s ease, background 0.15s ease;
+}
+input[type="checkbox"]:checked {
+  background: var(--accent);
+  box-shadow: 2px 2px 5px var(--neu-dark), -2px -2px 5px var(--neu-light);
+}
+input[type="checkbox"]:checked::after {
+  content: '';
+  position: absolute;
+  left: 5px;
+  top: 2px;
+  width: 4px;
+  height: 8px;
+  border: solid var(--accent-contrast);
+  border-width: 0 2px 2px 0;
+  transform: rotate(45deg);
+}
+input[type="checkbox"]:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+/* "Select all" checkboxes for a partially-selected list get .indeterminate
+   set in JS (search "indeterminate" in popup.js) — appearance:none also
+   suppresses the native dash the browser would otherwise draw for that
+   state, same as it suppressed the native checkmark, so it needs its own
+   rule here too or a partial selection silently looks identical to no
+   selection at all. */
+input[type="checkbox"]:indeterminate {
+  background: var(--accent);
+  box-shadow: 2px 2px 5px var(--neu-dark), -2px -2px 5px var(--neu-light);
+}
+input[type="checkbox"]:indeterminate::after {
+  content: '';
+  position: absolute;
+  left: 3px;
+  top: 6.5px;
+  width: 10px;
+  height: 2px;
+  border-radius: 1px;
+  background: var(--accent-contrast);
+}
+
+input[type="radio"] {
+  appearance: none;
+  -webkit-appearance: none;
+  width: 15px;
+  height: 15px;
+  margin: 0;
+  border-radius: 50%;
+  background: var(--cap-bg);
+  box-shadow: inset 2px 2px 4px var(--neu-inset-d), inset -2px -2px 4px var(--neu-inset-l);
+  cursor: pointer;
+  position: relative;
+  flex-shrink: 0;
+}
+input[type="radio"]:checked::after {
+  content: '';
+  position: absolute;
+  inset: 3px;
+  border-radius: 50%;
+  background: var(--accent);
+}
+input[type="radio"]:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+
+/* Dropdown — same inset field as text inputs, but appearance:none drops
+   the native OS-drawn arrow (which can't be recolored to match the
+   theme), replaced with a small drawn chevron sized/positioned to match
+   the field's own padding. */
+select {
+  appearance: none;
+  -webkit-appearance: none;
+  padding-right: 28px;
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' width='14' height='14'%3E%3Cpath fill='%2366788a' d='M7 10l5 5 5-5z'/%3E%3C/svg%3E");
+  background-repeat: no-repeat;
+  background-position: right 9px center;
+}
+/* The chevron above is baked as a static data: URI (can't reference
+   --text-secondary from inside one), so it's redrawn here with dark
+   mode's own --text-secondary (#8696a0) instead of just re-tinting via a
+   filter, which would drift on any future palette tweak. */
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) select {
+    background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' width='14' height='14'%3E%3Cpath fill='%238696a0' d='M7 10l5 5 5-5z'/%3E%3C/svg%3E");
+  }
+}
+:root[data-theme="dark"] select {
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' width='14' height='14'%3E%3Cpath fill='%238696a0' d='M7 10l5 5 5-5z'/%3E%3C/svg%3E");
+}
 
 .log-filter-row {
   display: flex;
@@ -588,6 +1057,124 @@ input[type="checkbox"] { accent-color: var(--accent); }
 .search-clear-btn:hover { color: var(--text-primary); }
 .search-clear-btn:focus { outline: none; color: var(--text-primary); }
 
+/* Phone-number quick-send box above the composer — type a number, no need
+   to save it as a contact/list first, and send straight to it. A country-
+   code picker (flag + dial code, searchable) sits to the left; the send
+   button is embedded in the number field's right edge, same layout idea as
+   .search-with-clear above but a real neumorphic cap (accent-tinted, like a
+   send action) rather than a plain text glyph. */
+.quick-send-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin: 4px 0 12px;
+}
+.quick-send-number-wrap {
+  position: relative;
+  flex: 1;
+  min-width: 0;
+}
+.quick-send-number-wrap input[type="text"] {
+  margin: 0;
+  padding-right: 38px;
+  width: 100%;
+}
+.quick-send-number-wrap .quick-send-btn {
+  position: absolute;
+  right: 4px;
+  top: 50%;
+  transform: translateY(-50%);
+  width: 26px;
+  height: 26px;
+  color: var(--accent);
+}
+.quick-send-number-wrap .quick-send-btn:hover { color: var(--accent-bright); }
+
+/* ---------- country code picker ---------- */
+.country-code-picker { position: relative; flex-shrink: 0; }
+.country-code-trigger {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  height: 34px;
+  padding: 0 9px;
+  border: none;
+  border-radius: var(--radius-sm);
+  background: var(--cap-bg);
+  color: var(--text-primary);
+  font-size: 12px;
+  font-weight: 600;
+  font-family: inherit;
+  cursor: pointer;
+  box-shadow: inset 3px 3px 6px var(--neu-inset-d), inset -3px -3px 6px var(--neu-inset-l);
+  transition: box-shadow 0.15s ease;
+}
+.country-code-trigger:hover,
+.country-code-trigger.open {
+  box-shadow: inset 3px 3px 6px var(--neu-inset-d), inset -3px -3px 6px var(--neu-inset-l), 0 0 0 3px var(--accent-soft);
+}
+/* Same down-when-closed/up-when-open chevron as .list-expand-btn — this
+   button toggles its own .open class (see openCountryDropdown/
+   closeCountryDropdown in popup.js) rather than .expanded, so the rotation
+   rule keys off that instead of reusing .chevron-icon.expanded directly. */
+.country-code-trigger.open .chevron-icon { transform: rotate(180deg); }
+/* Real flag images (cached data URLs), not emoji — see flagIconHtml in
+   popup.js. .cc-flag-placeholder covers the brief window before the
+   very-first cache download finishes (normally only right after install). */
+.cc-flag { display: inline-flex; flex-shrink: 0; line-height: 0; }
+.cc-flag-img { display: block; width: 20px; height: 14px; object-fit: cover; border-radius: 2px; box-shadow: 0 0 0 1px rgba(0, 0, 0, 0.18); }
+.cc-flag-placeholder {
+  display: block;
+  width: 20px;
+  height: 14px;
+  border-radius: 2px;
+  background: var(--cap-bg);
+  box-shadow: inset 0 0 0 1px rgba(0, 0, 0, 0.12);
+}
+.country-code-dropdown {
+  position: absolute;
+  top: calc(100% + 6px);
+  left: 0;
+  z-index: 40;
+  width: 240px;
+  max-width: 80vw;
+  background: var(--bg-panel);
+  border-radius: var(--radius-sm);
+  box-shadow: 6px 6px 14px var(--neu-dark), -6px -6px 14px var(--neu-light);
+  padding: 8px;
+}
+.country-code-dropdown input[type="text"] {
+  margin: 0 0 6px;
+  width: 100%;
+}
+.country-code-list {
+  max-height: 220px;
+  overflow-y: auto;
+  scrollbar-width: none;
+}
+.country-code-list::-webkit-scrollbar { display: none; }
+.cc-option {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  padding: 7px 8px;
+  border: none;
+  background: none;
+  color: var(--text-primary);
+  font-size: 12px;
+  font-family: inherit;
+  text-align: left;
+  cursor: pointer;
+  border-radius: 6px;
+}
+.cc-option:hover,
+.cc-option.active { background: var(--accent-soft); color: var(--accent); }
+.cc-option .cc-name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.cc-option .cc-code { flex-shrink: 0; color: var(--text-secondary); font-variant-numeric: tabular-nums; }
+.cc-option:hover .cc-code, .cc-option.active .cc-code { color: var(--accent); }
+.cc-no-match { padding: 10px 8px; font-size: 11.5px; color: var(--text-secondary); text-align: center; }
+
 label { font-size: 11.5px; font-weight: 600; color: var(--text-secondary); display: block; }
 
 .checkbox-row {
@@ -599,37 +1186,67 @@ label { font-size: 11.5px; font-weight: 600; color: var(--text-secondary); displ
   color: var(--text-primary);
   margin: 10px 0;
 }
-.checkbox-row input { width: auto; margin: 0; }
+/* No width:auto here anymore — every .checkbox-row input is a checkbox
+   (checked against every usage in popup.html/popup.js), and the custom
+   checkbox (appearance:none, see input[type="checkbox"] below) needs its
+   own explicit width to render at all; width:auto on a replaced element
+   with native rendering stripped collapses it to nothing, which is
+   exactly the "checkbox is invisible" bug this fixes. */
+.checkbox-row input { margin: 0; }
 
 /* ---------- buttons ---------- */
 button { font-family: inherit; }
-button.primary {
-  background: var(--accent);
-  color: var(--accent-contrast);
+/* Primary/ghost CTAs — neumorphic surface, icon retained alongside the
+   label per the "icon + label" call (an icon-only Save vs Update message
+   would be ambiguous, and these are lower-frequency/higher-stakes actions
+   than the nav or a small row action). Primary stays visually the
+   "important one" via accent-colored text/icon plus a thin accent-soft
+   inset ring, not a solid fill — ghost is the same raised cap with neutral
+   coloring. */
+button.primary,
+button.ghost {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
   border: none;
-  padding: 9px 16px;
-  border-radius: var(--radius-sm);
   cursor: pointer;
+  padding: 9px 16px;
+  border-radius: var(--radius-md);
   font-size: 12.5px;
   font-weight: 600;
-  box-shadow: 0 2px 6px rgba(0, 168, 132, 0.28);
-  transition: background 0.15s ease, box-shadow 0.15s ease, transform 0.1s ease;
+  font-family: inherit;
+  background: var(--cap-bg);
+  transition: box-shadow 0.2s ease, color 0.2s ease, transform 0.1s ease;
 }
-button.primary:hover { background: var(--accent-bright); box-shadow: 0 3px 10px rgba(0, 168, 132, 0.35); }
-button.primary:active { transform: translateY(1px); }
-button.primary.save-confirmed, button.primary.save-confirmed:hover { background: var(--success-fg); box-shadow: none; transition: background 0.2s ease; }
+button.primary svg, button.ghost svg { width: 15px; height: 15px; flex-shrink: 0; transform-origin: 50% 50%; }
+button.primary:active, button.ghost:active { transform: translateY(1px) scale(0.98); }
+button.primary {
+  color: var(--accent);
+  box-shadow: 4px 4px 9px var(--neu-dark), -4px -4px 9px var(--neu-light), inset 0 0 0 1.5px var(--accent-soft);
+}
+button.primary:hover {
+  box-shadow: 2px 2px 5px var(--neu-dark-weak), -2px -2px 5px var(--neu-light-weak),
+              4px 4px 9px var(--neu-dark), -4px -4px 9px var(--neu-light), inset 0 0 0 1.5px var(--accent-soft);
+}
+button.primary.save-confirmed, button.primary.save-confirmed:hover {
+  color: var(--success-fg);
+  box-shadow: 4px 4px 9px var(--neu-dark), -4px -4px 9px var(--neu-light), inset 0 0 0 1.5px rgba(26, 156, 74, 0.25);
+  transition: color 0.2s ease;
+}
 button.ghost {
-  background: none;
-  border: 1px solid var(--border-strong);
   color: var(--text-secondary);
-  padding: 8px 14px;
-  border-radius: var(--radius-sm);
-  cursor: pointer;
-  font-size: 12.5px;
+  font-weight: 500;
   margin-left: 6px;
-  transition: border-color 0.15s ease, color 0.15s ease;
+  box-shadow: 4px 4px 9px var(--neu-dark), -4px -4px 9px var(--neu-light);
 }
-button.ghost:hover { border-color: var(--text-secondary); color: var(--text-primary); }
+button.ghost:hover { color: var(--text-primary); }
+button.primary:hover svg, button.ghost:hover svg { animation: famPop 0.4s ease; }
+button.primary:hover .send-icon { animation: famFly 0.55s ease !important; }
+button.ghost.danger { color: var(--danger-fg); }
+button.ghost.danger:hover svg { animation: famShake 0.45s ease !important; }
+@media (prefers-reduced-motion: reduce) {
+  button.primary svg, button.ghost svg { animation: none !important; }
+}
 
 /* Groups a form's commit actions (Save / Send / Cancel) into one aligned
    row instead of relying on plain inline text-flow, which wraps buttons of
@@ -682,18 +1299,82 @@ button.ghost:hover { border-color: var(--text-secondary); color: var(--text-prim
 .item-list .item-actions button[data-act="moveUp"],
 .item-list .item-actions button[data-act="moveDown"] { font-size: 11px; }
 .item-list .item-actions button:disabled { opacity: 0.3; cursor: not-allowed; }
+
+/* "More" speed-dial — saved-message rows have 6 possible actions
+   (send/schedule, quick-send, edit, move up/down, delete), which no
+   longer fit in one line at the neumorphic buttons' size; Edit/Move/
+   Delete ("manage this message") folded in here, leaving Send/Schedule
+   and quick-send ("do something with this message") on the row itself.
+   Explicitly NOT a dropdown list — each action is its own floating
+   neumorphic cap (same look as every other row icon) that fans out in a
+   line from the "more" button itself and back in on close, rather than a
+   bordered menu card appearing/disappearing. Positioned nearest-to-
+   furthest by how often each is likely needed: Edit right next to the
+   toggle, Delete at the far end — reaching further for the destructive
+   one is a deliberate small speed bump, not just leftover ordering. */
+.row-overflow { position: relative; display: flex; align-items: center; }
+/* A horizontal line here (the first version) extended left directly over
+   the send/chevron buttons already sitting in the same row — they'd get
+   visually covered every time this opened. Dropping straight down instead
+   grows into empty space below the row rather than over other buttons, and
+   a 2x2 grid keeps that downward reach short enough to not run into the
+   next card either (a single column of 4 would reach much further down). */
+.row-fan {
+  position: absolute;
+  top: calc(100% + 4px);
+  right: 0;
+  display: grid;
+  grid-template-columns: repeat(2, 30px);
+  gap: 4px;
+  z-index: 20;
+}
+.row-fan .fan-item {
+  opacity: 0;
+  transform: scale(0.3);
+  pointer-events: none;
+  transition: opacity 0.16s ease, transform 0.16s cubic-bezier(0.34, 1.56, 0.64, 1);
+}
+.row-overflow.open .row-fan .fan-item {
+  opacity: 1;
+  transform: scale(1);
+  pointer-events: auto;
+}
+/* Staggered in reading order (top-left to bottom-right) so it reads as
+   unfurling out of the button rather than all four popping at once. */
+.row-fan .fan-item:nth-child(1) { transition-delay: 0s; }
+.row-fan .fan-item:nth-child(2) { transition-delay: 0.04s; }
+.row-fan .fan-item:nth-child(3) { transition-delay: 0.08s; }
+.row-fan .fan-item:nth-child(4) { transition-delay: 0.12s; }
+/* The "more" button morphs from + to x, the standard speed-dial trigger
+   convention, instead of a kebab that just sits there unchanged. */
+.overflow-toggle-btn svg { transition: transform 0.22s ease; }
+.row-overflow.open .overflow-toggle-btn svg { transform: rotate(45deg); }
+.row-overflow.open .overflow-toggle-btn { color: var(--accent); box-shadow: inset 2px 2px 5px var(--neu-dark), inset -2px -2px 5px var(--neu-light); }
 .log-entry-actions { display: flex; align-items: center; gap: 6px; margin-top: 8px; }
 button.small {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
   border: none;
-  background: var(--bg-hover);
+  background: var(--cap-bg);
   color: var(--text-primary);
-  border-radius: 6px;
-  padding: 5px 8px;
+  border-radius: 8px;
+  padding: 6px 9px;
   cursor: pointer;
   font-size: 11px;
+  font-weight: 600;
+  font-family: inherit;
+  box-shadow: 3px 3px 6px var(--neu-dark), -3px -3px 6px var(--neu-light);
+  transition: box-shadow 0.2s ease, transform 0.1s ease;
 }
-button.small:hover { filter: brightness(0.97); background: var(--border); }
+button.small svg { width: 12px; height: 12px; flex-shrink: 0; transform-origin: 50% 50%; }
+button.small:hover svg { animation: famPop 0.4s ease; }
+button.small:active { transform: translateY(1px) scale(0.98); }
 button.danger { background: var(--danger-bg); color: var(--danger-fg); }
+button.small.danger:hover svg { animation: famShake 0.45s ease !important; }
+@media (prefers-reduced-motion: reduce) {
+  button.small svg { animation: none !important; }
+}
 .item-list select.type-select.small { width: auto; margin: 0; padding: 3px 4px; font-size: 11px; }
 
 .muted { color: var(--text-secondary); font-weight: 400; }
@@ -729,91 +1410,125 @@ button.danger { background: var(--danger-bg); color: var(--danger-fg); }
 .login-logo { width: 58px; height: 58px; border-radius: 16px; margin-bottom: 6px; box-shadow: var(--shadow-md); }
 .login-screen h2 { margin: 0; font-size: 16px; color: var(--text-primary); }
 .login-screen .hint { text-align: left; }
-.google-signin-btn {
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  gap: 10px;
+.activation-input {
   width: 100%;
-  padding: 10px 14px;
-  border-radius: var(--radius-sm);
-  border: 1px solid var(--border-strong);
-  background: var(--bg-panel);
-  color: var(--text-primary);
-  font-size: 13px;
+  margin: 6px 0 0;
+  text-align: center;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 14px;
   font-weight: 600;
-  cursor: pointer;
-  margin-top: 6px;
-  box-shadow: var(--shadow-sm);
-  transition: box-shadow 0.15s ease;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
 }
-.google-signin-btn:hover { box-shadow: var(--shadow-md); }
+/* button. prefix matches button.primary's own specificity so this still
+   wins (it's the full-width/centered override) despite coming later only
+   by source order otherwise being outweighed by button.primary's element
+   selector. */
+button.activation-btn { width: 100%; margin: 0; justify-content: center; }
 
-.header-account-wrap { position: relative; flex-shrink: 0; }
-.header-account-avatar-btn {
-  width: 30px;
-  height: 30px;
-  border-radius: 50%;
-  border: none;
-  padding: 0;
-  background: rgba(255, 255, 255, 0.95);
-  color: var(--accent);
+/* Sync status line inside the header's activation panel — reuses the
+   header's WhatsApp-status dot colors (ready/not-ready/checking) plus a
+   plain grey "off". */
+.sync-status-row { display: flex; align-items: center; gap: 7px; margin-top: 10px; font-size: 11px; }
+.sync-status-row .muted { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.sync-status-row .small-icon-btn { width: 26px; height: 26px; flex-shrink: 0; }
+.sync-status-row .wa-status-dot { flex-shrink: 0; }
+.sync-status-row .wa-status-dot.off { background: var(--text-secondary); opacity: 0.45; box-shadow: none; animation: none; }
+
+.shortcut-row { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin: 8px 0 4px; }
+.shortcut-row .muted { font-size: 11.5px; }
+kbd {
+  display: inline-block;
+  padding: 2px 6px;
+  font-family: inherit;
+  font-size: 10.5px;
   font-weight: 700;
-  font-size: 13px;
+  color: var(--text-primary);
+  background: var(--cap-bg);
+  border-radius: 5px;
+  box-shadow: 2px 2px 4px var(--neu-dark), -2px -2px 4px var(--neu-light);
+}
+
+/* Keys tab (master key admin) */
+.key-code { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-weight: 700; font-size: 12px; word-break: break-all; }
+.key-meta { font-size: 11px; color: var(--text-secondary); margin-top: 3px; line-height: 1.45; }
+.item-list li.key-revoked { opacity: 0.55; }
+.key-duration-row input { width: 58px; }
+#keyExpiry {
+  width: 100%;
+  padding: 8px 10px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--bg-input);
+  color: var(--text-primary);
+  font-family: inherit;
+  font-size: 12.5px;
+  margin-bottom: 10px;
+}
+
+/* Sits below every Settings-tab card (not inside one) — one action that
+   commits everything above it (Safety & Pacing, Header/Footer), so it
+   reads as the tab's closing action rather than belonging to either card. */
+button.settings-save-btn { width: 100%; margin: 4px 0 10px; justify-content: center; }
+
+/* ---------- activation & sync card (top of Settings tab) ---------- */
+.activation-card-top { display: flex; align-items: center; gap: 8px; }
+.activation-card-top button { flex-shrink: 0; margin: 0; }
+.activation-card-info { flex: 1; min-width: 0; }
+.activation-name { font-size: 13px; font-weight: 700; color: var(--text-primary); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.activation-meta { font-size: 11px; color: var(--text-secondary); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+
+/* Theme picker — a permanently-visible segmented pill inline in the
+   header (replaced a click-to-open icon+dropdown; researched neumorphic
+   patterns for a 3-way choice in a tight space point at a segmented track
+   with a sliding thumb, not a plain 2-state slider or a floating panel).
+   Sits on the green gradient like the other header buttons, so it uses
+   the same white/dark-green-tinted shadow language as .icon-btn rather
+   than the mono-hue --neu-* tokens meant for the app's neutral surface. */
+.theme-segment {
+  position: relative;
   display: flex;
-  align-items: center;
-  justify-content: center;
-  overflow: hidden;
-  cursor: pointer;
+  gap: 2px;
+  padding: 3px;
+  border-radius: 14px;
+  background: rgba(0, 0, 0, 0.16);
+  box-shadow: inset 2px 2px 5px rgba(0, 40, 32, 0.35), inset -1px -1px 3px rgba(255, 255, 255, 0.08);
   flex-shrink: 0;
 }
-.header-account-avatar-btn:hover { filter: brightness(0.96); }
-.header-account-avatar-img { width: 100%; height: 100%; object-fit: cover; border-radius: 50%; }
-
-.header-account-panel {
+.theme-segment-thumb {
   position: absolute;
-  top: calc(100% + 8px);
-  left: 0;
-  z-index: 50;
-  width: 254px;
-  background: var(--bg-panel);
-  border: 1px solid var(--border);
-  border-radius: var(--radius-md);
-  padding: 14px;
-  box-shadow: var(--shadow-md);
-  text-align: left;
+  top: 3px;
+  left: 3px;
+  width: 24px;
+  height: 24px;
+  border-radius: 11px;
+  background: rgba(255, 255, 255, 0.22);
+  box-shadow: 2px 2px 5px rgba(0, 40, 32, 0.3), -1px -1px 3px rgba(255, 255, 255, 0.18);
+  transition: transform 0.28s cubic-bezier(0.34, 1.4, 0.64, 1);
+  pointer-events: none;
 }
-.header-account-panel .account-name { font-size: 13px; font-weight: 600; color: var(--text-primary); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-.header-account-panel .account-email { font-size: 11px; color: var(--text-secondary); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-.header-account-panel .tab-separator { margin: 12px 0; }
-.account-panel-top-row { display: flex; align-items: center; gap: 8px; }
-.account-panel-top-row .account-info { flex: 1; min-width: 0; }
-.account-panel-top-row .small-icon-btn { width: 26px; height: 26px; flex-shrink: 0; }
-
-.theme-panel {
-  left: auto;
-  right: 0;
-  width: auto;
-  display: flex;
-  gap: 4px;
-  padding: 6px;
-}
-.theme-option-btn {
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  gap: 4px;
-  width: 60px;
-  padding: 9px 4px;
-  border: 1px solid transparent;
-  border-radius: var(--radius-sm);
+.theme-seg-btn {
+  position: relative;
+  z-index: 1;
+  width: 24px;
+  height: 24px;
+  border: none;
   background: none;
-  color: var(--text-secondary);
-  font-size: 10px;
+  border-radius: 11px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: rgba(255, 255, 255, 0.55);
   cursor: pointer;
+  transition: color 0.2s ease;
 }
-.theme-option-btn:hover { background: var(--bg-hover); }
-.theme-option-btn.active { border-color: var(--accent); color: var(--accent); font-weight: 600; background: var(--accent-soft); }
+.theme-seg-btn svg { width: 14px; height: 14px; transform-origin: 50% 50%; }
+.theme-seg-btn.active { color: #fff; }
+.theme-seg-btn:hover svg { animation: famPop 0.4s ease; }
+.theme-seg-btn.active:hover svg { filter: drop-shadow(0 0 3px rgba(255, 255, 255, 0.6)); }
+@media (prefers-reduced-motion: reduce) {
+  .theme-seg-btn svg { animation: none !important; }
+}
 .hint.warn { background: var(--warn-bg); color: var(--warn-fg); }
 
 .consent-gate { background: var(--bg-panel); border: 1px solid var(--border); border-radius: var(--radius-md); padding: 14px; }
@@ -828,6 +1543,7 @@ button.danger { background: var(--danger-bg); color: var(--danger-fg); }
 .select-all-row {
   display: flex;
   align-items: center;
+  flex-wrap: wrap;
   gap: 6px;
   margin: 4px 0 8px;
 }
@@ -848,13 +1564,33 @@ button.danger { background: var(--danger-bg); color: var(--danger-fg); }
   overflow-y: auto;
   border: 1px solid var(--border);
   border-radius: var(--radius-sm);
-  padding: 6px 8px;
+  /* No top padding here — it would sit above the sticky header row's own
+     top:0, an unclipped strip a scrolled-past member row could still peek
+     through. The sticky row supplies the same visual gap itself instead
+     (see its own padding-top below). */
+  padding: 0 8px 6px;
   margin-bottom: 12px;
   background: var(--bg-app);
+  scrollbar-width: none;
 }
+.checklist::-webkit-scrollbar { display: none; }
 .checklist label { display: flex; align-items: center; gap: 6px; font-weight: 400; font-size: 12.5px; padding: 5px 0; color: var(--text-primary); }
-.checklist label input { width: auto; margin: 0; }
-.list-check-row { display: flex; align-items: center; gap: 4px; }
+.checklist label input { margin: 0; }
+/* Sticky within .checklist's own scroll — the list's name/checkbox/expand
+   row stays pinned at the top while just its expanded member rows scroll
+   underneath, instead of the whole row scrolling away with them. An
+   opaque background matching .checklist's own is required so scrolled
+   member text doesn't show through/behind the pinned row. */
+.list-check-row {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  background: var(--bg-app);
+  padding: 6px 0 2px;
+}
 .list-check-label { flex: 1; min-width: 0; }
 .list-expand-btn { width: 22px; height: 22px; flex-shrink: 0; transition: transform 0.15s ease; }
 .list-expand-btn.expanded { transform: rotate(180deg); }
@@ -1007,12 +1743,16 @@ button.danger { background: var(--danger-bg); color: var(--danger-fg); }
 .confirm-actions { display: flex; justify-content: flex-end; gap: 8px; }
 .confirm-actions button { margin: 0; }
 .confirm-actions button:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+/* Same "stays visibly tinted at rest" rule as .small-icon-btn.danger — a
+   destructive confirm button shouldn't look identical to any other
+   primary action until you hover it. */
 button.primary.danger {
-  background: var(--danger-fg);
-  color: #fff;
-  box-shadow: 0 2px 6px rgba(209, 69, 59, 0.3);
+  background: var(--danger-bg);
+  color: var(--danger-fg);
+  box-shadow: 4px 4px 9px var(--neu-dark), -4px -4px 9px var(--neu-light), inset 0 0 0 1.5px var(--danger-soft, rgba(209, 69, 59, 0.25));
 }
-button.primary.danger:hover { filter: brightness(1.08); box-shadow: 0 3px 10px rgba(209, 69, 59, 0.4); }
+button.primary.danger:hover { filter: brightness(0.96); }
+button.primary.danger:hover svg { animation: famShake 0.45s ease !important; }
 
 /* ---------- drag/drop overlay ----------
    Shown full-popup whenever a file is being dragged over the window (see

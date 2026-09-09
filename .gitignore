@@ -1,2 +1,8 @@
 *.code-workspace
 ext-signing-key.pem
+
+# wrangler's local cache/state (account id, auth token, dev-mode data) —
+# created the moment `wrangler login`/`deploy` runs in server/, never meant
+# to be committed.
+server/.wrangler/
+server/node_modules/

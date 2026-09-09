@@ -1,11 +1,16 @@
 // background.js — service worker: owns storage, scheduling (chrome.alarms),
 // and talks to the content script running inside the WhatsApp Web tab.
-// Must be the first import — installs an XMLHttpRequest shim that the
-// Firebase SDK (imported transitively below) needs to work at all in a
-// service worker. See xhr-polyfill.js for why.
-import './xhr-polyfill.js';
-import { signInWithGoogle, silentSignIn, signOutEverywhere, watchAuthState, currentUser } from './auth.js';
-import { SYNC_KEYS, syncPush, reconcileAll, attachRealtimeListeners, detachRealtimeListeners } from './sync.js';
+import { enforced, getLicense, activate, deactivate, checkStatus, admin as licenseAdmin } from './license.js';
+import {
+  SYNC_KEYS,
+  SYNC_ALARM,
+  scheduleAutoPush,
+  pollPull,
+  syncNow,
+  setSyncAlarm,
+  setOnRemoteApplied,
+  pullAfterActivate
+} from './sync.js';
 
 const WA_URL_PATTERN = 'https://web.whatsapp.com/*';
 const DEFAULT_SETTINGS = {
@@ -17,34 +22,27 @@ const DEFAULT_SETTINGS = {
   masterEnabled: true, // instant kill switch — off blocks new sends and stops any run in progress
   headerText: '', // global default header — prepended to every item's text/caption, unless overridden per-message or per-thread (see resolveHeaderFooter)
   footerText: '', // global default footer — appended to every item's text/caption, unless overridden per-message or per-thread (see resolveHeaderFooter)
-  syncEnabled: false // real-time Firebase sync of messages/lists/log/settings, off by default
+  syncEnabled: true, // cloud sync of messages/lists/log/settings under this install's activation key, on by default
+  privacyBlur: false // blurs chat names/avatars/message text on the WhatsApp Web page itself, for screen-sharing/public spaces — see content.js
 };
 
-// Mirrors Firebase Auth's current user into chrome.storage.local (as plain
-// {uid, email, displayName, photoURL} | null) so popup.js can read sign-in
-// state the exact same way it reads everything else — via getState() and
-// the existing storage.onChanged -> refresh() live-update path — instead of
-// needing its own separate channel to the Auth SDK, which never runs in the
-// popup at all (see auth.js).
-watchAuthState(async (user) => {
-  const authUser = user ? { uid: user.uid, email: user.email, displayName: user.displayName, photoURL: user.photoURL } : null;
-  await chrome.storage.local.set({ authUser });
-  if (user) {
-    const { settings } = await getRunControlState();
-    if (settings.syncEnabled) {
-      await reconcileAll();
-      attachRealtimeListeners();
-    }
-  } else {
-    detachRealtimeListeners();
-  }
-});
+// License heartbeat — re-validates the cached activation key every so often
+// so a revoked/expired key (or a device an admin reset) stops working
+// within minutes even if the popup is never opened. The popup also triggers
+// one check each time it opens.
+const LICENSE_HEARTBEAT_ALARM = 'licenseHeartbeat';
 
-// Every service worker start (extension load, browser start, or waking back
-// up after being idled out) re-establishes its own Firebase session from
-// whatever token Chrome already has cached — silent, no UI — so sync keeps
-// working across restarts without asking the user to sign in again.
-silentSignIn();
+// The two alarms that aren't per-schedule. rebuildAllAlarms() below starts
+// from chrome.alarms.clearAll(), so these have to be put back every time.
+async function ensureBackgroundAlarms() {
+  if (enforced()) await chrome.alarms.create(LICENSE_HEARTBEAT_ALARM, { periodInMinutes: 15 });
+  const { settings } = await getRunControlState();
+  await setSyncAlarm(!!settings.syncEnabled);
+}
+
+// One-time cleanup of the previous Google-sign-in/Firebase sync's storage
+// keys — harmless if they were never there.
+chrome.storage.local.remove(['authUser', 'syncMeta']);
 
 // ---------- storage helpers ----------
 
@@ -164,7 +162,7 @@ async function getState() {
     'log',
     'settings',
     'activeRuns',
-    'authUser'
+    'cloudSync'
   ]);
   return {
     fetchedChats: data.fetchedChats || [],
@@ -173,30 +171,19 @@ async function getState() {
     log: data.log || [],
     settings: { ...DEFAULT_SETTINGS, ...(data.settings || {}) },
     activeRuns: data.activeRuns || {},
-    authUser: data.authUser || null
+    license: await getLicense(),
+    cloudSync: data.cloudSync || {}
   };
 }
 
 async function setState(partial) {
   await chrome.storage.local.set(partial);
-  // Fire-and-forget: local saves must never wait on a network round-trip to
-  // Firestore, they're already durable the moment chrome.storage.local
-  // resolves above. syncPush() itself no-ops instantly if signed out or
-  // sync is turned off.
-  for (const key of Object.keys(partial)) {
-    if (SYNC_KEYS.includes(key)) {
-      syncPush(key, partial[key]).catch((err) => {
-        console.warn('[sync] push failed for', key, err);
-        // Best-effort — surfaces as a toast if the popup happens to be open
-        // right now; a rejected sendMessage (nothing listening) is expected
-        // and fine, sync just retries silently on the next reconcile either
-        // way, same as before this existed.
-        chrome.runtime
-          .sendMessage({ action: 'toast', message: `Sync couldn't reach your account just now — it'll retry automatically.`, type: 'warning' })
-          .catch(() => {});
-      });
-    }
-  }
+  // Local saves never wait on the network — they're durable the moment
+  // chrome.storage.local resolves above. The push is debounced/rate-limited
+  // and no-ops instantly if sync is off or this install isn't activated;
+  // any failure lands in cloudSync.lastError (shown in the popup's sync
+  // row) rather than a toast.
+  if (Object.keys(partial).some((key) => SYNC_KEYS.includes(key))) scheduleAutoPush();
 }
 
 // getState() reads every storage key at once, including `messages` — which
@@ -284,6 +271,83 @@ async function pingContentScript(tabId, attempts = 5) {
     await new Promise((r) => setTimeout(r, 1500));
   }
   return false;
+}
+
+// Best-effort: no WA tab open, or its content script not ready yet, just
+// means content.js will pick up the new value itself next time it loads
+// (see its own getState call on startup) — not a failure worth surfacing.
+async function pushPrivacyBlurToTab(enabled) {
+  const tab = await findWaTab();
+  if (!tab) return;
+  try {
+    await sendToTab(tab.id, { action: 'setPrivacyBlur', enabled: !!enabled }, 3000);
+  } catch (_) {}
+}
+
+// ---------- country flag cache (for the quick-send number box) ----------
+// Flag images for the country-code picker are fetched from flagcdn.com
+// exactly once — right after install — then kept as data URLs in
+// chrome.storage.local forever after, so the popup never re-downloads them
+// on every open. Bump FLAG_CACHE_VERSION to force a one-time refresh (e.g.
+// switching CDN/size); ensureFlagCache also self-heals — if the cache was
+// cleared or only partially written, it re-downloads just the missing
+// entries, not the whole set.
+const FLAG_CACHE_VERSION = 1;
+const FLAG_ISO_LIST = [
+  'AF','AL','DZ','AD','AO','AG','AR','AM','AU','AT','AZ','BS','BH','BD','BB','BY','BE','BZ','BJ','BT',
+  'BO','BA','BW','BR','BN','BG','BF','BI','KH','CM','CA','CV','CF','TD','CL','CN','CO','KM','CD','CG',
+  'CR','HR','CU','CY','CZ','DK','DJ','DM','DO','EC','EG','SV','GQ','ER','EE','SZ','ET','FJ','FI','FR',
+  'GA','GM','GE','DE','GH','GR','GD','GT','GN','GW','GY','HT','HN','HK','HU','IS','IN','ID','IR','IQ',
+  'IE','IL','IT','CI','JM','JP','JO','KZ','KE','KI','XK','KW','KG','LA','LV','LB','LS','LR','LY','LI',
+  'LT','LU','MO','MG','MW','MY','MV','ML','MT','MH','MR','MU','MX','FM','MD','MC','MN','ME','MA','MZ',
+  'MM','NA','NR','NP','NL','NZ','NI','NE','NG','KP','MK','NO','OM','PK','PW','PS','PA','PG','PY','PE',
+  'PH','PL','PT','QA','RO','RU','RW','KN','LC','VC','WS','SM','ST','SA','SN','RS','SC','SL','SG','SK',
+  'SI','SB','SO','ZA','KR','SS','ES','LK','SD','SR','SE','CH','SY','TW','TJ','TZ','TH','TL','TG','TO',
+  'TT','TN','TR','TM','TV','UG','UA','AE','GB','US','UY','UZ','VU','VA','VE','VN','YE','ZM','ZW'
+];
+async function fetchAsDataUrl(url, mimeType) {
+  const res = await fetch(url);
+  if (!res.ok) throw new Error(`HTTP ${res.status}`);
+  const bytes = new Uint8Array(await res.arrayBuffer());
+  let binary = '';
+  for (let i = 0; i < bytes.length; i++) binary += String.fromCharCode(bytes[i]);
+  return `data:${mimeType};base64,${btoa(binary)}`;
+}
+let flagCacheInFlight = null;
+async function ensureFlagCache() {
+  // Collapses concurrent callers (onInstalled firing at the same time as a
+  // popup's own backfill call) into one download pass instead of two.
+  if (flagCacheInFlight) return flagCacheInFlight;
+  flagCacheInFlight = (async () => {
+    const stored = await chrome.storage.local.get(['flagCache', 'flagCacheVersion']);
+    const cache = stored.flagCacheVersion === FLAG_CACHE_VERSION && stored.flagCache ? { ...stored.flagCache } : {};
+    const missing = FLAG_ISO_LIST.filter((iso2) => !cache[iso2]);
+    if (missing.length === 0) return cache;
+    const CONCURRENCY = 8;
+    let idx = 0;
+    async function worker() {
+      while (idx < missing.length) {
+        const iso2 = missing[idx++];
+        try {
+          cache[iso2] = await fetchAsDataUrl(`https://flagcdn.com/w40/${iso2.toLowerCase()}.png`, 'image/png');
+        } catch (e) {
+          // Left out of the cache — still missing next time ensureFlagCache
+          // runs (next popup open / next install event), and the popup's
+          // own flagIconHtml() falls back to a plain placeholder swatch for
+          // any iso2 not yet cached in the meantime. Not worth surfacing as
+          // an error over one flag icon.
+        }
+      }
+    }
+    await Promise.all(Array.from({ length: Math.min(CONCURRENCY, missing.length) }, worker));
+    await chrome.storage.local.set({ flagCache: cache, flagCacheVersion: FLAG_CACHE_VERSION });
+    return cache;
+  })();
+  try {
+    return await flagCacheInFlight;
+  } finally {
+    flagCacheInFlight = null;
+  }
 }
 
 // Real-time "would a send actually work right now" check for the popup's
@@ -451,6 +515,12 @@ async function runCampaign(campaign) {
   const { messages, lists, settings } = await getState();
   if (!settings.masterEnabled) {
     await appendLog({ campaignId: campaign.id, campaignName: campaign.name, status: 'error', detail: 'Skipped: extension is switched off.' });
+    return;
+  }
+  // A revoked/expired key stops scheduled sends too, not just the popup —
+  // otherwise a schedule set up before the key died would keep firing.
+  if (!(await getLicense()).activated) {
+    await appendLog({ campaignId: campaign.id, campaignName: campaign.name, status: 'error', detail: 'Skipped: extension is not activated.' });
     return;
   }
   // A send-without-saving pass items straight through (never persisted as a
@@ -660,6 +730,70 @@ async function runCampaign(campaign) {
   });
 }
 
+// ---------- auto-reply (incoming message -> matching saved message) ----------
+function autoReplyTriggerMatches(text, trigger) {
+  if (!trigger || !trigger.value) return false;
+  if (trigger.type === 'regex') {
+    try {
+      return new RegExp(trigger.value, trigger.caseSensitive ? '' : 'i').test(text);
+    } catch (_) {
+      return false; // an invalid regex just never matches, rather than throwing on every incoming message
+    }
+  }
+  const hay = trigger.caseSensitive ? text : text.toLowerCase();
+  const needle = trigger.caseSensitive ? trigger.value : trigger.value.toLowerCase();
+  return hay.includes(needle);
+}
+
+const AUTO_REPLY_COOLDOWN_UNIT_MS = { seconds: 1000, minutes: 60000, hours: 3600000 };
+
+// Fired for every real incoming message (page-bridge.js's chat.new_message
+// hook, relayed through content.js) — checked against every saved
+// message's autoReply rules. Reuses runCampaign (the same engine behind
+// "send to current chat") with a single explicit target, so header/footer
+// resolution, license/master-switch gating and logging all stay in one
+// place instead of a second copy of send logic.
+async function handleIncomingMessage({ chatId, text }) {
+  if (!chatId || !text) return;
+  const { messages, settings, fetchedChats } = await getState();
+  if (!settings.masterEnabled) return;
+  const candidates = messages.filter(
+    (m) => m.autoReply && m.autoReply.enabled && (m.autoReply.triggers || []).some((t) => autoReplyTriggerMatches(text, t))
+  );
+  if (candidates.length === 0) return;
+  const chatName = (fetchedChats.find((c) => c.waId === chatId) || {}).name || chatId;
+  // Cooldown state is deliberately its own untracked chrome.storage.local
+  // key, not part of getState()/SYNC_KEYS — it's pure rate-limiting
+  // bookkeeping, not real data, so it shouldn't sync across devices or
+  // bloat the cloud snapshot.
+  const { autoReplyCooldowns } = await chrome.storage.local.get(['autoReplyCooldowns']);
+  const cooldowns = autoReplyCooldowns || {};
+  let cooldownsChanged = false;
+  for (const message of candidates) {
+    const ar = message.autoReply;
+    const cooldownMs = ar.cooldownEnabled
+      ? (ar.cooldownValue || 0) * (AUTO_REPLY_COOLDOWN_UNIT_MS[ar.cooldownUnit] || AUTO_REPLY_COOLDOWN_UNIT_MS.minutes)
+      : 0;
+    if (cooldownMs > 0) {
+      const last = (cooldowns[message.id] || {})[chatId] || 0;
+      if (Date.now() - last < cooldownMs) continue;
+      // Marked BEFORE sending, not after — several matching messages can
+      // arrive faster than one send round-trips, and this is what stops
+      // that burst from firing more than one reply.
+      cooldowns[message.id] = { ...(cooldowns[message.id] || {}), [chatId]: Date.now() };
+      cooldownsChanged = true;
+    }
+    await runCampaign({
+      id: `autoreply-${message.id}-${Date.now()}`,
+      name: `Auto-reply: ${message.name}`,
+      messageId: message.id,
+      explicitTargets: [{ waId: chatId, name: chatName }],
+      sendSeparator: false
+    });
+  }
+  if (cooldownsChanged) await chrome.storage.local.set({ autoReplyCooldowns: cooldowns });
+}
+
 async function markLogEntryDeleted(id) {
   const log = await getLogOnly();
   const next = log.map((l) => (l.id === id ? { ...l, deletedForEveryone: true } : l));
@@ -841,6 +975,7 @@ async function scheduleMessageAlarm(messageId, schedule) {
 async function rebuildAllAlarms() {
   await migrateLegacyCampaignsIntoMessages();
   await chrome.alarms.clearAll();
+  await ensureBackgroundAlarms();
   const { messages } = await getState();
   for (const message of messages) {
     for (const schedule of message.schedules || []) {
@@ -848,8 +983,19 @@ async function rebuildAllAlarms() {
     }
   }
 }
+// A pulled snapshot can carry schedules made on another device — they need
+// alarms here too. (Both devices then fire them; see README's sync notes.)
+setOnRemoteApplied(rebuildAllAlarms);
 
 chrome.alarms.onAlarm.addListener(async (alarm) => {
+  if (alarm.name === SYNC_ALARM) {
+    await pollPull(false);
+    return;
+  }
+  if (alarm.name === LICENSE_HEARTBEAT_ALARM) {
+    await checkStatus();
+    return;
+  }
   const { messages } = await getState();
   const [kind, messageId, scheduleId, idxStr] = alarm.name.split(':');
   const message = messages.find((m) => m.id === messageId);
@@ -888,8 +1034,23 @@ chrome.alarms.onAlarm.addListener(async (alarm) => {
   // 'interval' alarms repeat on their own via periodInMinutes — nothing to reschedule.
 });
 
-chrome.runtime.onInstalled.addListener(() => rebuildAllAlarms());
+chrome.runtime.onInstalled.addListener(() => {
+  rebuildAllAlarms();
+  ensureFlagCache(); // one-time (or self-healing) flag download — see its own comment above
+});
 chrome.runtime.onStartup.addListener(() => rebuildAllAlarms());
+
+// Keyboard shortcut for privacy blur (default Alt+Shift+X, see manifest.json
+// "commands") — Chrome owns the actual key capture and remapping UI for
+// this (chrome://extensions/shortcuts), an extension can't build its own
+// "press keys to record a hotkey" control that writes to that registry.
+chrome.commands.onCommand.addListener(async (command) => {
+  if (command !== 'toggle-privacy-blur') return;
+  const { settings } = await getState();
+  const next = !settings.privacyBlur;
+  await setState({ settings: { ...settings, privacyBlur: next } });
+  await pushPrivacyBlurToTab(next);
+});
 
 // ---------- messages from popup ----------
 
@@ -955,6 +1116,24 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
             break;
           }
           const res = await sendToTab(tab.id, { action: 'getGroupAdminInfo', waIds: msg.waIds }, 90000);
+          sendResponse(res);
+          break;
+        }
+
+        // Group & Contact Extractor — the group's actual WhatsApp member
+        // list, not a saved list's contents.
+        case 'getGroupMembers': {
+          const tab = await findWaTab();
+          if (!tab) {
+            sendResponse({ ok: false, error: 'Open web.whatsapp.com in a tab first, then try again.' });
+            break;
+          }
+          const ready = await pingContentScript(tab.id, 2);
+          if (!ready) {
+            sendResponse({ ok: false, error: 'WhatsApp Web tab is not ready yet.' });
+            break;
+          }
+          const res = await sendToTab(tab.id, { action: 'getGroupMembers', waId: msg.waId }, 30000);
           sendResponse(res);
           break;
         }
@@ -1034,6 +1213,17 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
           if (message) await clearAllAlarmsForMessage(message.id);
           await setState({ messages: messages.filter((m) => m.id !== msg.id) });
           sendResponse({ ok: true });
+          break;
+        }
+
+        // ---- auto-reply (incoming message -> saved message, see content.js/page-bridge.js) ----
+        // No response is actually needed by content.js (it fires and
+        // forgets), so this responds immediately and lets the actual
+        // matching/sending happen after — a slow WhatsApp send shouldn't
+        // hold the content script's sendMessage promise open.
+        case 'incomingMessage': {
+          sendResponse({ ok: true });
+          handleIncomingMessage(msg).catch(() => {});
           break;
         }
 
@@ -1270,6 +1460,66 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
           break;
         }
 
+        // Quick send — sends straight to a typed phone number, bypassing
+        // saved lists and the currently-open chat entirely. Resolves the
+        // number to a real WhatsApp chat first (same lookup the Lists tab's
+        // manual-add box uses) so a bad/non-WhatsApp number comes back as a
+        // clear error instead of silently no-opping.
+        case 'sendNowToNumber': {
+          const { settings } = await getState();
+          if (!settings.masterEnabled) {
+            sendResponse({ ok: false, error: 'Extension is switched off — turn it back on in the header first.' });
+            break;
+          }
+          if (!msg.number || !String(msg.number).trim()) {
+            sendResponse({ ok: false, error: 'Enter a phone number first.' });
+            break;
+          }
+          if (!Array.isArray(msg.items) || msg.items.length === 0) {
+            sendResponse({ ok: false, error: 'Add at least one text or attachment first.' });
+            break;
+          }
+          const tab = await findWaTab();
+          if (!tab) {
+            sendResponse({ ok: false, error: 'Open web.whatsapp.com in a tab first, then try again.' });
+            break;
+          }
+          const ready = await pingContentScript(tab.id, 2);
+          if (!ready) {
+            sendResponse({ ok: false, error: 'WhatsApp Web tab is not ready yet.' });
+            break;
+          }
+          const found = await sendToTab(tab.id, { action: 'findContactByNumber', number: msg.number }, 15000);
+          if (!found.ok) {
+            sendResponse(found);
+            break;
+          }
+          const runId = `adhoc-${uid()}`;
+          runCampaign({
+            id: runId,
+            name: `Manual send: quick send to ${found.contact.name}`,
+            items: msg.items,
+            messageOverride: msg.messageOverride,
+            explicitTargets: [{ waId: found.contact.waId, name: found.contact.name }],
+            sendSeparator: msg.sendSeparator !== false,
+            useDefaultDelay: true,
+            delayBetweenMsMs: settings.defaultDelayBetweenMsMs,
+            delayBetweenListsMs: settings.defaultDelayBetweenListsMs
+          });
+          sendResponse({ ok: true, runId, chatName: found.contact.name });
+          break;
+        }
+
+        // Popup-side safety net for the flag cache — normally a no-op fast
+        // path (already downloaded at install time), only actually fetches
+        // anything if the cache was cleared/partial, and only the missing
+        // entries even then. See ensureFlagCache above.
+        case 'ensureFlagsCached': {
+          const cache = await ensureFlagCache();
+          sendResponse({ ok: true, cache });
+          break;
+        }
+
         case 'clearLog': {
           await setState({ log: [] });
           sendResponse({ ok: true });
@@ -1375,34 +1625,77 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
         case 'saveSettings': {
           const { settings } = await getState();
           const wasSyncEnabled = settings.syncEnabled;
+          const wasPrivacyBlur = settings.privacyBlur;
           const nextSettings = { ...settings, ...msg.settings };
           await setState({ settings: nextSettings });
-          // Flipping the toggle takes effect immediately rather than
-          // waiting for the next service worker wake — turning it on
-          // catches this device up (and seeds the cloud copy on first
-          // sign-in), turning it off stops listening right away.
-          if (nextSettings.syncEnabled && !wasSyncEnabled) {
-            await reconcileAll();
-            attachRealtimeListeners();
-          } else if (!nextSettings.syncEnabled && wasSyncEnabled) {
-            detachRealtimeListeners();
+          // Flipping the toggle takes effect immediately rather than waiting
+          // for the next service worker wake — turning it on pulls first
+          // (so a new device joining a key doesn't overwrite the cloud copy
+          // with its own local state) and starts the 1-minute poll; turning
+          // it off stops polling right away.
+          if (nextSettings.syncEnabled !== wasSyncEnabled) {
+            await setSyncAlarm(!!nextSettings.syncEnabled);
+            if (nextSettings.syncEnabled) await pollPull(true);
+          }
+          // Privacy blur lives on the WhatsApp Web page itself (content.js
+          // toggles a class there), not in this popup — content.js also
+          // reads it fresh via getState on its own load, but pushing it
+          // live here means flipping the toggle takes effect on an
+          // already-open tab immediately instead of needing a reload.
+          if (nextSettings.privacyBlur !== wasPrivacyBlur) {
+            await pushPrivacyBlurToTab(nextSettings.privacyBlur);
           }
           sendResponse({ ok: true });
           break;
         }
-        case 'signIn': {
-          try {
-            const user = await signInWithGoogle();
-            sendResponse({ ok: true, user: { uid: user.uid, email: user.email, displayName: user.displayName } });
-          } catch (err) {
-            sendResponse({ ok: false, error: String(err && err.message ? err.message : err) });
-          }
+
+        // ---- activation key / cloud sync ----
+        case 'activate': {
+          const result = await activate(msg.key);
+          // Reactivating (e.g. after an uninstall/reinstall) wiped local
+          // storage back to defaults — sync is already "on" there, but
+          // there's nothing to poll for yet until this forces one pull, so
+          // whatever this key already has saved on the server comes back
+          // immediately instead of waiting for the next once-a-minute poll.
+          if (result.ok) await pullAfterActivate();
+          sendResponse(result);
           break;
         }
-        case 'signOut': {
-          await signOutEverywhere();
-          detachRealtimeListeners();
+        case 'deactivate': {
+          await deactivate();
           sendResponse({ ok: true });
+          break;
+        }
+        // Heartbeat on demand — the popup fires this on open so a key that
+        // died while the browser was closed is caught immediately.
+        case 'licenseStatus': {
+          sendResponse(await checkStatus());
+          break;
+        }
+        case 'syncNow': {
+          await syncNow();
+          sendResponse({ ok: true });
+          break;
+        }
+        case 'syncPollNow': {
+          await pollPull(false);
+          sendResponse({ ok: true });
+          break;
+        }
+        case 'adminListKeys': {
+          sendResponse(await licenseAdmin('/admin/list', {}));
+          break;
+        }
+        case 'adminPutKey': {
+          sendResponse(await licenseAdmin('/admin/put', { key: msg.key, record: msg.record }));
+          break;
+        }
+        case 'adminRevokeKey': {
+          sendResponse(await licenseAdmin('/admin/revoke', { key: msg.key }));
+          break;
+        }
+        case 'adminDeleteKey': {
+          sendResponse(await licenseAdmin('/admin/delete', { key: msg.key }));
           break;
         }
         default:

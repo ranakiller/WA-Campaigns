@@ -1,0 +1,11 @@
+name = "wa-scheduler-license"
+main = "worker.js"
+compatibility_date = "2024-09-01"
+
+# KV namespace holding activation keys + every customer's synced data.
+# Dashboard title is "WA_SCHEDULER_LICENSES" (kept distinct from nuskoMate's
+# own "LICENSES" namespace on the same Cloudflare account) — the binding
+# name below is what worker.js actually reads as env.LICENSES.
+[[kv_namespaces]]
+binding = "LICENSES"
+id = "9e26924e97b74042ac9f6dbf7b9cab54"

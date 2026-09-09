@@ -62,8 +62,8 @@ function showConfirmDialog(message, options = {}) {
       <div class="confirm-dialog">
         <p class="confirm-message"></p>
         <div class="confirm-actions">
-          <button type="button" class="ghost confirm-cancel">${escapeHtml(cancelText)}</button>
-          <button type="button" class="primary${danger ? ' danger' : ''} confirm-ok">${escapeHtml(confirmText)}</button>
+          <button type="button" class="ghost confirm-cancel">${CLOSE_ICON_SVG}<span class="btn-label">${escapeHtml(cancelText)}</span></button>
+          <button type="button" class="primary${danger ? ' danger' : ''} confirm-ok">${danger ? DELETE_ICON_SVG : CHECK_ICON_SVG}<span class="btn-label">${escapeHtml(confirmText)}</span></button>
         </div>
       </div>
     `;
@@ -224,6 +224,15 @@ chrome.storage.local.get(['listSelections'], (data) => {
 // Which lists currently have their member checklist expanded — purely a
 // this-session UI convenience, doesn't need to survive a popup reopen.
 const expandedListPanels = new Set(); // `${messageId}:${listId}`
+// Same idea: a multi-item message's "What to send" checklist defaults to
+// collapsed (a one-line "All N items selected" summary) since most sends
+// want everything — only messageIds in this set show the full per-item
+// checklist. Keeps the panel's first screenful about actually sending, not
+// item bookkeeping most people never touch.
+const expandedItemPickers = new Set(); // messageId
+// Same for the schedule editor's rarely-changed delay-override/label
+// fields — collapsed behind "Advanced" until opened.
+let scheduleAdvancedOpen = false;
 // Same idea as messageRunIds, but for the "send to current chat"/"send this
 // item to current chat" buttons — these are quick one-off sends, not a list
 // run, so instead of taking over the whole panel with a progress block they
@@ -294,10 +303,29 @@ let composingHfMode = 'default';
 let composingHfHeaderText = '';
 let composingHfFooterText = '';
 let messageHfPanelOpen = false;
+
+// Auto-reply: send this message's own content back into whichever chat
+// asked for it, the moment an incoming message matches one of its triggers
+// (see background.js's handleIncomingMessage). Lives on the message the
+// same way headerFooterMode does — set here while composing/editing,
+// carried on message.autoReply once saved.
+function defaultAutoReply() {
+  return { enabled: false, triggers: [], cooldownEnabled: true, cooldownValue: 60, cooldownUnit: 'minutes' };
+}
+let composingAutoReply = defaultAutoReply();
+let messageAutoReplyPanelOpen = false;
 // Which single composing item (by reference) currently has its own HF
 // panel expanded, or null. Only one open at a time, same pattern as
 // editingThreadItem.
 let hfPanelItem = null;
+// Bulk "apply this header/footer to every thread/attachment" tool, opened
+// from the toolbar above the list — separate staging state (not tied to
+// any one item) so picking a mode/typing text doesn't touch anything until
+// "Apply to all" is actually clicked.
+let bulkHfPanelOpen = false;
+let bulkHfMode = 'default';
+let bulkHfHeaderText = '';
+let bulkHfFooterText = '';
 
 // The separator checkbox appears in two independent places (the one-off Send
 // panel, and the per-message schedule editor) — each remembers its own
@@ -333,6 +361,21 @@ const RUN_NOW_ICON_SVG =
 const RESET_ICON_SVG = '<svg viewBox="0 0 24 24" width="14" height="14"><path fill="currentColor" d="M6 6h12v12H6z"/></svg>';
 const MOVE_UP_ICON_SVG = '<svg viewBox="0 0 24 24" width="14" height="14"><path fill="currentColor" d="M12 5.5 5 13h4v6h6v-6h4L12 5.5Z"/></svg>';
 const MOVE_DOWN_ICON_SVG = '<svg viewBox="0 0 24 24" width="14" height="14"><path fill="currentColor" d="M12 18.5 19 11h-4V5H9v6H5l7 7.5Z"/></svg>';
+// Icons for the primary/ghost CTA buttons (Send Now, Save, Cancel, etc —
+// see popup.css's neumorphic button.primary/.ghost). SEND_ICON_SVG carries
+// its own class so button.primary:hover .send-icon can give it the little
+// paper-airplane fly-off instead of the generic pop every other button icon
+// gets on hover.
+const SEND_ICON_SVG =
+  '<svg class="send-icon" viewBox="0 0 24 24" width="15" height="15"><path fill="currentColor" d="M2 21l21-9L2 3v7l15 2-15 2z"/></svg>';
+const CHECK_ICON_SVG =
+  '<svg viewBox="0 0 24 24" width="15" height="15"><path fill="currentColor" d="M9 16.2 4.8 12l-1.4 1.4L9 19 21 7l-1.4-1.4z"/></svg>';
+const CLOSE_ICON_SVG =
+  '<svg viewBox="0 0 24 24" width="15" height="15"><path fill="currentColor" d="M19 6.4 17.6 5 12 10.6 6.4 5 5 6.4l5.6 5.6L5 17.6 6.4 19l5.6-5.6 5.6 5.6 1.4-1.4-5.6-5.6z"/></svg>';
+const SCAN_ICON_SVG =
+  '<svg viewBox="0 0 24 24" width="15" height="15"><path fill="currentColor" d="M15.5 14h-.79l-.28-.27a6.5 6.5 0 1 0-.7.7l.27.28v.79l5 5L20.5 19l-5-5zm-6 0a4.5 4.5 0 1 1 0-9 4.5 4.5 0 0 1 0 9z"/></svg>';
+const KEY_ICON_SVG =
+  '<svg viewBox="0 0 24 24" width="15" height="15"><path fill="currentColor" d="M12.65 10A5.99 5.99 0 0 0 7 6c-3.31 0-6 2.69-6 6s2.69 6 6 6a5.99 5.99 0 0 0 5.65-4H17v4h4v-4h2v-4H12.65zM7 14c-1.1 0-2-.9-2-2s.9-2 2-2 2 .9 2 2-.9 2-2 2z"/></svg>';
 const REMOVE_ICON_SVG =
   '<svg viewBox="0 0 24 24" width="14" height="14"><path fill="currentColor" d="M19 6.41 17.59 5 12 10.59 6.41 5 5 6.41 10.59 12 5 17.59 6.41 19 12 13.41 17.59 19 19 17.59 13.41 12Z"/></svg>';
 const MEDIA_ICON_SVG =
@@ -417,6 +460,24 @@ document.addEventListener('click', async (e) => {
   }
 });
 
+function escapeCsv(v) {
+  const s = String(v ?? '');
+  return /[",\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
+}
+
+function triggerCsvDownload(filename, header, rows) {
+  const csv = [header, ...rows].map((r) => r.map(escapeCsv).join(',')).join('\r\n');
+  const blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = filename;
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+  URL.revokeObjectURL(url);
+}
+
 async function downloadCsv(filename, chats) {
   // Admin status is checked fresh for whichever groups are actually being
   // exported (not the whole fetched pool) — one WPP call per group, so this
@@ -430,10 +491,6 @@ async function downloadCsv(filename, chats) {
     if (res.ok) adminInfo = res.info || {};
   }
   const yesNo = (v) => (v === true ? 'Yes' : v === false ? 'No' : '');
-  const escapeCsv = (v) => {
-    const s = String(v ?? '');
-    return /[",\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
-  };
   const header = ['Name', 'Type', 'ID / Number', "You're Admin", 'Admin-Only Group'];
   const rows = (chats || []).map((c) => {
     const info = c.type === 'group' ? adminInfo[c.waId] : null;
@@ -445,37 +502,102 @@ async function downloadCsv(filename, chats) {
       info ? yesNo(info.announceOnly) : ''
     ];
   });
-  const csv = [header, ...rows].map((r) => r.map(escapeCsv).join(',')).join('\r\n');
-  const blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' });
-  const url = URL.createObjectURL(blob);
-  const a = document.createElement('a');
-  a.href = url;
-  a.download = filename;
-  document.body.appendChild(a);
-  a.click();
-  document.body.removeChild(a);
-  URL.revokeObjectURL(url);
+  triggerCsvDownload(filename, header, rows);
+}
+
+// Group & Contact Extractor — exports a single group's actual WhatsApp
+// membership (who's in it right now), not a saved list.
+//
+// Many members show up as a "@lid" (Linked ID) instead of their real
+// number these days — WhatsApp's own privacy masking. The WhatsApp ID
+// column keeps whatever id that member actually has (lid or real number)
+// since that's what a send still needs to address them, unchanged from
+// before. Phone Number is the extra part: background.js resolves it
+// server-side per lid via WPP.contact.getPnLidEntry, which only works
+// from what this WhatsApp account already knows locally (no live network
+// lookup for this direction) — a lid-masked member with no shared
+// history can legitimately come back with no resolvable number, which
+// shows as blank here, not an error.
+//
+// Names: a live-resolved name from that same lookup wins when there is
+// one (more likely accurate than a stale local guess); chatSource
+// (whatever's already been scanned/added) is the fallback.
+//
+// Shared between the single-group export below and the bulk one right
+// after it — groupName is only appended as its own trailing column for
+// the bulk export, so one CSV can hold several groups' members without
+// losing which group each row actually came from.
+function groupMemberRow(m, groupName) {
+  const known = chatSource.get(m.waId);
+  const name = m.name || (known ? known.name : '');
+  const row = [name, m.number || m.waId, m.phoneNumber || '', m.isAdmin ? 'Yes' : 'No', m.isSuperAdmin ? 'Yes' : 'No'];
+  if (groupName !== undefined) row.push(groupName);
+  return row;
+}
+
+async function downloadGroupMembersCsv(groupName, waId) {
+  const res = await call('getGroupMembers', { waId });
+  if (!res.ok) {
+    showToast(res.error || 'Could not fetch this group’s members.', 'error');
+    return;
+  }
+  const header = ['Name', 'WhatsApp ID (used for sending)', 'Phone Number', 'Is Admin', 'Is Super Admin'];
+  const rows = (res.members || []).map((m) => groupMemberRow(m));
+  triggerCsvDownload(`${groupName.replace(/[^a-z0-9]+/gi, '_') || 'group'}_members.csv`, header, rows);
+}
+
+// Bulk version — every currently-checked GROUP (contacts are skipped,
+// they have no members) gets fetched one at a time and merged into a
+// single CSV, each row carrying which group it came from so a member in
+// more than one selected group shows up once per group rather than being
+// silently deduped into one ambiguous row.
+async function downloadBulkGroupMembersCsv(groups, onProgress) {
+  const header = ['Name', 'WhatsApp ID (used for sending)', 'Phone Number', 'Is Admin', 'Is Super Admin', 'Extracted From Group'];
+  const rows = [];
+  let done = 0;
+  for (const g of groups) {
+    const res = await call('getGroupMembers', { waId: g.waId });
+    done++;
+    if (onProgress) onProgress(done, groups.length);
+    if (!res.ok) {
+      showToast(`Could not fetch members for "${g.name}": ${res.error || 'unknown error'}`, 'error');
+      continue; // one broken group shouldn't stop the rest of the export
+    }
+    for (const m of res.members || []) rows.push(groupMemberRow(m, g.name));
+  }
+  if (rows.length === 0) {
+    showToast('No members found across the selected groups.', 'error');
+    return;
+  }
+  triggerCsvDownload('group_contacts_bulk_export.csv', header, rows);
 }
 
 async function refresh() {
   const res = await call('getState');
   if (res.ok) STATE = res.state;
   applyTheme();
-  const signedIn = !!STATE.authUser;
-  document.getElementById('loginScreen').style.display = signedIn ? 'none' : 'flex';
-  document.getElementById('appContent').style.display = signedIn ? '' : 'none';
-  renderHeaderAccount();
-  if (!signedIn) return;
+  // license.activated is always true in dev mode (LICENSE_SERVER empty in
+  // license.js); with a server configured it's whether a valid key is
+  // cached on this install.
+  const activated = !STATE.license || !!STATE.license.activated;
+  document.getElementById('activationScreen').style.display = activated ? 'none' : 'flex';
+  document.getElementById('appContent').style.display = activated ? '' : 'none';
+  if (!activated) return;
   for (const c of STATE.fetchedChats || []) {
     chatSource.set(c.waId, c);
   }
   renderMasterToggle();
+  renderPrivacyBlurToggle();
+  renderPrivacyShortcut();
   renderMessages();
+  renderCampaignsTab();
+  renderAutoReplyTab();
   renderAdhocSendPanel();
   renderListBuilder();
   renderLists();
   renderLog();
   renderSettings();
+  renderKeysTabVisibility();
 }
 
 function escapeHtml(str) {
@@ -486,12 +608,32 @@ function escapeHtml(str) {
     .replace(/"/g, '&quot;');
 }
 
+// Primary/ghost buttons now carry an icon alongside their label (see
+// popup.css's neumorphic button.primary/.ghost) — the label lives in its
+// own <span class="btn-label"> specifically so code that swaps a button's
+// text (Save -> Saved, Scan -> Scanning..., etc) can update just that span
+// instead of the button's whole textContent, which would silently delete
+// the icon too. Falls back to plain textContent for any button that
+// doesn't have a label span (icon-only ones, e.g. the nav).
+function setBtnLabel(btnOrId, text) {
+  const btn = typeof btnOrId === 'string' ? document.getElementById(btnOrId) : btnOrId;
+  if (!btn) return;
+  const label = btn.querySelector('.btn-label');
+  if (label) label.textContent = text;
+  else btn.textContent = text;
+}
+
 function secToMs(sec, fallback) {
   const n = Number(sec);
   return Number.isFinite(n) && n > 0 ? n * 1000 : fallback;
 }
 
 // ---------- theme ----------
+// A permanently-visible segmented pill (System/Light/Dark) in the header —
+// no open/close state to manage, unlike the dropdown this replaced, so
+// this just keeps the sliding thumb and each button's active/color state
+// in sync with STATE.settings.theme.
+const THEME_SEG_ORDER = ['system', 'light', 'dark'];
 function applyTheme() {
   const theme = STATE.settings.theme || 'system';
   if (theme === 'system') {
@@ -499,21 +641,16 @@ function applyTheme() {
   } else {
     document.documentElement.setAttribute('data-theme', theme);
   }
-  document.querySelectorAll('.theme-option-btn').forEach((btn) => {
+  document.querySelectorAll('.theme-seg-btn').forEach((btn) => {
     btn.classList.toggle('active', btn.dataset.theme === theme);
   });
+  const idx = THEME_SEG_ORDER.indexOf(theme);
+  document.getElementById('themeSegmentThumb').style.transform = `translateX(${Math.max(0, idx) * 26}px)`;
 }
 
-document.getElementById('themeToggleBtn').addEventListener('click', (e) => {
-  e.stopPropagation();
-  const panel = document.getElementById('themePanel');
-  panel.style.display = panel.style.display === 'none' ? '' : 'none';
-});
-document.getElementById('themePanel').addEventListener('click', (e) => e.stopPropagation());
-document.querySelectorAll('.theme-option-btn').forEach((btn) => {
+document.querySelectorAll('.theme-seg-btn').forEach((btn) => {
   btn.addEventListener('click', async () => {
     await call('saveSettings', { settings: { theme: btn.dataset.theme } });
-    document.getElementById('themePanel').style.display = 'none';
     refresh();
   });
 });
@@ -541,7 +678,44 @@ document.getElementById('masterToggleBtn').addEventListener('click', async () =>
   refresh();
 });
 
+// ---------- privacy screen blur ----------
+// The actual blurring happens on the WhatsApp Web page itself (content.js);
+// this button just flips the setting — background.js's saveSettings
+// handler pushes it live to an already-open WA tab.
+function renderPrivacyBlurToggle() {
+  const on = !!STATE.settings.privacyBlur;
+  const btn = document.getElementById('privacyBlurBtn');
+  btn.classList.toggle('on', on);
+  btn.dataset.tooltip = on
+    ? 'Blurring chat names, photos & messages — click to turn off'
+    : 'Blur chat names, photos & messages (screen-sharing)';
+}
+
+document.getElementById('privacyBlurBtn').addEventListener('click', async () => {
+  const on = !!STATE.settings.privacyBlur;
+  await call('saveSettings', { settings: { privacyBlur: !on } });
+  refresh();
+});
+
+// Shows the shortcut Chrome actually has bound right now, not just the
+// manifest's suggested default — the user may have already changed it
+// (or cleared it) via chrome://extensions/shortcuts, which this can read
+// but never write to; only Chrome's own page can rebind a command.
+function renderPrivacyShortcut() {
+  chrome.commands.getAll((commands) => {
+    const cmd = (commands || []).find((c) => c.name === 'toggle-privacy-blur');
+    document.getElementById('privacyShortcutKey').textContent = (cmd && cmd.shortcut) || 'Not set';
+  });
+}
+document.getElementById('changeShortcutBtn').addEventListener('click', () => {
+  chrome.tabs.create({ url: 'chrome://extensions/shortcuts' });
+});
+
 // ---------- tabs ----------
+// .just-selected is a one-shot trigger for the icon "key" pop/motion CSS
+// (see popup.css's .tab-btn.just-selected rules) — added on click, removed
+// after the animation finishes so clicking the same tab again re-triggers
+// it instead of the class already being present doing nothing.
 document.querySelectorAll('.tab-btn').forEach((btn) => {
   btn.addEventListener('click', () => {
     document.querySelectorAll('.tab-btn').forEach((b) => b.classList.remove('active'));
@@ -549,6 +723,11 @@ document.querySelectorAll('.tab-btn').forEach((btn) => {
     btn.classList.add('active');
     document.getElementById(`tab-${btn.dataset.tab}`).classList.add('active');
     chrome.storage.local.set({ lastTab: btn.dataset.tab });
+    btn.classList.remove('just-selected');
+    void btn.offsetWidth; // force a reflow so re-adding the class restarts the animation
+    btn.classList.add('just-selected');
+    clearTimeout(btn._justSelectedTimer);
+    btn._justSelectedTimer = setTimeout(() => btn.classList.remove('just-selected'), 450);
   });
 });
 
@@ -581,6 +760,23 @@ chrome.storage.local.get(['openSendPanelMessageId'], (data) => {
   }
 });
 
+// buildSendPanel() is mounted in two places: under a message row (Messages
+// tab, the original use) and inside the Campaigns tab's "new/edit campaign"
+// flow, which mounts the exact same panel for a message picked there — same
+// schedules, same storage, just a second doorway to it (no separate
+// campaign entity). Whichever place currently has it mounted points this at
+// its own re-render function, so the panel's internal actions (save
+// schedule, toggle/run/delete, close) refresh the right tab instead of
+// always assuming Messages. Reset to renderMessages by whichever context
+// isn't using it, so it's never left pointing at a torn-down view.
+let sendPanelRerender = renderMessages;
+// Which message's schedule editor is mounted in the Campaigns tab's "new/
+// edit campaign" flow, or null if just the message picker is showing.
+// Mirrors openSendPanelMessageId's role for the Messages tab — only one of
+// the two is ever open at a time app-wide (see the [data-act="send"] and
+// campaign picker handlers, which each close the other).
+let campaignEditorMessageId = null;
+
 // Schedule-editor state for whichever message's send panel is currently
 // open. A message can hold several schedules (each with its own target
 // list(s) and timing); these track which one, if any, is being
@@ -598,6 +794,7 @@ function resetScheduleEditor() {
   scheduleType = 'times';
   scheduleTimes = [];
   scheduleDatetimes = [];
+  scheduleAdvancedOpen = false;
 }
 
 function startEditingSchedule(schedule) {
@@ -606,6 +803,10 @@ function startEditingSchedule(schedule) {
   scheduleType = schedule.scheduleType || 'times';
   scheduleTimes = (schedule.times || []).slice();
   scheduleDatetimes = (schedule.datetimes || []).filter(Boolean).slice();
+  // Open Advanced by default when the schedule being edited actually has
+  // something in there — otherwise a custom delay/label would be silently
+  // hidden behind the collapsed section on every re-open.
+  scheduleAdvancedOpen = !schedule.useDefaultDelay || !!(schedule.label && schedule.label.trim());
 }
 
 // Same field names as a schedule object (scheduleType/times/intervalMinutes/
@@ -645,7 +846,8 @@ function saveDraft() {
       editingMessageSrNo,
       headerFooterMode: composingHfMode,
       headerText: composingHfHeaderText,
-      footerText: composingHfFooterText
+      footerText: composingHfFooterText,
+      autoReply: composingAutoReply
     }
   });
 }
@@ -668,9 +870,10 @@ function restoreDraft() {
     composingHfMode = draft.headerFooterMode || 'default';
     composingHfHeaderText = draft.headerText || '';
     composingHfFooterText = draft.footerText || '';
+    composingAutoReply = draft.autoReply || defaultAutoReply();
     document.getElementById('msgLabelRow').style.display = editingMessageId ? '' : 'none';
     renderComposingItems();
-    document.getElementById('saveMessageBtn').textContent = editingMessageId ? 'Update message' : 'Save message';
+    setBtnLabel('saveMessageBtn', editingMessageId ? 'Update message' : 'Save message');
     document.getElementById('cancelEditMessageBtn').style.display = editingMessageId ? '' : 'none';
   });
 }
@@ -826,9 +1029,255 @@ document.getElementById('addTextItemBtn').addEventListener('click', addTextThrea
 // Ctrl/Cmd+Enter does the same thing as the + button — plain Enter still
 // just inserts a newline, same as any multi-line text box.
 document.getElementById('msgText').addEventListener('keydown', (e) => {
-  if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) {
+  if (e.key === 'Enter' && (e.ctrlKey || e.metaKey) && e.shiftKey) {
+    e.preventDefault();
+    quickSendToNumber();
+  } else if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) {
     e.preventDefault();
     addTextThread();
+  }
+});
+
+// ---------- country code picker (for the quick-send number box) ----------
+// [iso2, dial, name] — dial codes are ITU country calling codes, stable and
+// not something that changes. Sorted by name for the dropdown's default
+// (unfiltered) order; search matches by name substring or by dial code
+// (with or without a leading "+").
+const COUNTRIES = [
+  ['AF','93','Afghanistan'],['AL','355','Albania'],['DZ','213','Algeria'],['AD','376','Andorra'],
+  ['AO','244','Angola'],['AG','1268','Antigua and Barbuda'],['AR','54','Argentina'],['AM','374','Armenia'],
+  ['AU','61','Australia'],['AT','43','Austria'],['AZ','994','Azerbaijan'],['BS','1242','Bahamas'],
+  ['BH','973','Bahrain'],['BD','880','Bangladesh'],['BB','1246','Barbados'],['BY','375','Belarus'],
+  ['BE','32','Belgium'],['BZ','501','Belize'],['BJ','229','Benin'],['BT','975','Bhutan'],
+  ['BO','591','Bolivia'],['BA','387','Bosnia and Herzegovina'],['BW','267','Botswana'],['BR','55','Brazil'],
+  ['BN','673','Brunei'],['BG','359','Bulgaria'],['BF','226','Burkina Faso'],['BI','257','Burundi'],
+  ['KH','855','Cambodia'],['CM','237','Cameroon'],['CA','1','Canada'],['CV','238','Cape Verde'],
+  ['CF','236','Central African Republic'],['TD','235','Chad'],['CL','56','Chile'],['CN','86','China'],
+  ['CO','57','Colombia'],['KM','269','Comoros'],['CD','243','Congo (DRC)'],['CG','242','Congo (Republic)'],
+  ['CR','506','Costa Rica'],['HR','385','Croatia'],['CU','53','Cuba'],['CY','357','Cyprus'],
+  ['CZ','420','Czech Republic'],['DK','45','Denmark'],['DJ','253','Djibouti'],['DM','1767','Dominica'],
+  ['DO','1809','Dominican Republic'],['EC','593','Ecuador'],['EG','20','Egypt'],['SV','503','El Salvador'],
+  ['GQ','240','Equatorial Guinea'],['ER','291','Eritrea'],['EE','372','Estonia'],['SZ','268','Eswatini'],
+  ['ET','251','Ethiopia'],['FJ','679','Fiji'],['FI','358','Finland'],['FR','33','France'],
+  ['GA','241','Gabon'],['GM','220','Gambia'],['GE','995','Georgia'],['DE','49','Germany'],
+  ['GH','233','Ghana'],['GR','30','Greece'],['GD','1473','Grenada'],['GT','502','Guatemala'],
+  ['GN','224','Guinea'],['GW','245','Guinea-Bissau'],['GY','592','Guyana'],['HT','509','Haiti'],
+  ['HN','504','Honduras'],['HK','852','Hong Kong'],['HU','36','Hungary'],['IS','354','Iceland'],
+  ['IN','91','India'],['ID','62','Indonesia'],['IR','98','Iran'],['IQ','964','Iraq'],
+  ['IE','353','Ireland'],['IL','972','Israel'],['IT','39','Italy'],['CI','225',"Ivory Coast"],
+  ['JM','1876','Jamaica'],['JP','81','Japan'],['JO','962','Jordan'],['KZ','7','Kazakhstan'],
+  ['KE','254','Kenya'],['KI','686','Kiribati'],['XK','383','Kosovo'],['KW','965','Kuwait'],
+  ['KG','996','Kyrgyzstan'],['LA','856','Laos'],['LV','371','Latvia'],['LB','961','Lebanon'],
+  ['LS','266','Lesotho'],['LR','231','Liberia'],['LY','218','Libya'],['LI','423','Liechtenstein'],
+  ['LT','370','Lithuania'],['LU','352','Luxembourg'],['MO','853','Macau'],['MG','261','Madagascar'],
+  ['MW','265','Malawi'],['MY','60','Malaysia'],['MV','960','Maldives'],['ML','223','Mali'],
+  ['MT','356','Malta'],['MH','692','Marshall Islands'],['MR','222','Mauritania'],['MU','230','Mauritius'],
+  ['MX','52','Mexico'],['FM','691','Micronesia'],['MD','373','Moldova'],['MC','377','Monaco'],
+  ['MN','976','Mongolia'],['ME','382','Montenegro'],['MA','212','Morocco'],['MZ','258','Mozambique'],
+  ['MM','95','Myanmar'],['NA','264','Namibia'],['NR','674','Nauru'],['NP','977','Nepal'],
+  ['NL','31','Netherlands'],['NZ','64','New Zealand'],['NI','505','Nicaragua'],['NE','227','Niger'],
+  ['NG','234','Nigeria'],['KP','850','North Korea'],['MK','389','North Macedonia'],['NO','47','Norway'],
+  ['OM','968','Oman'],['PK','92','Pakistan'],['PW','680','Palau'],['PS','970','Palestine'],
+  ['PA','507','Panama'],['PG','675','Papua New Guinea'],['PY','595','Paraguay'],['PE','51','Peru'],
+  ['PH','63','Philippines'],['PL','48','Poland'],['PT','351','Portugal'],['QA','974','Qatar'],
+  ['RO','40','Romania'],['RU','7','Russia'],['RW','250','Rwanda'],['KN','1869','Saint Kitts and Nevis'],
+  ['LC','1758','Saint Lucia'],['VC','1784','Saint Vincent and the Grenadines'],['WS','685','Samoa'],
+  ['SM','378','San Marino'],['ST','239','Sao Tome and Principe'],['SA','966','Saudi Arabia'],
+  ['SN','221','Senegal'],['RS','381','Serbia'],['SC','248','Seychelles'],['SL','232','Sierra Leone'],
+  ['SG','65','Singapore'],['SK','421','Slovakia'],['SI','386','Slovenia'],['SB','677','Solomon Islands'],
+  ['SO','252','Somalia'],['ZA','27','South Africa'],['KR','82','South Korea'],['SS','211','South Sudan'],
+  ['ES','34','Spain'],['LK','94','Sri Lanka'],['SD','249','Sudan'],['SR','597','Suriname'],
+  ['SE','46','Sweden'],['CH','41','Switzerland'],['SY','963','Syria'],['TW','886','Taiwan'],
+  ['TJ','992','Tajikistan'],['TZ','255','Tanzania'],['TH','66','Thailand'],['TL','670','Timor-Leste'],
+  ['TG','228','Togo'],['TO','676','Tonga'],['TT','1868','Trinidad and Tobago'],['TN','216','Tunisia'],
+  ['TR','90','Turkey'],['TM','993','Turkmenistan'],['TV','688','Tuvalu'],['UG','256','Uganda'],
+  ['UA','380','Ukraine'],['AE','971','United Arab Emirates'],['GB','44','United Kingdom'],
+  ['US','1','United States'],['UY','598','Uruguay'],['UZ','998','Uzbekistan'],['VU','678','Vanuatu'],
+  ['VA','379','Vatican City'],['VE','58','Venezuela'],['VN','84','Vietnam'],['YE','967','Yemen'],
+  ['ZM','260','Zambia'],['ZW','263','Zimbabwe']
+].map(([iso2, dial, name]) => ({ iso2, dial, name }));
+
+// Real flag images (not emoji — Windows has no flag glyphs, so Chrome there
+// just shows the raw two letters, "PK" instead of an actual flag; not a
+// generated approximation either, actual per-country artwork). Downloaded
+// from flagcdn.com exactly once — background.js's ensureFlagCache() does it
+// right after install and stores the results as data URLs in
+// chrome.storage.local, so there's never a repeat download on a normal
+// popup open. This call is just the popup's own safety net (self-heals if
+// the cache was cleared or partially written) — background.js's own
+// ensureFlagCache short-circuits instantly when nothing's missing.
+let flagCache = {};
+call('ensureFlagsCached', {}).then((res) => {
+  if (!res || !res.ok) return;
+  flagCache = res.cache || {};
+  // Re-render whatever's already on screen now that real flags are in —
+  // matters the first time only (right after a fresh install, before the
+  // cache exists yet); every later popup open already has it and this is a
+  // no-op repaint of the same images.
+  if (selectedCountry) document.getElementById('countryCodeFlag').innerHTML = flagIconHtml(selectedCountry.iso2);
+  const dropdown = document.getElementById('countryCodeDropdown');
+  if (dropdown.style.display !== 'none') renderCountryList(document.getElementById('countryCodeSearch').value);
+});
+function flagIconHtml(iso2) {
+  const dataUrl = flagCache[iso2];
+  if (dataUrl) return `<img class="cc-flag-img" src="${dataUrl}" width="20" height="14" alt="" />`;
+  return '<span class="cc-flag-placeholder"></span>'; // only shown for the few seconds before the very first cache finishes
+}
+
+let selectedCountry = null;
+chrome.storage.local.get(['quickSendCountryIso'], (data) => {
+  if (data.quickSendCountryIso) {
+    const c = COUNTRIES.find((x) => x.iso2 === data.quickSendCountryIso);
+    if (c) selectCountry(c, { skipFocus: true });
+  }
+});
+
+// Only updates the picker's own state/display — trimming a typed dial code
+// back out of the number field (see the auto-detect input listener below)
+// is the caller's job, not this function's, since a plain dropdown pick has
+// nothing in the field to trim.
+function selectCountry(country, { skipFocus = false } = {}) {
+  selectedCountry = country;
+  document.getElementById('countryCodeFlag').innerHTML = flagIconHtml(country.iso2);
+  // Display is flag-only (no "+92" text alongside it) — the dial code still
+  // shows up as the button's tooltip so it's not lost, just not cluttering
+  // the row.
+  document.getElementById('countryCodeBtn').dataset.tooltip = `${country.name} (+${country.dial})`;
+  chrome.storage.local.set({ quickSendCountryIso: country.iso2 });
+  closeCountryDropdown();
+  if (!skipFocus) document.getElementById('quickSendNumber').focus();
+}
+
+function renderCountryList(filter) {
+  const list = document.getElementById('countryCodeList');
+  const q = (filter || '').trim().toLowerCase();
+  const qDigits = q.replace(/^\+/, '');
+  const matches = !q
+    ? COUNTRIES
+    : COUNTRIES.filter((c) => c.name.toLowerCase().includes(q) || (qDigits && c.dial.startsWith(qDigits)));
+  if (matches.length === 0) {
+    list.innerHTML = '<p class="cc-no-match">No matching country.</p>';
+    return;
+  }
+  list.innerHTML = matches
+    .map(
+      (c) => `<button type="button" class="cc-option${selectedCountry && selectedCountry.iso2 === c.iso2 ? ' active' : ''}" data-iso2="${c.iso2}">
+        <span class="cc-flag">${flagIconHtml(c.iso2)}</span><span class="cc-name">${escapeHtml(c.name)}</span><span class="cc-code">+${c.dial}</span>
+      </button>`
+    )
+    .join('');
+  list.querySelectorAll('.cc-option').forEach((btn) => {
+    btn.addEventListener('click', () => {
+      const c = COUNTRIES.find((x) => x.iso2 === btn.dataset.iso2);
+      if (c) selectCountry(c);
+    });
+  });
+}
+
+function openCountryDropdown() {
+  document.getElementById('countryCodeDropdown').style.display = 'block';
+  document.getElementById('countryCodeBtn').classList.add('open');
+  const search = document.getElementById('countryCodeSearch');
+  search.value = '';
+  renderCountryList('');
+  search.focus();
+}
+function closeCountryDropdown() {
+  document.getElementById('countryCodeDropdown').style.display = 'none';
+  document.getElementById('countryCodeBtn').classList.remove('open');
+}
+document.getElementById('countryCodeBtn').addEventListener('click', () => {
+  const open = document.getElementById('countryCodeDropdown').style.display !== 'none';
+  if (open) closeCountryDropdown();
+  else openCountryDropdown();
+});
+document.getElementById('countryCodeSearch').addEventListener('input', (e) => renderCountryList(e.target.value));
+document.getElementById('countryCodeSearch').addEventListener('keydown', (e) => {
+  if (e.key === 'Escape') {
+    closeCountryDropdown();
+  } else if (e.key === 'Enter') {
+    e.preventDefault();
+    const first = document.querySelector('#countryCodeList .cc-option');
+    if (first) first.click(); // top result of whatever's currently filtered — same one a mouse click on the first row would pick
+  }
+});
+document.addEventListener('click', (e) => {
+  if (!e.target.closest('.country-code-picker')) closeCountryDropdown();
+});
+
+// Longest-dial-code-first match, so e.g. "+1246" resolves to Barbados
+// rather than stopping at the shorter "+1" (US/Canada) prefix.
+const COUNTRIES_BY_DIAL_LEN = [...COUNTRIES].sort((a, b) => b.dial.length - a.dial.length);
+function matchDialCode(digits) {
+  return COUNTRIES_BY_DIAL_LEN.find((c) => digits.startsWith(c.dial));
+}
+// Typing (or pasting) a full international number straight into the number
+// box — e.g. "+923344300709" — auto-selects the matching country and trims
+// the dial code back out of the field, so the field always holds just the
+// local number and the picker is the single source of truth for the dial
+// code added at send time (never both at once).
+document.getElementById('quickSendNumber').addEventListener('input', (e) => {
+  const raw = e.target.value;
+  if (!raw.trim().startsWith('+')) return;
+  const digits = raw.replace(/\D/g, '');
+  const match = matchDialCode(digits);
+  if (match) {
+    selectCountry(match, { skipFocus: true });
+    e.target.value = digits.slice(match.dial.length);
+  }
+});
+
+// Quick send — types a number above the composer and sends whatever's
+// staged there (Ctrl+Shift+Enter or the send icon inside the number box)
+// straight to it via sendNowToNumber, without saving anything or needing
+// the number in a list first. Same getEffectiveItems() fallback as
+// sendWithoutSavingBtn: an untouched box still sends whatever's typed.
+async function quickSendToNumber() {
+  const numberInput = document.getElementById('quickSendNumber');
+  const localDigits = numberInput.value.replace(/\D/g, '');
+  if (!localDigits) {
+    showToast('Enter a phone number to quick-send to first.', 'error');
+    numberInput.focus();
+    return;
+  }
+  // A local number is usually typed with its trunk prefix ("0332...", the
+  // "dial 0 to get an outside line" digit most numbering plans use) — that
+  // 0 has to come off before the country's dial code goes on the front, or
+  // the number is wrong (e.g. 0332... under +92 must send as 92332..., not
+  // 920332...). Only touches the copy sent to background.js — the box
+  // itself keeps showing exactly what was typed.
+  const nationalDigits = selectedCountry ? localDigits.replace(/^0/, '') : localDigits;
+  const number = (selectedCountry ? selectedCountry.dial : '') + nationalDigits;
+  if (getEffectiveItems().length === 0) {
+    showToast('Add at least one text thread or attachment first.', 'error');
+    return;
+  }
+  if (!STATE.settings.consentAccepted) {
+    showToast('Accept the consent checkbox on the Settings tab first — sending is gated behind it, even for a quick send.', 'error');
+    return;
+  }
+  const btn = document.getElementById('quickSendBtn');
+  btn.disabled = true;
+  const messageOverride = { headerFooterMode: composingHfMode, headerText: composingHfHeaderText, footerText: composingHfFooterText };
+  const res = await call('sendNowToNumber', {
+    number,
+    items: getEffectiveItems(),
+    sendSeparator: sendPanelSeparatorPref,
+    messageOverride
+  });
+  btn.disabled = false;
+  if (!res.ok) {
+    showToast(res.error || 'Could not send.', 'error');
+    return;
+  }
+  showToast(`Sending to ${res.chatName || number}…`, 'success');
+  numberInput.value = ''; // only the number clears — text/attachments stay, same as Send Now leaves the composer untouched
+}
+document.getElementById('quickSendBtn').addEventListener('click', quickSendToNumber);
+document.getElementById('quickSendNumber').addEventListener('keydown', (e) => {
+  if (e.key === 'Enter' && (e.ctrlKey || e.metaKey) && e.shiftKey) {
+    e.preventDefault();
+    quickSendToNumber();
   }
 });
 
@@ -881,6 +1330,7 @@ async function handleClearAllItems() {
   composingItems = [];
   editingThreadItem = null;
   hfPanelItem = null;
+  bulkHfPanelOpen = false;
   renderComposingItems();
   saveDraft();
 }
@@ -899,16 +1349,23 @@ function editTextThread(idx) {
   textarea.focus();
 }
 
-// Shared chip+textarea markup for a header/footer override panel — used by
-// both the whole-message control and each per-thread one below it.
-// `inheritHint` names what "Default" falls back to, for the hint text.
-function hfPanelHtml(mode, headerText, footerText, scopeLabel, inheritHint) {
-  const chips = ['default', 'custom', 'off']
+// Shared radio-group+textarea markup for a header/footer override panel —
+// used by both the whole-message control and each per-thread one below it.
+// Default/Custom/Off are mutually exclusive, so real radio inputs (themed
+// via accent-color, same as this app's checkboxes) rather than
+// toggle-button chips — `groupName` keeps the message-level and per-thread
+// radio groups from cross-syncing (only one of each is ever in the DOM at
+// once, but they'd still share native radio-group state if both used the
+// same `name`). `inheritHint` names what "Default" falls back to.
+// `extraHtml` is appended inside the panel — used for the bulk tool's
+// "Apply to all" button, which no other caller needs.
+function hfPanelHtml(mode, headerText, footerText, scopeLabel, inheritHint, groupName, extraHtml = '') {
+  const radios = ['default', 'custom', 'off']
     .map(
-      (m) =>
-        `<button type="button" class="kind-btn hf-mode-btn${mode === m ? ' active' : ''}" data-hf-mode="${m}">${
-          m === 'default' ? 'Default' : m === 'custom' ? 'Custom' : 'Off'
-        }</button>`
+      (m) => `<label class="hf-radio-option">
+        <input type="radio" name="${groupName}" value="${m}"${mode === m ? ' checked' : ''} />
+        <span>${m === 'default' ? 'Default' : m === 'custom' ? 'Custom' : 'Off'}</span>
+      </label>`
     )
     .join('');
   let body;
@@ -919,27 +1376,30 @@ function hfPanelHtml(mode, headerText, footerText, scopeLabel, inheritHint) {
   } else {
     body = `<p class="hf-panel-hint">Uses ${inheritHint}.</p>`;
   }
-  return `<div class="hf-panel"><div class="kind-toggle hf-mode-chips">${chips}</div>${body}</div>`;
+  return `<div class="hf-panel"><div class="hf-mode-radios">${radios}</div>${body}${extraHtml}</div>`;
 }
 
 // Header/footer for the whole message being composed — see the
-// composingHfMode declaration above for the resolution order.
+// composingHfMode declaration above for the resolution order. The toggle
+// button itself is static markup right in the icon row next to +/attach
+// (popup.html) so it's always visible, even before anything's been added
+// to the message — only its open/mode-dot state and the expandable panel
+// below it are re-rendered here.
 function renderMessageHfControl() {
+  const toggleBtn = document.getElementById('msgHfToggleBtn');
+  const dot = document.getElementById('msgHfDot');
   const container = document.getElementById('msgHeaderFooterControl');
-  if (!container) return;
-  const modeLabel = composingHfMode === 'custom' ? 'Custom' : composingHfMode === 'off' ? 'Off' : 'Default';
-  container.innerHTML = `<div class="hf-control">
-      <button type="button" class="hf-toggle-btn${messageHfPanelOpen ? ' open' : ''}" id="msgHfToggleBtn" data-tooltip="Header/footer for this message — overrides the global Settings default">${HF_ICON_SVG}<span>Header/Footer</span></button>
-      <span class="hf-mode-badge ${composingHfMode}">${modeLabel}</span>
-    </div>${messageHfPanelOpen ? hfPanelHtml(composingHfMode, composingHfHeaderText, composingHfFooterText, 'this message', 'the global header/footer set on the Settings tab') : ''}`;
-  document.getElementById('msgHfToggleBtn').addEventListener('click', () => {
-    messageHfPanelOpen = !messageHfPanelOpen;
-    renderMessageHfControl();
-  });
+  if (!toggleBtn || !dot || !container) return;
+  toggleBtn.classList.toggle('open', messageHfPanelOpen);
+  dot.style.display = composingHfMode === 'default' ? 'none' : '';
+  dot.className = `hf-dot ${composingHfMode}`;
+  container.innerHTML = messageHfPanelOpen
+    ? hfPanelHtml(composingHfMode, composingHfHeaderText, composingHfFooterText, 'this message', 'the global header/footer set on the Settings tab', 'hfMode-message')
+    : '';
   if (!messageHfPanelOpen) return;
-  container.querySelectorAll('.hf-mode-btn').forEach((btn) => {
-    btn.addEventListener('click', () => {
-      composingHfMode = btn.dataset.hfMode;
+  container.querySelectorAll('input[name="hfMode-message"]').forEach((radio) => {
+    radio.addEventListener('change', (e) => {
+      composingHfMode = e.target.value;
       saveDraft();
       renderMessageHfControl();
     });
@@ -959,9 +1419,144 @@ function renderMessageHfControl() {
     });
   }
 }
+document.getElementById('msgHfToggleBtn').addEventListener('click', () => {
+  messageHfPanelOpen = !messageHfPanelOpen;
+  renderMessageHfControl();
+});
+
+// ---------- auto-reply panel (compose form) ----------
+function autoReplyTriggerRowHtml(t, idx) {
+  const isRegex = t.type === 'regex';
+  return `
+    <div class="ar-trigger-row" data-idx="${idx}">
+      <select class="ar-trigger-type">
+        <option value="phrase"${isRegex ? '' : ' selected'}>Phrase</option>
+        <option value="regex"${isRegex ? ' selected' : ''}>Regex</option>
+      </select>
+      <input type="text" class="ar-trigger-value" placeholder="${isRegex ? 'e.g. hotel\\s*dates?' : 'e.g. hotel dates'}" value="${escapeHtml(t.value || '')}" />
+      <label class="ar-case-label" data-tooltip="Case sensitive"><input type="checkbox" class="ar-trigger-case"${t.caseSensitive ? ' checked' : ''} />Aa</label>
+      <button type="button" class="icon-btn small-icon-btn ar-trigger-remove" data-tooltip="Remove trigger">${DELETE_ICON_SVG}</button>
+    </div>`;
+}
+
+function autoReplyPanelHtml(ar) {
+  const rows = (ar.triggers || []).map((t, i) => autoReplyTriggerRowHtml(t, i)).join('');
+  return `
+    <div class="hf-panel ar-panel">
+      <label class="ar-enable-row">
+        <input type="checkbox" class="ar-enabled-checkbox"${ar.enabled ? ' checked' : ''} />
+        <span>Auto-reply with this message when a trigger below matches an incoming chat/group message</span>
+      </label>
+      <p class="hf-panel-hint">Sends instantly, no delay — only while a WhatsApp Web tab is open. Never triggers on your own messages.</p>
+      <div class="ar-triggers">${rows || '<p class="hf-panel-hint">No triggers yet — add one below.</p>'}</div>
+      <button type="button" class="ghost small-inline ar-add-trigger-btn"><svg viewBox="0 0 24 24" width="12" height="12"><path fill="currentColor" d="M19 13h-6v6h-2v-6H5v-2h6V5h2v6h6z"/></svg><span class="btn-label">Add trigger</span></button>
+      <div class="ar-cooldown-row">
+        <label><input type="checkbox" class="ar-cooldown-enabled-checkbox"${ar.cooldownEnabled ? ' checked' : ''} /> Limit repeats: once every</label>
+        <input type="number" class="ar-cooldown-value-input" min="0" step="1" value="${ar.cooldownValue != null ? ar.cooldownValue : 60}"${ar.cooldownEnabled ? '' : ' disabled'} />
+        <select class="ar-cooldown-unit-select"${ar.cooldownEnabled ? '' : ' disabled'}>
+          <option value="seconds"${ar.cooldownUnit === 'seconds' ? ' selected' : ''}>seconds</option>
+          <option value="minutes"${!ar.cooldownUnit || ar.cooldownUnit === 'minutes' ? ' selected' : ''}>minutes</option>
+          <option value="hours"${ar.cooldownUnit === 'hours' ? ' selected' : ''}>hours</option>
+        </select>
+        <span>per chat</span>
+      </div>
+    </div>`;
+}
+
+// Shared editor for an autoReply object, used both by the compose form's
+// collapsible panel and by the standalone Auto-reply tab's per-message row.
+// `ar` is mutated in place; `persist(ar)` is called after every change so
+// each caller decides how/when that lands in storage (the compose form
+// just keeps it in the in-progress draft until "Save message"; the
+// Auto-reply tab saves the message immediately, since there's no separate
+// compose step there). Scoped entirely to `container` via querySelector
+// (never getElementById) so two instances of this panel can exist in the
+// DOM at once — the compose form's and a tab row's — without id clashes.
+function bindAutoReplyPanel(container, ar, persist) {
+  function rerender() {
+    container.innerHTML = autoReplyPanelHtml(ar);
+    wire();
+  }
+  function wire() {
+    container.querySelector('.ar-enabled-checkbox').addEventListener('change', (e) => {
+      ar.enabled = e.target.checked;
+      persist(ar);
+      rerender();
+    });
+    container.querySelectorAll('.ar-trigger-row').forEach((row) => {
+      const idx = Number(row.dataset.idx);
+      row.querySelector('.ar-trigger-type').addEventListener('change', (e) => {
+        ar.triggers[idx].type = e.target.value;
+        persist(ar);
+        rerender();
+      });
+      row.querySelector('.ar-trigger-value').addEventListener('input', (e) => {
+        ar.triggers[idx].value = e.target.value;
+        persist(ar);
+      });
+      row.querySelector('.ar-trigger-case').addEventListener('change', (e) => {
+        ar.triggers[idx].caseSensitive = e.target.checked;
+        persist(ar);
+      });
+      row.querySelector('.ar-trigger-remove').addEventListener('click', () => {
+        ar.triggers.splice(idx, 1);
+        persist(ar);
+        rerender();
+      });
+    });
+    container.querySelector('.ar-add-trigger-btn').addEventListener('click', () => {
+      ar.triggers.push({ type: 'phrase', value: '', caseSensitive: false });
+      persist(ar);
+      rerender();
+    });
+    container.querySelector('.ar-cooldown-enabled-checkbox').addEventListener('change', (e) => {
+      ar.cooldownEnabled = e.target.checked;
+      persist(ar);
+      rerender();
+    });
+    const cooldownValueInput = container.querySelector('.ar-cooldown-value-input');
+    if (cooldownValueInput) {
+      cooldownValueInput.addEventListener('input', (e) => {
+        ar.cooldownValue = e.target.value === '' ? 0 : Number(e.target.value);
+        persist(ar);
+      });
+    }
+    const cooldownUnitSelect = container.querySelector('.ar-cooldown-unit-select');
+    if (cooldownUnitSelect) {
+      cooldownUnitSelect.addEventListener('change', (e) => {
+        ar.cooldownUnit = e.target.value;
+        persist(ar);
+      });
+    }
+  }
+  rerender();
+}
+
+function renderMessageAutoReplyControl() {
+  const toggleBtn = document.getElementById('msgAutoReplyToggleBtn');
+  const dot = document.getElementById('msgAutoReplyDot');
+  const container = document.getElementById('msgAutoReplyControl');
+  if (!toggleBtn || !dot || !container) return;
+  toggleBtn.classList.toggle('open', messageAutoReplyPanelOpen);
+  dot.style.display = composingAutoReply.enabled ? '' : 'none';
+  dot.className = 'hf-dot custom';
+  if (!messageAutoReplyPanelOpen) {
+    container.innerHTML = '';
+    return;
+  }
+  // composingAutoReply is passed directly (not a copy) — bindAutoReplyPanel
+  // mutates it in place, and saveDraft() below just reads that same
+  // module-level object, exactly like composingHfMode's own textareas do.
+  bindAutoReplyPanel(container, composingAutoReply, () => saveDraft());
+}
+document.getElementById('msgAutoReplyToggleBtn').addEventListener('click', () => {
+  messageAutoReplyPanelOpen = !messageAutoReplyPanelOpen;
+  renderMessageAutoReplyControl();
+});
 
 function renderComposingItems() {
   renderMessageHfControl();
+  renderMessageAutoReplyControl();
   const box = document.getElementById('composingItems');
   // Nothing to show or manage yet — hide the whole section rather than a
   // box with a placeholder hint inside it; the textarea's own placeholder
@@ -981,9 +1576,24 @@ function renderComposingItems() {
   // All-text = "Threads", all-attachments = "Attachments", a mix of both
   // (or, in principle, neither) = the generic "Items".
   const sectionLabel = hasText && hasMedia ? 'Items' : hasMedia ? 'Attachments' : hasText ? 'Threads' : 'Items';
+  // "Apply to all" copies bulkHfMode/HeaderText/FooterText onto every item
+  // below when clicked — nothing changes just from opening this panel or
+  // picking a mode, only the explicit Apply button commits it.
+  const bulkHfPanel = bulkHfPanelOpen
+    ? `<div class="bulk-hf-wrap">${hfPanelHtml(
+        bulkHfMode,
+        bulkHfHeaderText,
+        bulkHfFooterText,
+        'every thread/attachment below',
+        'the message header/footer setting',
+        'hfMode-bulk',
+        `<button type="button" class="ghost small-inline hf-bulk-apply-btn">${CHECK_ICON_SVG}<span class="btn-label">Apply to all below</span></button>`
+      )}</div>`
+    : '';
   const toolbarHtml = `<div class="composing-toolbar">
     <span class="muted">${sectionLabel} (${composingItems.length})</span>
     <div class="composing-toolbar-actions">
+      <button type="button" class="icon-btn small-icon-btn${bulkHfPanelOpen ? ' open' : ''}" data-act="bulkHf" data-tooltip="Set header/footer for every thread/attachment at once">${HF_ICON_SVG}</button>
       <button type="button" class="icon-btn small-icon-btn" data-act="fillCaptions" data-tooltip="Use file names as captions">
         <svg viewBox="0 0 24 24" width="14" height="14"><path fill="currentColor" d="M17.63 5.84C17.27 5.33 16.67 5 16 5L5 5.01C3.9 5.01 3 5.9 3 7v10c0 1.1.9 1.99 2 1.99L16 19c.67 0 1.27-.33 1.63-.84L22 12l-4.37-6.16Z"/></svg>
       </button>
@@ -991,7 +1601,7 @@ function renderComposingItems() {
         <svg viewBox="0 0 24 24" width="14" height="14"><path fill="currentColor" d="M6 19a2 2 0 0 0 2 2h8a2 2 0 0 0 2-2V7H6v12ZM19 4h-3.5l-1-1h-5l-1 1H5v2h14V4Z"/></svg>
       </button>
     </div>
-  </div>`;
+  </div>${bulkHfPanel}`;
   box.innerHTML =
     toolbarHtml +
     composingItems
@@ -1013,7 +1623,7 @@ function renderComposingItems() {
           : '';
       const hfPanelOpen = item === hfPanelItem;
       const hfPanel = hfPanelOpen
-        ? hfPanelHtml(hfMode, item.headerText, item.footerText, 'this thread', "this message's header/footer setting")
+        ? hfPanelHtml(hfMode, item.headerText, item.footerText, 'this thread', "this message's header/footer setting", 'hfMode-thread')
         : '';
       return `<div class="composing-item${isEditing ? ' editing' : ''}">
         <input type="number" class="item-srno-input" data-idx="${i}" min="1" max="${composingItems.length}" value="${i + 1}" data-tooltip="Thread number — change it to move this item to that position" />
@@ -1102,15 +1712,18 @@ function renderComposingItems() {
     });
   });
   if (hfPanelItem) {
-    box.querySelectorAll('.hf-mode-btn').forEach((btn) => {
-      btn.addEventListener('click', () => {
-        hfPanelItem.headerFooterMode = btn.dataset.hfMode;
+    box.querySelectorAll('input[name="hfMode-thread"]').forEach((radio) => {
+      radio.addEventListener('change', (e) => {
+        hfPanelItem.headerFooterMode = e.target.value;
         renderComposingItems();
         saveDraft();
       });
     });
-    const hfHeaderInput = box.querySelector('.hf-header-input');
-    const hfFooterInput = box.querySelector('.hf-footer-input');
+    // Scoped to inside a .composing-item specifically — the bulk tool's
+    // panel (below) can be open in the same box at the same time and has
+    // matching .hf-header-input/.hf-footer-input fields of its own.
+    const hfHeaderInput = box.querySelector('.composing-item .hf-header-input');
+    const hfFooterInput = box.querySelector('.composing-item .hf-footer-input');
     if (hfHeaderInput) {
       hfHeaderInput.addEventListener('input', (e) => {
         hfPanelItem.headerText = e.target.value;
@@ -1121,6 +1734,58 @@ function renderComposingItems() {
       hfFooterInput.addEventListener('input', (e) => {
         hfPanelItem.footerText = e.target.value;
         saveDraft();
+      });
+    }
+  }
+  const bulkHfBtn = box.querySelector('[data-act="bulkHf"]');
+  if (bulkHfBtn) {
+    bulkHfBtn.addEventListener('click', () => {
+      bulkHfPanelOpen = !bulkHfPanelOpen;
+      renderComposingItems();
+    });
+  }
+  if (bulkHfPanelOpen) {
+    box.querySelectorAll('input[name="hfMode-bulk"]').forEach((radio) => {
+      radio.addEventListener('change', (e) => {
+        bulkHfMode = e.target.value;
+        renderComposingItems();
+      });
+    });
+    const bulkHeaderInput = box.querySelector('.bulk-hf-wrap .hf-header-input');
+    const bulkFooterInput = box.querySelector('.bulk-hf-wrap .hf-footer-input');
+    if (bulkHeaderInput) {
+      bulkHeaderInput.addEventListener('input', (e) => {
+        bulkHfHeaderText = e.target.value;
+      });
+    }
+    if (bulkFooterInput) {
+      bulkFooterInput.addEventListener('input', (e) => {
+        bulkHfFooterText = e.target.value;
+      });
+    }
+    const applyBtn = box.querySelector('.hf-bulk-apply-btn');
+    if (applyBtn) {
+      applyBtn.addEventListener('click', async () => {
+        const overrideCount = composingItems.filter(
+          (it) => it.headerFooterMode && it.headerFooterMode !== 'default'
+        ).length;
+        if (overrideCount > 0) {
+          const ok = await showConfirmDialog(
+            `Apply this to all ${composingItems.length} item(s) below? ${overrideCount} of them currently have their own header/footer setting — it'll be replaced.`,
+            { confirmText: 'Apply to all', danger: true }
+          );
+          if (!ok) return;
+        }
+        composingItems.forEach((it) => {
+          it.headerFooterMode = bulkHfMode;
+          it.headerText = bulkHfHeaderText;
+          it.footerText = bulkHfFooterText;
+        });
+        bulkHfPanelOpen = false;
+        hfPanelItem = null;
+        renderComposingItems();
+        saveDraft();
+        showToast(`Header/footer applied to ${composingItems.length} item(s).`, 'success');
       });
     }
   }
@@ -1139,17 +1804,23 @@ function resetMessageForm() {
   editingMessageSrNo = null;
   editingThreadItem = null;
   hfPanelItem = null;
+  bulkHfPanelOpen = false;
+  bulkHfMode = 'default';
+  bulkHfHeaderText = '';
+  bulkHfFooterText = '';
   composingItems = [];
   composingHfMode = 'default';
   composingHfHeaderText = '';
   composingHfFooterText = '';
   messageHfPanelOpen = false;
+  composingAutoReply = defaultAutoReply();
+  messageAutoReplyPanelOpen = false;
   document.getElementById('msgLabel').value = '';
   document.getElementById('msgLabelRow').style.display = 'none';
   document.getElementById('msgText').value = '';
   document.getElementById('msgFile').value = '';
   renderComposingItems();
-  document.getElementById('saveMessageBtn').textContent = 'Save message';
+  setBtnLabel('saveMessageBtn', 'Save message');
   document.getElementById('cancelEditMessageBtn').style.display = 'none';
   adhocSendPanelOpen = false;
   renderAdhocSendPanel();
@@ -1199,7 +1870,7 @@ function renderAdhocSendPanel() {
   if (run) {
     panel.innerHTML = `
       ${renderProgressBlock(run)}
-      ${run.done ? '<button class="ghost small-inline" type="button" data-act="closeAdhoc">Close</button>' : '<p class="hint">Sending — this updates live.</p>'}
+      ${run.done ? `<button class="ghost small-inline" type="button" data-act="closeAdhoc">${CHECK_ICON_SVG}<span class="btn-label">Close</span></button>` : '<p class="hint">Sending — this updates live.</p>'}
     `;
     const closeBtn = panel.querySelector('[data-act="closeAdhoc"]');
     if (closeBtn) {
@@ -1227,10 +1898,33 @@ function renderAdhocSendPanel() {
           const members = l.members || [];
           const selected = listSelectionSetFor(ADHOC_DRAFT_KEY, l.id);
           const selectedCount = members.filter((m) => selected.has(m.waId)).length;
-          return `<label class="checkbox-row list-check-label">
-            <input type="checkbox" class="adhoc-list-check" value="${l.id}" ${selectedCount === members.length && members.length > 0 ? 'checked' : ''} ${selectedCount > 0 && selectedCount < members.length ? 'data-indeterminate="1"' : ''} />
-            ${escapeHtml(l.name)} <span class="muted">(${selectedCount}/${members.length})</span>
-          </label>`;
+          const expandKey = `${ADHOC_DRAFT_KEY}:${l.id}`;
+          const expanded = expandedListPanels.has(expandKey);
+          return `<div class="list-check-row">
+            <label class="checkbox-row list-check-label">
+              <input type="checkbox" class="adhoc-list-check" value="${l.id}" ${selectedCount === members.length && members.length > 0 ? 'checked' : ''} ${selectedCount > 0 && selectedCount < members.length ? 'data-indeterminate="1"' : ''} />
+              ${escapeHtml(l.name)} <span class="muted badge-count-${l.id}">(${selectedCount}/${members.length})</span>
+            </label>
+            ${
+              members.length > 0
+                ? `<button class="icon-btn small-icon-btn list-expand-btn${expanded ? ' expanded' : ''}" type="button" data-act="toggleAdhocListMembers" data-list-id="${l.id}" data-tooltip="Choose which chats in this list">
+              <svg class="chevron-icon${expanded ? ' expanded' : ''}" viewBox="0 0 24 24" width="14" height="14"><path fill="currentColor" d="M7 10l5 5 5-5z"/></svg>
+            </button>`
+                : ''
+            }
+          </div>
+          ${
+            members.length > 0
+              ? `<div class="list-members" data-list-id="${l.id}" style="display:${expanded ? '' : 'none'}">
+            ${members
+              .map(
+                (m) =>
+                  `<label class="checkbox-row list-member-row"><input type="checkbox" class="adhoc-member-check" data-list-id="${l.id}" data-wa-id="${escapeHtml(m.waId)}" ${selected.has(m.waId) ? 'checked' : ''} /> ${escapeHtml(m.name || m.waId)}</label>`
+              )
+              .join('')}
+          </div>`
+              : ''
+          }`;
         })
         .join('')}
     </div>
@@ -1239,18 +1933,67 @@ function renderAdhocSendPanel() {
         <input type="checkbox" class="send-separator-check" ${sendPanelSeparatorPref ? 'checked' : ''} />
         Send a "➖" separator after each item
       </label>
-      <button class="primary" type="button" data-act="confirmAdhocSend">Send now</button>
-      <button class="ghost small-inline" type="button" data-act="cancelAdhocSend">Cancel</button>
+      <button class="primary" type="button" data-act="confirmAdhocSend">${SEND_ICON_SVG}<span class="btn-label">Send now</span></button>
+      <button class="ghost small-inline" type="button" data-act="cancelAdhocSend">${CLOSE_ICON_SVG}<span class="btn-label">Cancel</span></button>
     </div>
   `;
   panel.querySelectorAll('.adhoc-list-check').forEach((cb) => {
     cb.indeterminate = cb.hasAttribute('data-indeterminate');
+  });
+  panel.querySelectorAll('[data-act="toggleAdhocListMembers"]').forEach((btn) => {
+    btn.addEventListener('click', () => {
+      const listId = btn.dataset.listId;
+      const key = `${ADHOC_DRAFT_KEY}:${listId}`;
+      const membersEl = panel.querySelector(`.list-members[data-list-id="${listId}"]`);
+      const nowExpanded = membersEl.style.display === 'none';
+      membersEl.style.display = nowExpanded ? '' : 'none';
+      btn.classList.toggle('expanded', nowExpanded);
+      const chevron = btn.querySelector('.chevron-icon');
+      if (chevron) chevron.classList.toggle('expanded', nowExpanded);
+      if (nowExpanded) expandedListPanels.add(key);
+      else expandedListPanels.delete(key);
+    });
+  });
+  function updateAdhocListCheckboxState(listId) {
+    const list = STATE.lists.find((l) => l.id === listId);
+    if (!list) return;
+    const members = list.members || [];
+    const selected = listSelectionSetFor(ADHOC_DRAFT_KEY, listId);
+    const selectedCount = members.filter((m) => selected.has(m.waId)).length;
+    const badge = panel.querySelector(`.badge-count-${listId}`);
+    if (badge) badge.textContent = `(${selectedCount}/${members.length})`;
+    const listCb = panel.querySelector(`.adhoc-list-check[value="${listId}"]`);
+    if (listCb) {
+      listCb.checked = selectedCount > 0 && selectedCount === members.length;
+      listCb.indeterminate = selectedCount > 0 && selectedCount < members.length;
+    }
+  }
+  panel.querySelectorAll('.adhoc-member-check').forEach((cb) => {
     cb.addEventListener('change', () => {
-      const list = STATE.lists.find((l) => l.id === cb.value);
-      const selected = listSelectionSetFor(ADHOC_DRAFT_KEY, cb.value);
-      selected.clear();
-      if (cb.checked) (list.members || []).forEach((m) => selected.add(m.waId));
+      const listId = cb.dataset.listId;
+      const selected = listSelectionSetFor(ADHOC_DRAFT_KEY, listId);
+      if (cb.checked) selected.add(cb.dataset.waId);
+      else selected.delete(cb.dataset.waId);
       saveListSelections();
+      updateAdhocListCheckboxState(listId);
+    });
+  });
+  // The list's own checkbox doubles as select-all/none for its members, same
+  // as the per-message send panel — selecting the list itself, or just some
+  // chats within it (without ever touching the list checkbox), both count
+  // as "part of this send" (see confirmAdhocSend below).
+  panel.querySelectorAll('.adhoc-list-check').forEach((listCb) => {
+    listCb.addEventListener('change', () => {
+      const listId = listCb.value;
+      const memberChecks = panel.querySelectorAll(`.adhoc-member-check[data-list-id="${listId}"]`);
+      const selected = listSelectionSetFor(ADHOC_DRAFT_KEY, listId);
+      memberChecks.forEach((cb) => {
+        cb.checked = listCb.checked;
+        if (listCb.checked) selected.add(cb.dataset.waId);
+        else selected.delete(cb.dataset.waId);
+      });
+      saveListSelections();
+      updateAdhocListCheckboxState(listId);
     });
   });
   const cancelBtn = panel.querySelector('[data-act="cancelAdhocSend"]');
@@ -1323,7 +2066,8 @@ document.getElementById('saveMessageBtn').addEventListener('click', async () => 
     items,
     headerFooterMode: composingHfMode,
     headerText: composingHfHeaderText,
-    footerText: composingHfFooterText
+    footerText: composingHfFooterText,
+    autoReply: composingAutoReply
   };
   await call('saveMessage', { message });
   resetMessageForm();
@@ -1364,6 +2108,24 @@ async function moveMessage(id, direction) {
   refresh();
 }
 
+// Saved-message row actions: Send/Schedule (the chevron) and the quick
+// "send to current chat" button stay directly on the row since they DO
+// something with the message; Edit/Move up/Move down/Delete are "manage
+// this message" actions rather than "send" ones, and with all six as
+// separate icons the row was overflowing/wrapping at the neumorphic
+// buttons' size — folded into a "more" overflow menu instead of shrinking
+// everything to cram it back in, since fewer visible icons is the fix,
+// not smaller ones. Only one row's menu open at a time, closed by
+// clicking anywhere else (this listener is added once here, not per
+// render — renderMessages() runs on every refresh/toggle).
+let messageOverflowMenuId = null;
+document.addEventListener('click', () => {
+  if (messageOverflowMenuId !== null) {
+    messageOverflowMenuId = null;
+    renderMessages();
+  }
+});
+
 function renderMessages() {
   const ul = document.getElementById('messageList');
   ul.innerHTML = '';
@@ -1383,24 +2145,62 @@ function renderMessages() {
     const preview = items.length > 1 ? `${firstPreview} <span class="muted">+${items.length - 1} more item(s)</span>` : firstPreview;
     const lastSent = m.lastSentAt ? `Last sent ${new Date(m.lastSentAt).toLocaleString()}` : 'Never sent';
     const srNoBadge = typeof m.srNo === 'number' ? `<span class="muted">#${m.srNo}</span> ` : '';
-    const enabledScheduleCount = (m.schedules || []).filter((s) => s.enabled).length;
-    const scheduleBadge =
-      enabledScheduleCount > 0
-        ? `<span class="muted schedule-count-badge" data-tooltip="${enabledScheduleCount} active schedule(s)">🕒${enabledScheduleCount}</span>`
+    // A bare "🕒N" count told you nothing without opening the panel — this
+    // shows what's actually scheduled (reusing the same scheduleSummary()
+    // text the expanded panel's "Scheduled sends" list already uses),
+    // capped at 2 so a message with many schedules doesn't blow up the
+    // collapsed row.
+    const enabledSchedules = (m.schedules || []).filter((s) => s.enabled);
+    const scheduleLine =
+      enabledSchedules.length > 0
+        ? `<br/><span class="log-time schedule-line" data-tooltip="${escapeHtml(enabledSchedules.map((s) => scheduleSummary(s)).join(', '))}">🕒 ${escapeHtml(
+            enabledSchedules
+              .slice(0, 2)
+              .map((s) => scheduleSummary(s))
+              .join(' · ')
+          )}${enabledSchedules.length > 2 ? ` +${enabledSchedules.length - 2} more` : ''}</span>`
         : '';
+    const autoReplyLine =
+      m.autoReply && m.autoReply.enabled && (m.autoReply.triggers || []).some((t) => t.value)
+        ? `<br/><span class="log-time schedule-line" data-tooltip="Auto-replies when a message matches: ${escapeHtml(
+            (m.autoReply.triggers || [])
+              .filter((t) => t.value)
+              .map((t) => t.value)
+              .join(', ')
+          )}">⚡ Auto-reply on</span>`
+        : '';
+    const isPanelOpen = openSendPanelMessageId === m.id;
+    // Quick "send to whatever chat is open right now" — lives on the
+    // collapsed card itself (not behind expanding the panel) since it
+    // needs no configuration: no list to pick, nothing to schedule.
+    const quickSendBtnHtml = activeChatBtnHtml({
+      act: 'sendActiveChat',
+      title: 'Send to currently open chat — sends only to whatever chat is open right now in the WhatsApp Web tab, no list needed.',
+      iconSvg: '<svg viewBox="0 0 24 24" width="14" height="14"><path fill="currentColor" d="M2 21l21-9L2 3v7l15 2-15 2z"/></svg>',
+      run: activeChatRunFor(`msg-${m.id}`),
+      runKey: `msg-${m.id}`
+    });
     li.innerHTML = `<div class="item-row">
       <div class="item-text">
-        ${srNoBadge}<b>${escapeHtml(m.name)}</b> ${scheduleBadge}<br/>${preview}<br/>
-        <span class="log-time">${lastSent}</span>
+        ${srNoBadge}<b>${escapeHtml(m.name)}</b><br/>${preview}<br/>
+        <span class="log-time">${lastSent}</span>${scheduleLine}${autoReplyLine}
       </div>
       <div class="item-actions">
-        <button class="icon-btn small-icon-btn" data-act="moveUp" type="button" data-tooltip="Move up" ${idx === 0 ? 'disabled' : ''}>${MOVE_UP_ICON_SVG}</button>
-        <button class="icon-btn small-icon-btn" data-act="moveDown" type="button" data-tooltip="Move down" ${idx === sortedMessages.length - 1 ? 'disabled' : ''}>${MOVE_DOWN_ICON_SVG}</button>
-        <button class="icon-btn small-icon-btn" data-act="send" type="button" data-tooltip="Send now / schedule">
-          <svg viewBox="0 0 24 24" width="14" height="14"><path fill="currentColor" d="M2 21l21-9L2 3v7l15 2-15 2z"/></svg>
+        ${quickSendBtnHtml}
+        <button class="icon-btn small-icon-btn chevron-toggle-btn${isPanelOpen ? ' expanded' : ''}" data-act="send" type="button" data-tooltip="Send to lists / schedule">
+          <svg viewBox="0 0 24 24" width="14" height="14"><path fill="currentColor" d="M7 10l5 5 5-5z"/></svg>
         </button>
-        <button class="icon-btn small-icon-btn" data-act="edit" type="button" data-tooltip="Edit">${EDIT_ICON_SVG}</button>
-        <button class="icon-btn small-icon-btn danger" data-act="del" type="button" data-tooltip="Delete">${DELETE_ICON_SVG}</button>
+        <div class="row-overflow${messageOverflowMenuId === m.id ? ' open' : ''}">
+          <div class="row-fan">
+            <button class="icon-btn small-icon-btn fan-item" data-act="edit" type="button" data-tooltip="Edit">${EDIT_ICON_SVG}</button>
+            <button class="icon-btn small-icon-btn fan-item" data-act="moveUp" type="button" data-tooltip="Move up" ${idx === 0 ? 'disabled' : ''}>${MOVE_UP_ICON_SVG}</button>
+            <button class="icon-btn small-icon-btn fan-item" data-act="moveDown" type="button" data-tooltip="Move down" ${idx === sortedMessages.length - 1 ? 'disabled' : ''}>${MOVE_DOWN_ICON_SVG}</button>
+            <button class="icon-btn small-icon-btn danger fan-item" data-act="del" type="button" data-tooltip="Delete">${DELETE_ICON_SVG}</button>
+          </div>
+          <button class="icon-btn small-icon-btn overflow-toggle-btn" data-act="overflow" type="button" data-tooltip="More">
+            <svg viewBox="0 0 24 24" width="14" height="14"><path fill="currentColor" d="M19 13h-6v6h-2v-6H5v-2h6V5h2v6h6z"/></svg>
+          </button>
+        </div>
       </div>
     </div>`;
 
@@ -1409,6 +2209,7 @@ function renderMessages() {
     // progress/pause button is visible without having to remember which
     // message you sent and re-click its Send icon to find out.
     if (openSendPanelMessageId === m.id || messageRunIds.has(m.id)) {
+      sendPanelRerender = renderMessages; // this mount belongs to the Messages tab, not the Campaigns tab
       li.appendChild(buildSendPanel(m));
     }
 
@@ -1418,19 +2219,57 @@ function renderMessages() {
         return;
       }
       const opening = openSendPanelMessageId !== m.id;
-      if (opening) resetScheduleEditor();
+      if (opening) {
+        resetScheduleEditor();
+        campaignEditorMessageId = null; // only one schedule editor open at a time, app-wide
+        campaignPickerOpen = false;
+      }
       setOpenSendPanel(opening ? m.id : null);
       renderMessages();
     });
+    const quickSendBtn = li.querySelector('[data-act="sendActiveChat"]');
+    if (quickSendBtn) {
+      quickSendBtn.addEventListener('click', async () => {
+        if (!STATE.settings.consentAccepted) {
+          showToast('Accept the consent checkbox on the Settings tab first — sending is gated behind it, even for a one-off send.', 'error');
+          return;
+        }
+        // No panel is necessarily open to read a per-item selection from —
+        // this quick action reads the same persisted unchecked-items state
+        // the full panel's checklist would show (so excluding an item there
+        // sticks even for this shortcut), defaulting to "every item" when
+        // nothing's been customized.
+        const unchecked = uncheckedSetFor(m.id);
+        let itemIndexes;
+        if (items.length > 1) {
+          itemIndexes = items.map((_, i) => i).filter((i) => !unchecked.has(i));
+          if (itemIndexes.length === 0) {
+            showToast('Select at least one item to send (open the panel to choose).', 'error');
+            return;
+          }
+        }
+        const res = await call('sendNowActiveChat', { messageId: m.id, sendSeparator: sendPanelSeparatorPref, itemIndexes });
+        if (res.ok && res.runId) {
+          activeChatRunIds.set(`msg-${m.id}`, { runId: res.runId, assignedAt: Date.now() });
+          saveActiveChatRunIds();
+        } else if (!res.ok) {
+          showToast(res.error || 'Could not send to the currently open chat.', 'error');
+        }
+        renderMessages();
+      });
+    }
     li.querySelector('[data-act="edit"]').addEventListener('click', () => {
       editingMessageId = m.id;
       editingMessageSrNo = typeof m.srNo === 'number' ? m.srNo : null;
       editingThreadItem = null;
       hfPanelItem = null;
+      bulkHfPanelOpen = false;
       composingHfMode = m.headerFooterMode || 'default';
       composingHfHeaderText = m.headerText || '';
       composingHfFooterText = m.footerText || '';
       messageHfPanelOpen = false;
+      composingAutoReply = m.autoReply || defaultAutoReply();
+      messageAutoReplyPanelOpen = false;
       document.getElementById('msgLabel').value = m.name;
       document.getElementById('msgLabelRow').style.display = '';
       const items = m.items || [];
@@ -1454,7 +2293,7 @@ function renderMessages() {
         composingItems = items.map((item) => ({ ...item })); // clone so cancel doesn't mutate the saved copy
       }
       renderComposingItems();
-      document.getElementById('saveMessageBtn').textContent = 'Update message';
+      setBtnLabel('saveMessageBtn', 'Update message');
       document.getElementById('cancelEditMessageBtn').style.display = '';
       saveDraft();
       document.querySelector('[data-tab="messages"]').click();
@@ -1465,6 +2304,12 @@ function renderMessages() {
     });
     li.querySelector('[data-act="moveUp"]').addEventListener('click', () => moveMessage(m.id, 'up'));
     li.querySelector('[data-act="moveDown"]').addEventListener('click', () => moveMessage(m.id, 'down'));
+    li.querySelector('.row-fan').addEventListener('click', (e) => e.stopPropagation());
+    li.querySelector('[data-act="overflow"]').addEventListener('click', (e) => {
+      e.stopPropagation();
+      messageOverflowMenuId = messageOverflowMenuId === m.id ? null : m.id;
+      renderMessages();
+    });
     ul.appendChild(li);
   });
 }
@@ -1498,7 +2343,7 @@ function buildSendPanel(message) {
   if (run) {
     panel.innerHTML = `
       ${renderProgressBlock(run)}
-      ${run.done ? '<button class="ghost small-inline" type="button" data-act="closeSend">Close</button>' : '<p class="hint">Sending — this updates live.</p>'}
+      ${run.done ? `<button class="ghost small-inline" type="button" data-act="closeSend">${CHECK_ICON_SVG}<span class="btn-label">Close</span></button>` : '<p class="hint">Sending — this updates live.</p>'}
     `;
     const closeBtn = panel.querySelector('[data-act="closeSend"]');
     if (closeBtn) {
@@ -1506,7 +2351,7 @@ function buildSendPanel(message) {
         messageRunIds.delete(message.id);
         saveMessageRunIds();
         setOpenSendPanel(null);
-        renderMessages();
+        sendPanelRerender();
       });
     }
     return panel;
@@ -1514,16 +2359,7 @@ function buildSendPanel(message) {
 
   const items = message.items || [];
   const schedules = message.schedules || [];
-  const wholeSendRun = activeChatRunFor(`msg-${message.id}`);
   const unchecked = uncheckedSetFor(message.id);
-  const wholeSendBtnHtml = activeChatBtnHtml({
-    act: 'sendActiveChat',
-    extraClass: 'send-active-chat-btn',
-    title: 'Send to currently open chat — sends only to whatever chat is open right now in the WhatsApp Web tab, no list needed.',
-    iconSvg: '<svg viewBox="0 0 24 24" width="16" height="16"><path fill="currentColor" d="M2 21l21-9L2 3v7l15 2-15 2z"/></svg>',
-    run: wholeSendRun,
-    runKey: `msg-${message.id}`
-  });
   const scheduleListHtml = schedules.length
     ? `<h3>Scheduled sends</h3>
     <ul class="item-list schedule-list">
@@ -1550,18 +2386,24 @@ function buildSendPanel(message) {
         .join('')}
     </ul>`
     : '';
+  const itemPickerExpanded = expandedItemPickers.has(message.id);
+  const selectedCount = items.length - unchecked.size;
+  const itemPickerSummaryText =
+    selectedCount === items.length ? `All ${items.length} items selected` : `${selectedCount} of ${items.length} items selected`;
   panel.innerHTML = `
     ${
-      items.length <= 1
-        ? `<div class="send-panel-top-row">${wholeSendBtnHtml}</div>`
-        : `
-    <div class="composing-list">
+      items.length > 1
+        ? `<h3>What to send</h3>
+    <button type="button" class="item-picker-summary" data-act="toggleItemPicker">
+      <span class="item-picker-summary-text">${itemPickerSummaryText}</span>
+      <svg class="chevron-icon${itemPickerExpanded ? ' expanded' : ''}" viewBox="0 0 24 24" width="14" height="14"><path fill="currentColor" d="M7 10l5 5 5-5z"/></svg>
+    </button>
+    <div class="composing-list" style="display:${itemPickerExpanded ? '' : 'none'}">
       <div class="send-panel-top-row">
         <label class="checkbox-row send-item-select-all-row">
           <input type="checkbox" class="send-item-select-all" ${unchecked.size === 0 ? 'checked' : ''} ${unchecked.size > 0 && unchecked.size < items.length ? 'data-indeterminate="1"' : ''} />
           Select all
         </label>
-        ${wholeSendBtnHtml}
       </div>
       ${items
         .map((item, idx) => {
@@ -1593,13 +2435,13 @@ function buildSendPanel(message) {
           </div>`;
         })
         .join('')}
-    </div>
-    `
+    </div>`
+        : ''
     }
-    ${scheduleListHtml}
+    <h3>Send</h3>
     ${
       STATE.lists.length === 0
-        ? ''
+        ? '<p class="hint">Build a list first (Lists tab) to send to more than one chat, or to schedule a send.</p>'
         : `
     <div class="checklist">
       ${STATE.lists
@@ -1637,8 +2479,9 @@ function buildSendPanel(message) {
         })
         .join('')}
     </div>
+    ${scheduleListHtml}
     <div class="kind-toggle send-panel-mode-toggle">
-      <button type="button" class="kind-btn send-mode-btn ${sendPanelMode === 'send' ? 'active' : ''}" data-mode="send">Send now</button>
+      <button type="button" class="kind-btn send-mode-btn ${sendPanelMode === 'send' ? 'active' : ''}" data-mode="send">Now</button>
       <button type="button" class="kind-btn send-mode-btn ${sendPanelMode === 'schedule' ? 'active' : ''}" data-mode="schedule">Schedule</button>
     </div>
     <div class="send-panel-actions" style="display:${sendPanelMode === 'send' ? '' : 'none'}">
@@ -1646,8 +2489,8 @@ function buildSendPanel(message) {
         <input type="checkbox" class="send-separator-check" ${sendPanelSeparatorPref ? 'checked' : ''} />
         Send a "➖" separator after each item
       </label>
-      <button class="primary" type="button" data-act="confirmSend">Send now</button>
-      <button class="ghost small-inline" type="button" data-act="cancelSend">Cancel</button>
+      <button class="primary" type="button" data-act="confirmSend">${SEND_ICON_SVG}<span class="btn-label">Send now</span></button>
+      <button class="ghost small-inline" type="button" data-act="cancelSend">${CLOSE_ICON_SVG}<span class="btn-label">Cancel</span></button>
     </div>
     <div class="schedule-editor" style="display:${sendPanelMode === 'schedule' ? '' : 'none'}">
       <label>When</label>
@@ -1661,7 +2504,7 @@ function buildSendPanel(message) {
         <p class="hint">Repeats every day, forever, at each time you add — e.g. add 9:00 AM and 6:00 PM to run twice daily.</p>
         <div class="when-row">
           <input type="time" class="schedule-time-input" value="09:00" />
-          <button type="button" class="small schedule-add-time-btn">+ Add time</button>
+          <button type="button" class="small schedule-add-time-btn"><svg viewBox="0 0 24 24" width="12" height="12"><path fill="currentColor" d="M19 13h-6v6h-2v-6H5v-2h6V5h2v6h6z"/></svg>Add time</button>
         </div>
         <div class="chip-list schedule-times-list"></div>
       </div>
@@ -1690,33 +2533,39 @@ function buildSendPanel(message) {
         <p class="hint">Each date/time you add fires exactly once, then it's done — nothing repeats. Add several for a handful of one-off runs on this schedule without recreating it each time.</p>
         <div class="when-row">
           <input type="datetime-local" class="schedule-datetime-input" />
-          <button type="button" class="small schedule-add-datetime-btn">+ Add</button>
+          <button type="button" class="small schedule-add-datetime-btn"><svg viewBox="0 0 24 24" width="12" height="12"><path fill="currentColor" d="M19 13h-6v6h-2v-6H5v-2h6V5h2v6h6z"/></svg>Add</button>
         </div>
         <div class="chip-list schedule-datetimes-list"></div>
       </div>
 
-      <label class="checkbox-row">
-        <input type="checkbox" class="schedule-use-default-delay" checked />
-        Use default delay from Safety settings
-      </label>
-      <label>Delay between messages (seconds)</label>
-      <div class="when-row">
-        <input type="number" min="1" max="300" class="schedule-delay-min" disabled /> to
-        <input type="number" min="1" max="300" class="schedule-delay-max" disabled />
+      <button type="button" class="advanced-toggle-btn" data-act="toggleScheduleAdvanced">
+        <svg class="chevron-icon${scheduleAdvancedOpen ? ' expanded' : ''}" viewBox="0 0 24 24" width="14" height="14"><path fill="currentColor" d="M7 10l5 5 5-5z"/></svg>
+        Advanced (delay, label)
+      </button>
+      <div class="schedule-advanced-fields" style="display:${scheduleAdvancedOpen ? '' : 'none'}">
+        <label class="checkbox-row">
+          <input type="checkbox" class="schedule-use-default-delay" checked />
+          Use default delay from Safety settings
+        </label>
+        <label>Delay between messages (seconds)</label>
+        <div class="when-row">
+          <input type="number" min="1" max="300" class="schedule-delay-min" disabled /> to
+          <input type="number" min="1" max="300" class="schedule-delay-max" disabled />
+        </div>
+        <label>Delay before starting the next list (seconds)</label>
+        <div class="when-row">
+          <input type="number" min="1" max="600" class="schedule-list-delay-min" disabled /> to
+          <input type="number" min="1" max="600" class="schedule-list-delay-max" disabled />
+        </div>
+        <label>Schedule label (optional — only useful with more than one schedule on this message)</label>
+        <input type="text" class="schedule-label-input" placeholder="e.g. Monday reminder" />
       </div>
-      <label>Delay before starting the next list (seconds)</label>
-      <div class="when-row">
-        <input type="number" min="1" max="600" class="schedule-list-delay-min" disabled /> to
-        <input type="number" min="1" max="600" class="schedule-list-delay-max" disabled />
-      </div>
-      <label>Schedule label (optional — only useful with more than one schedule on this message)</label>
-      <input type="text" class="schedule-label-input" placeholder="e.g. Monday reminder" />
       <label class="checkbox-row send-separator-check-row">
         <input type="checkbox" class="schedule-separator-check" ${scheduleSeparatorPref ? 'checked' : ''} />
         Send a "➖" separator after each item
       </label>
-      <button class="primary" type="button" data-act="confirmSchedule">${editingScheduleId ? 'Update schedule' : 'Save schedule'}</button>
-      <button class="ghost small-inline" type="button" data-act="cancelSchedule">Cancel</button>
+      <button class="primary" type="button" data-act="confirmSchedule">${CHECK_ICON_SVG}<span class="btn-label">${editingScheduleId ? 'Update schedule' : 'Save schedule'}</span></button>
+      <button class="ghost small-inline" type="button" data-act="cancelSchedule">${CLOSE_ICON_SVG}<span class="btn-label">Cancel</span></button>
     </div>
     `
     }
@@ -1726,7 +2575,7 @@ function buildSendPanel(message) {
     saveMessageRunIds();
     resetScheduleEditor();
     setOpenSendPanel(null);
-    renderMessages();
+    sendPanelRerender();
   }
   const cancelBtn = panel.querySelector('[data-act="cancelSend"]');
   if (cancelBtn) cancelBtn.addEventListener('click', closeSendPanel);
@@ -1752,7 +2601,7 @@ function buildSendPanel(message) {
         scheduleDatetimes = [];
       }
       sendPanelMode = btn.dataset.mode;
-      renderMessages();
+      sendPanelRerender();
     });
   });
   function setScheduleType(type) {
@@ -1834,6 +2683,16 @@ function buildSendPanel(message) {
       }
     });
   }
+  const advancedToggleBtn = panel.querySelector('[data-act="toggleScheduleAdvanced"]');
+  if (advancedToggleBtn) {
+    advancedToggleBtn.addEventListener('click', () => {
+      scheduleAdvancedOpen = !scheduleAdvancedOpen;
+      const fields = panel.querySelector('.schedule-advanced-fields');
+      if (fields) fields.style.display = scheduleAdvancedOpen ? '' : 'none';
+      const chevron = advancedToggleBtn.querySelector('.chevron-icon');
+      if (chevron) chevron.classList.toggle('expanded', scheduleAdvancedOpen);
+    });
+  }
   function setScheduleDelayFieldsDisabled(disabled) {
     ['.schedule-delay-min', '.schedule-delay-max', '.schedule-list-delay-min', '.schedule-list-delay-max'].forEach((sel) => {
       const el = panel.querySelector(sel);
@@ -1902,7 +2761,7 @@ function buildSendPanel(message) {
       const scheduleId = btn.closest('[data-schedule-id]').dataset.scheduleId;
       const schedule = schedules.find((s) => s.id === scheduleId);
       if (schedule) startEditingSchedule(schedule);
-      renderMessages();
+      sendPanelRerender();
     });
   });
   panel.querySelectorAll('[data-sched-act="toggle"]').forEach((btn) => {
@@ -2013,7 +2872,12 @@ function buildSendPanel(message) {
         return;
       }
       resetScheduleEditor();
-      renderMessages();
+      // refresh(), not renderMessages() — the schedule was just written to
+      // storage, and STATE here is still the pre-save copy. Every other
+      // schedule mutation (toggle/run/delete, below) already does this;
+      // this was the one spot still re-rendering stale data, which is why
+      // a just-saved schedule's badge/list wouldn't show up right away.
+      refresh();
     });
   }
   panel.querySelectorAll('[data-act="toggleListMembers"]').forEach((btn) => {
@@ -2075,6 +2939,24 @@ function buildSendPanel(message) {
       updateListCheckboxState(listId);
     });
   });
+  const itemPickerToggleBtn = panel.querySelector('[data-act="toggleItemPicker"]');
+  if (itemPickerToggleBtn) {
+    itemPickerToggleBtn.addEventListener('click', () => {
+      const nowExpanded = !expandedItemPickers.has(message.id);
+      if (nowExpanded) expandedItemPickers.add(message.id);
+      else expandedItemPickers.delete(message.id);
+      const list = panel.querySelector('.composing-list');
+      if (list) list.style.display = nowExpanded ? '' : 'none';
+      const chevron = itemPickerToggleBtn.querySelector('.chevron-icon');
+      if (chevron) chevron.classList.toggle('expanded', nowExpanded);
+    });
+  }
+  function updateItemPickerSummary() {
+    const summaryText = panel.querySelector('.item-picker-summary-text');
+    if (!summaryText) return;
+    const selected = items.length - unchecked.size;
+    summaryText.textContent = selected === items.length ? `All ${items.length} items selected` : `${selected} of ${items.length} items selected`;
+  }
   const selectAllCheck = panel.querySelector('.send-item-select-all');
   const itemSelectChecks = panel.querySelectorAll('.send-item-select');
   if (selectAllCheck) {
@@ -2085,6 +2967,7 @@ function buildSendPanel(message) {
         if (selectAllCheck.checked) unchecked.delete(Number(cb.dataset.idx));
         else unchecked.add(Number(cb.dataset.idx));
       });
+      updateItemPickerSummary();
     });
     itemSelectChecks.forEach((cb) => {
       cb.addEventListener('change', () => {
@@ -2095,6 +2978,7 @@ function buildSendPanel(message) {
         const noneChecked = checks.every((c) => !c.checked);
         selectAllCheck.checked = allChecked;
         selectAllCheck.indeterminate = !allChecked && !noneChecked;
+        updateItemPickerSummary();
       });
     });
   }
@@ -2138,35 +3022,13 @@ function buildSendPanel(message) {
         messageRunIds.set(message.id, { runId: res.runId, assignedAt: Date.now() });
         saveMessageRunIds();
       }
-      renderMessages();
+      sendPanelRerender();
     });
   }
-  const sendActiveChatBtn = panel.querySelector('[data-act="sendActiveChat"]');
-  if (sendActiveChatBtn) {
-    sendActiveChatBtn.addEventListener('click', async () => {
-      const separatorCb = panel.querySelector('.send-separator-check');
-      const sendSeparator = separatorCb ? separatorCb.checked : sendPanelSeparatorPref;
-      const itemChecks = panel.querySelectorAll('.send-item-select');
-      let itemIndexes;
-      if (itemChecks.length > 0) {
-        itemIndexes = Array.from(itemChecks)
-          .filter((cb) => cb.checked)
-          .map((cb) => Number(cb.dataset.idx));
-        if (itemIndexes.length === 0) {
-          showToast('Select at least one item to send.', 'error');
-          return;
-        }
-      }
-      const res = await call('sendNowActiveChat', { messageId: message.id, sendSeparator, itemIndexes });
-      if (res.ok && res.runId) {
-        activeChatRunIds.set(`msg-${message.id}`, { runId: res.runId, assignedAt: Date.now() });
-        saveActiveChatRunIds();
-      } else if (!res.ok) {
-        showToast(res.error || 'Could not send to the currently open chat.', 'error');
-      }
-      renderMessages();
-    });
-  }
+  // The whole-message "send to currently open chat" button used to live
+  // here too, but now lives on the collapsed card itself (see
+  // renderMessages()) — no config needed for it, so it doesn't need the
+  // panel open. Per-item quick-sends below are unaffected.
   panel.querySelectorAll('[data-act="sendItemActiveChat"]').forEach((btn) => {
     btn.addEventListener('click', async () => {
       const itemIndex = Number(btn.dataset.idx);
@@ -2177,7 +3039,7 @@ function buildSendPanel(message) {
       } else if (!res.ok) {
         showToast(res.error || 'Could not send that item to the currently open chat.', 'error');
       }
-      renderMessages();
+      sendPanelRerender();
     });
   });
   panel.querySelectorAll('[data-act="openItemTab"]').forEach((btn) => {
@@ -2190,6 +3052,227 @@ function buildSendPanel(message) {
   });
   return panel;
 }
+
+// ============ CAMPAIGNS ============
+// A view over the schedules that already live on each message
+// (message.schedules[]) — not a separate saved entity. "New campaign"
+// mounts the exact same buildSendPanel() schedule editor the Messages tab
+// uses, just pointed at whichever message is picked here; a campaign
+// created/edited from this tab is the same object you'd see in that
+// message's own Send panel, not a copy.
+let campaignPickerOpen = false;
+
+function renderCampaignsTab() {
+  const select = document.getElementById('campaignMessageSelect');
+  const picker = document.getElementById('campaignPicker');
+  const editorContainer = document.getElementById('campaignEditorContainer');
+  const toggleBtn = document.getElementById('campaignNewToggleBtn');
+  const sortedMessages = sortMessagesBySrNo(STATE.messages);
+
+  select.innerHTML =
+    '<option value="">Choose a saved message…</option>' +
+    sortedMessages.map((m) => `<option value="${m.id}">${escapeHtml(m.name)}</option>`).join('');
+
+  let message = campaignEditorMessageId ? STATE.messages.find((m) => m.id === campaignEditorMessageId) : null;
+  if (campaignEditorMessageId && !message) campaignEditorMessageId = null; // deleted elsewhere while this was open
+
+  picker.style.display = campaignPickerOpen && !message ? '' : 'none';
+  toggleBtn.classList.toggle('open', campaignPickerOpen || !!message);
+  toggleBtn.dataset.tooltip = message || campaignPickerOpen ? 'Cancel' : 'Schedule a saved message';
+
+  editorContainer.innerHTML = '';
+  if (message) {
+    sendPanelRerender = renderCampaignsTab; // this mount belongs to the Campaigns tab, not Messages
+    editorContainer.appendChild(buildSendPanel(message));
+  }
+
+  renderCampaignsList(sortedMessages);
+}
+
+function renderCampaignsList(sortedMessages) {
+  const container = document.getElementById('campaignsList');
+  const withSchedules = sortedMessages.filter((m) => (m.schedules || []).length > 0);
+  if (withSchedules.length === 0) {
+    container.innerHTML =
+      '<p class="hint">No campaigns yet — schedule a message above, or from that message\'s own Send panel in the Messages tab.</p>';
+    return;
+  }
+  container.innerHTML = withSchedules
+    .map((m) => {
+      const rows = (m.schedules || [])
+        .map((s) => {
+          const scheduleRun = STATE.activeRuns[`${m.id}:${s.id}`];
+          return `<li class="schedule-row" data-message-id="${m.id}" data-schedule-id="${s.id}">
+            <div class="item-row">
+              <div class="item-text">
+                ${s.label ? `<b>${escapeHtml(s.label)}</b><br/>` : ''}
+                ${escapeHtml(scheduleSummary(s))}<br/>
+                <span class="log-time">${s.enabled ? 'enabled' : 'paused'}</span>
+              </div>
+              <div class="item-actions">
+                <button class="icon-btn small-icon-btn" type="button" data-camp-act="edit" data-tooltip="Edit">${EDIT_ICON_SVG}</button>
+                <button class="icon-btn small-icon-btn" type="button" data-camp-act="toggle" data-tooltip="${s.enabled ? 'Pause' : 'Resume'}">${s.enabled ? PAUSE_ICON_SVG : PLAY_ICON_SVG}</button>
+                <button class="icon-btn small-icon-btn" type="button" data-camp-act="run" data-tooltip="Run now">${RUN_NOW_ICON_SVG}</button>
+                <button class="icon-btn small-icon-btn danger" type="button" data-camp-act="del" data-tooltip="Delete">${DELETE_ICON_SVG}</button>
+              </div>
+            </div>
+            ${scheduleRun ? renderProgressBlock(scheduleRun) : ''}
+          </li>`;
+        })
+        .join('');
+      return `<div class="panel-card">
+        <h3>${escapeHtml(m.name)}</h3>
+        <ul class="item-list schedule-list">${rows}</ul>
+      </div>`;
+    })
+    .join('');
+
+  function findRowTarget(btn) {
+    const row = btn.closest('[data-schedule-id]');
+    const message = STATE.messages.find((mm) => mm.id === row.dataset.messageId);
+    const schedule = message && (message.schedules || []).find((s) => s.id === row.dataset.scheduleId);
+    return { messageId: row.dataset.messageId, scheduleId: row.dataset.scheduleId, message, schedule };
+  }
+
+  container.querySelectorAll('[data-camp-act="edit"]').forEach((btn) => {
+    btn.addEventListener('click', () => {
+      const { message, schedule } = findRowTarget(btn);
+      if (!message || !schedule) return;
+      setOpenSendPanel(null); // only one schedule editor open at a time app-wide
+      campaignPickerOpen = false;
+      campaignEditorMessageId = message.id;
+      startEditingSchedule(schedule);
+      renderCampaignsTab();
+      document.getElementById('campaignEditorContainer').scrollIntoView({ block: 'nearest' });
+    });
+  });
+  container.querySelectorAll('[data-camp-act="toggle"]').forEach((btn) => {
+    btn.addEventListener('click', async () => {
+      const { messageId, scheduleId, schedule } = findRowTarget(btn);
+      if (!schedule) return;
+      await call('toggleSchedule', { messageId, scheduleId, enabled: !schedule.enabled });
+      refresh();
+    });
+  });
+  container.querySelectorAll('[data-camp-act="run"]').forEach((btn) => {
+    btn.addEventListener('click', async () => {
+      const { messageId, scheduleId } = findRowTarget(btn);
+      await call('runScheduleNow', { messageId, scheduleId });
+      setTimeout(refresh, 1500);
+    });
+  });
+  container.querySelectorAll('[data-camp-act="del"]').forEach((btn) => {
+    btn.addEventListener('click', async () => {
+      const { messageId, scheduleId, schedule } = findRowTarget(btn);
+      const label = schedule && schedule.label ? schedule.label : scheduleSummary(schedule);
+      if (!(await showConfirmDialog(`Delete campaign "${label}"?`, { confirmText: 'Delete', danger: true }))) return;
+      await call('deleteSchedule', { messageId, scheduleId });
+      if (campaignEditorMessageId === messageId && editingScheduleId === scheduleId) resetScheduleEditor();
+      refresh();
+    });
+  });
+}
+
+document.getElementById('campaignNewToggleBtn').addEventListener('click', () => {
+  if (campaignEditorMessageId) {
+    campaignEditorMessageId = null;
+    resetScheduleEditor();
+  } else {
+    campaignPickerOpen = !campaignPickerOpen;
+    if (!campaignPickerOpen) document.getElementById('campaignMessageSelect').value = '';
+  }
+  renderCampaignsTab();
+});
+
+// ============ AUTO-REPLY TAB ============
+// A view over the same message.autoReply that already lives on each saved
+// message (see the bolt-icon panel in the Messages tab compose form) — one
+// place to see every message's auto-reply setup and trigger list at a
+// glance instead of opening each message individually. Only one row's
+// editor is open at a time, same convention as the send/schedule panels.
+let autoReplyOpenMessageId = null;
+const autoReplySaveTimers = {};
+
+// Debounced so typing a trigger phrase doesn't fire a saveMessage round
+// trip on every keystroke — structural changes (toggle/add/remove) call
+// this too, but those are already discrete clicks, not keystroke bursts,
+// so the debounce is harmless there.
+function scheduleAutoReplySave(messageId, ar) {
+  clearTimeout(autoReplySaveTimers[messageId]);
+  autoReplySaveTimers[messageId] = setTimeout(async () => {
+    const message = STATE.messages.find((m) => m.id === messageId);
+    if (!message) return;
+    await call('saveMessage', { message: { ...message, autoReply: ar } });
+    const idx = STATE.messages.findIndex((m) => m.id === messageId);
+    if (idx >= 0) STATE.messages[idx] = { ...STATE.messages[idx], autoReply: ar };
+    renderMessages(); // picks up the "⚡ Auto-reply on" badge without a full refresh()
+  }, 500);
+}
+
+function renderAutoReplyTab() {
+  const container = document.getElementById('autoReplyList');
+  if (!container) return;
+  const sortedMessages = sortMessagesBySrNo(STATE.messages);
+  if (sortedMessages.length === 0) {
+    container.innerHTML = '<p class="hint">Save a message on the Messages tab first, then come back here to set up auto-reply for it.</p>';
+    return;
+  }
+  container.innerHTML = `<ul class="item-list">${sortedMessages
+    .map((m) => {
+      const ar = m.autoReply || defaultAutoReply();
+      const isOpen = autoReplyOpenMessageId === m.id;
+      const activeTriggers = (ar.triggers || []).filter((t) => t.value);
+      const statusLine = !ar.enabled
+        ? '<span class="log-time">Auto-reply off</span>'
+        : activeTriggers.length === 0
+          ? '<span class="log-time">On, but no triggers set yet</span>'
+          : `<span class="log-time" data-tooltip="${escapeHtml(activeTriggers.map((t) => t.value).join(', '))}">Triggers: ${escapeHtml(
+              activeTriggers
+                .slice(0, 3)
+                .map((t) => t.value)
+                .join(', ')
+            )}${activeTriggers.length > 3 ? ` +${activeTriggers.length - 3} more` : ''}</span>`;
+      return `<li class="ar-row" data-message-id="${m.id}">
+        <div class="item-row">
+          <div class="item-text">
+            <b>${escapeHtml(m.name)}</b><br/>
+            ${statusLine}
+          </div>
+          <div class="item-actions">
+            <span class="hf-mode-badge${ar.enabled ? ' custom' : ''}">${ar.enabled ? 'ON' : 'OFF'}</span>
+            <button class="icon-btn small-icon-btn ar-tab-toggle" type="button" data-tooltip="${isOpen ? 'Close' : 'Edit'}">${EDIT_ICON_SVG}</button>
+          </div>
+        </div>
+        <div class="ar-tab-editor" style="${isOpen ? '' : 'display:none'}"></div>
+      </li>`;
+    })
+    .join('')}</ul>`;
+
+  container.querySelectorAll('[data-message-id]').forEach((card) => {
+    const messageId = card.dataset.messageId;
+    card.querySelector('.ar-tab-toggle').addEventListener('click', () => {
+      autoReplyOpenMessageId = autoReplyOpenMessageId === messageId ? null : messageId;
+      renderAutoReplyTab();
+    });
+    if (autoReplyOpenMessageId === messageId) {
+      const message = STATE.messages.find((mm) => mm.id === messageId);
+      const source = message.autoReply || defaultAutoReply();
+      const ar = { ...source, triggers: (source.triggers || []).map((t) => ({ ...t })) };
+      bindAutoReplyPanel(card.querySelector('.ar-tab-editor'), ar, (updatedAr) => scheduleAutoReplySave(messageId, updatedAr));
+    }
+  });
+}
+
+document.getElementById('campaignMessageSelect').addEventListener('change', (e) => {
+  const messageId = e.target.value;
+  if (!messageId) return;
+  setOpenSendPanel(null); // only one schedule editor open at a time app-wide
+  resetScheduleEditor();
+  sendPanelMode = 'schedule'; // opened specifically to schedule something, skip the Now tab
+  campaignPickerOpen = false;
+  campaignEditorMessageId = messageId;
+  renderCampaignsTab();
+});
 
 // ============ LISTS ============
 // Scan/add feeds the persistent chatSource (see refresh()); the user
@@ -2209,12 +3292,12 @@ document.querySelectorAll('#scanScopeToggle .kind-btn').forEach((btn) => {
 document.getElementById('scanChatsBtn').addEventListener('click', async () => {
   const btn = document.getElementById('scanChatsBtn');
   btn.disabled = true;
-  btn.textContent = 'Scanning...';
+  setBtnLabel(btn, 'Scanning...');
   const payload = { scope: scanScope };
   if (scanScope === 'chats') payload.contactFilter = document.getElementById('chatsContactFilter').value;
   const res = await call('listOpenChats', payload);
   btn.disabled = false;
-  btn.textContent = 'Scan';
+  setBtnLabel(btn, 'Scan');
   if (!res.ok) {
     showToast(res.error || 'Could not scan chats.', 'error');
     return;
@@ -2453,6 +3536,21 @@ document.getElementById('deselectAllBtn').addEventListener('click', () => {
   renderListBuilder();
 });
 
+document.getElementById('extractGroupContactsBtn').addEventListener('click', async () => {
+  const groups = Array.from(selectedWaIds)
+    .map((waId) => chatSource.get(waId))
+    .filter((c) => c && c.type === 'group');
+  if (groups.length === 0) {
+    showToast('Check at least one group above first (contacts have no members to extract).', 'error');
+    return;
+  }
+  const btn = document.getElementById('extractGroupContactsBtn');
+  btn.disabled = true;
+  await downloadBulkGroupMembersCsv(groups, (done, total) => setBtnLabel(btn, `Extracting ${done}/${total}…`));
+  setBtnLabel(btn, 'Extract contacts');
+  btn.disabled = false;
+});
+
 function renderListBuilder() {
   const box = document.getElementById('listBuilderChecklist');
   const visible = filteredChatSource();
@@ -2461,7 +3559,19 @@ function renderListBuilder() {
       .map((c) => {
         const numberSuffix = c.number ? ` <span class="muted">(${escapeHtml(c.number)})</span>` : '';
         const unsavedBadge = c.isSavedContact === false ? ' <span class="badge badge-unsaved">not saved</span>' : '';
-        return `<label><input type="checkbox" class="list-builder-check" value="${escapeHtml(c.waId)}" ${selectedWaIds.has(c.waId) ? 'checked' : ''}/> ${escapeHtml(c.name)}${numberSuffix} <span class="badge badge-${c.type}">${c.type}</span>${unsavedBadge}</label>`;
+        // Extracting a group's own WhatsApp membership (who's actually in
+        // it) is a different thing from picking chats for a saved list —
+        // only groups have members to extract, so the button only shows
+        // there, next to (not inside) the checkbox label so clicking it
+        // doesn't also toggle selection.
+        const exportBtn =
+          c.type === 'group'
+            ? `<button class="icon-btn small-icon-btn" data-act="exportMembers" data-wa-id="${escapeHtml(c.waId)}" data-name="${escapeHtml(c.name)}" type="button" data-tooltip="Export this group's members to CSV">${EXPORT_ICON_SVG}</button>`
+            : '';
+        return `<div class="list-check-row">
+          <label class="list-check-label"><input type="checkbox" class="list-builder-check" value="${escapeHtml(c.waId)}" ${selectedWaIds.has(c.waId) ? 'checked' : ''}/> ${escapeHtml(c.name)}${numberSuffix} <span class="badge badge-${c.type}">${c.type}</span>${unsavedBadge}</label>
+          ${exportBtn}
+        </div>`;
       })
       .join('') || '<span class="hint">Scan or add a contact above first.</span>';
   box.querySelectorAll('.list-builder-check').forEach((cb) => {
@@ -2469,6 +3579,15 @@ function renderListBuilder() {
       if (cb.checked) selectedWaIds.add(cb.value);
       else selectedWaIds.delete(cb.value);
       document.getElementById('selectedCount').textContent = `${selectedWaIds.size} selected`;
+    });
+  });
+  box.querySelectorAll('[data-act="exportMembers"]').forEach((btn) => {
+    btn.addEventListener('click', async (e) => {
+      e.preventDefault();
+      const b = e.currentTarget;
+      b.disabled = true;
+      await downloadGroupMembersCsv(b.dataset.name, b.dataset.waId);
+      b.disabled = false;
     });
   });
   document.getElementById('selectedCount').textContent = `${selectedWaIds.size} selected`;
@@ -2481,7 +3600,7 @@ function resetListForm() {
   document.getElementById('listName').value = '';
   document.getElementById('listSearchInput').value = '';
   document.getElementById('listBuilderTitle').textContent = 'Build a list';
-  document.getElementById('saveListBtn').textContent = 'Save list';
+  setBtnLabel('saveListBtn', 'Save list');
   document.getElementById('cancelEditListBtn').style.display = 'none';
   renderListBuilder();
 }
@@ -2640,7 +3759,7 @@ function renderLists() {
       document.getElementById('listSearchInput').value = '';
       document.getElementById('listName').value = l.name;
       document.getElementById('listBuilderTitle').textContent = `Editing "${l.name}"`;
-      document.getElementById('saveListBtn').textContent = 'Update list';
+      setBtnLabel('saveListBtn', 'Update list');
       document.getElementById('cancelEditListBtn').style.display = '';
       renderListBuilder();
       document.querySelector('[data-tab="lists"]').click();
@@ -2735,7 +3854,7 @@ function renderLog() {
   if (deleteRun) {
     progressEl.innerHTML = `
       ${renderProgressBlock(deleteRun)}
-      ${deleteRun.done ? '<button class="ghost small-inline" type="button" data-act="closeDeleteRun">Close</button>' : '<p class="hint">Deleting for everyone — this updates live.</p>'}
+      ${deleteRun.done ? `<button class="ghost small-inline" type="button" data-act="closeDeleteRun">${CHECK_ICON_SVG}<span class="btn-label">Close</span></button>` : '<p class="hint">Deleting for everyone — this updates live.</p>'}
     `;
     const closeBtn = progressEl.querySelector('[data-act="closeDeleteRun"]');
     if (closeBtn) closeBtn.addEventListener('click', () => { setDeleteRunId(null); renderLog(); });
@@ -2859,6 +3978,7 @@ document.getElementById('bulkDeleteForEveryoneBtn').addEventListener('click', as
 
 // ============ SETTINGS ============
 function renderSettings() {
+  renderActivationCard();
   const s = STATE.settings;
   document.getElementById('jitterMinutes').value = s.jitterMinutes ?? 4;
   const [min, max] = s.defaultDelayBetweenMsMs || [20000, 45000];
@@ -2872,66 +3992,429 @@ function renderSettings() {
   document.getElementById('footerText').value = s.footerText || '';
 }
 
-document.getElementById('googleSignInBtn').addEventListener('click', async () => {
-  const btn = document.getElementById('googleSignInBtn');
-  const errEl = document.getElementById('loginError');
+// ============ ACTIVATION ============
+// No accounts — a key you were issued (see server/README.md) is all there
+// is. background.js/license.js talk to the license server; this just
+// shows the screen and forwards the key.
+async function submitActivation() {
+  const btn = document.getElementById('activateBtn');
+  const input = document.getElementById('activationKeyInput');
+  const errEl = document.getElementById('activationError');
   errEl.style.display = 'none';
-  btn.disabled = true;
-  const res = await call('signIn');
-  btn.disabled = false;
-  if (!res.ok) {
-    errEl.textContent = res.error || 'Sign-in failed. Try again.';
+  const key = input.value.trim();
+  if (!key) {
+    errEl.textContent = 'Enter your activation key.';
     errEl.style.display = '';
     return;
   }
-  refresh();
-});
-
-document.getElementById('signOutBtn').addEventListener('click', async () => {
-  if (!(await showConfirmDialog('Sign out? Sync (if on) will stop until you sign back in.', { confirmText: 'Sign out' }))) return;
-  await call('signOut');
-  refresh();
-});
-
-// The account/sync UI lives entirely up in the header now (name+avatar next
-// to the master/theme toggles) instead of buried at the bottom of the
-// Settings tab — clicking it opens a small dropdown with the sync toggle and
-// sign out, rather than switching tabs.
-function renderHeaderAccount() {
-  const user = STATE.authUser;
-  document.getElementById('appLogoImg').style.display = user ? 'none' : '';
-  document.getElementById('headerAccountWrap').style.display = user ? '' : 'none';
-  if (!user) return;
-  const img = document.getElementById('headerAccountAvatarImg');
-  const initialEl = document.getElementById('headerAccountInitial');
-  if (user.photoURL) {
-    img.src = user.photoURL;
-    img.style.display = '';
-    initialEl.style.display = 'none';
-  } else {
-    img.style.display = 'none';
-    initialEl.style.display = '';
-    initialEl.textContent = (user.displayName || user.email || '?').charAt(0).toUpperCase();
+  btn.disabled = true;
+  setBtnLabel(btn, 'Activating…');
+  const res = await call('activate', { key });
+  btn.disabled = false;
+  setBtnLabel(btn, 'Activate');
+  if (!res.ok) {
+    errEl.textContent = res.error || 'Invalid or revoked key.';
+    errEl.style.display = '';
+    return;
   }
-  document.getElementById('headerAccountNamePanel').textContent = user.displayName || user.email || '';
-  document.getElementById('accountEmail').textContent = user.email || '';
-  document.getElementById('syncEnabledCheck').checked = !!STATE.settings.syncEnabled;
+  input.value = '';
+  showToast(`Activated — welcome, ${res.name || 'there'}.`, 'success');
+  refresh();
+}
+document.getElementById('activateBtn').addEventListener('click', submitActivation);
+document.getElementById('activationKeyInput').addEventListener('keydown', (e) => {
+  if (e.key === 'Enter') {
+    e.preventDefault();
+    submitActivation();
+  }
+});
+
+document.getElementById('deactivateBtn').addEventListener('click', async () => {
+  const ok = await showConfirmDialog(
+    "Deactivate this device? Your data stays on this device; you'll need to enter a key again to keep using the extension (this device keeps its seat on the key until an admin resets it).",
+    { confirmText: 'Deactivate', danger: true }
+  );
+  if (!ok) return;
+  await call('deactivate');
+  refresh();
+});
+
+function relativeTime(ts) {
+  if (!ts) return '';
+  const diff = Date.now() - ts;
+  if (diff < 45000) return 'just now';
+  if (diff < 3600000) return `${Math.round(diff / 60000)} min ago`;
+  if (diff < 86400000) return `${Math.round(diff / 3600000)} h ago`;
+  return new Date(ts).toLocaleString();
 }
 
-document.getElementById('headerAccountBtn').addEventListener('click', (e) => {
-  e.stopPropagation();
-  const panel = document.getElementById('headerAccountPanel');
-  panel.style.display = panel.style.display === 'none' ? '' : 'none';
-});
-document.getElementById('headerAccountPanel').addEventListener('click', (e) => e.stopPropagation());
-document.addEventListener('click', () => {
-  document.getElementById('headerAccountPanel').style.display = 'none';
-  document.getElementById('themePanel').style.display = 'none';
-});
+function maskKey(key) {
+  if (!key) return '';
+  if (key.length <= 10) return key;
+  return `${key.slice(0, 4)}…${key.slice(-4)}`;
+}
+
+// The activation/sync UI lives at the top of the Settings tab, as its own
+// card above the rest of the settings — see renderSettings(), which calls
+// this. Hidden entirely in dev mode (license.enforced false, i.e.
+// LICENSE_SERVER is empty in license.js), since there's nothing to show.
+function renderActivationCard() {
+  const license = STATE.license || {};
+  const card = document.getElementById('activationCard');
+  card.style.display = license.enforced ? '' : 'none';
+  if (!license.enforced) return;
+  document.getElementById('activationNameText').textContent = license.name || 'Activated';
+  document.getElementById('activationKeyLine').textContent = maskKey(license.key);
+  const seatsText = license.master
+    ? 'Master key'
+    : license.seats != null
+      ? `${license.used ?? '?'}/${license.seats} device${license.seats === 1 ? '' : 's'}`
+      : '';
+  const expiryText = license.master ? '' : license.expires ? `expires ${license.expires}` : 'no expiry';
+  document.getElementById('activationExpiryLine').textContent = [seatsText, expiryText].filter(Boolean).join(' · ');
+
+  const syncOn = !!STATE.settings.syncEnabled;
+  document.getElementById('syncEnabledCheck').checked = syncOn;
+  document.getElementById('syncNowBtn').style.display = syncOn ? '' : 'none';
+  const dot = document.getElementById('syncStatusDot');
+  const text = document.getElementById('syncStatusText');
+  const cs = STATE.cloudSync || {};
+  if (!syncOn) {
+    dot.className = 'wa-status-dot off';
+    text.textContent = 'Sync is off';
+  } else if (cs.inProgress) {
+    dot.className = 'wa-status-dot checking';
+    text.textContent = 'Syncing…';
+  } else if (cs.lastError) {
+    dot.className = 'wa-status-dot not-ready';
+    text.textContent = cs.lastError;
+  } else if (cs.lastAt) {
+    dot.className = 'wa-status-dot ready';
+    text.textContent = `Synced · ${relativeTime(cs.lastPushAt || cs.lastPulledAt || cs.lastAt)}`;
+  } else {
+    dot.className = 'wa-status-dot checking';
+    text.textContent = 'Waiting for first sync…';
+  }
+  text.dataset.tooltip = cs.lastError || (cs.lastAt ? `Cloud copy last changed ${new Date(cs.lastAt).toLocaleString()}` : '');
+}
 
 document.getElementById('syncEnabledCheck').addEventListener('change', async (e) => {
   await call('saveSettings', { settings: { syncEnabled: e.target.checked } });
   refresh();
+});
+document.getElementById('syncNowBtn').addEventListener('click', async (e) => {
+  const btn = e.currentTarget;
+  btn.disabled = true;
+  await call('syncNow');
+  btn.disabled = false;
+  refresh();
+});
+
+// ============ KEYS (master key admin) ============
+// Only functional for a master key — the tab is hidden otherwise, and the
+// server rejects these calls unless the request carries one. Key records
+// are just {name, seats, devices, expires?} (see server/README.md).
+const COPY_ICON_SVG =
+  '<svg viewBox="0 0 24 24" width="14" height="14"><path fill="currentColor" d="M16 1H4a2 2 0 0 0-2 2v14h2V3h12V1Zm3 4H8a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h11a2 2 0 0 0 2-2V7a2 2 0 0 0-2-2Zm0 16H8V7h11v14Z"/></svg>';
+const REVOKE_ICON_SVG =
+  '<svg viewBox="0 0 24 24" width="14" height="14"><path fill="currentColor" d="M12 2a10 10 0 1 0 0 20 10 10 0 0 0 0-20Zm0 2a8 8 0 0 1 6.32 12.9L7.1 5.68A7.96 7.96 0 0 1 12 4Zm0 16a8 8 0 0 1-6.32-12.9L16.9 18.32A7.96 7.96 0 0 1 12 20Z"/></svg>';
+
+let keysLoaded = false;
+let allKeys = [];
+let editingKey = null; // { key, devices, master } while editing
+let keysSearchQuery = '';
+
+function randCode6() {
+  const alphabet = '23456789ABCDEFGHJKMNPQRSTUVWXYZ'; // no confusable 0/O, 1/I/L
+  const bytes = new Uint8Array(6);
+  crypto.getRandomValues(bytes);
+  return Array.from(bytes, (b) => alphabet[b % alphabet.length]).join('');
+}
+// Blank key field → WAS-<first word of customer name>-<random 6>; a typed
+// key always gets the random tail appended so two "ALI" keys never collide.
+function genKey(name) {
+  const firstWord = (name || 'Customer').trim().split(/\s+/)[0].replace(/[^a-zA-Z0-9]/g, '').toUpperCase() || 'CUSTOMER';
+  return `WAS-${firstWord}-${randCode6()}`;
+}
+function withRandomSuffix(customKey) {
+  return `${customKey.trim().replace(/-+$/, '')}-${randCode6()}`;
+}
+
+// Validity: the Years/Months/Days boxes and the exact-date field stay in
+// sync both ways; the date field is the source of truth on save.
+function today0() {
+  const d = new Date();
+  d.setHours(0, 0, 0, 0);
+  return d;
+}
+function fmtLocalDate(d) {
+  const p = (n) => String(n).padStart(2, '0');
+  return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}`;
+}
+function parseLocalDate(s) {
+  const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(s || '');
+  if (!m) return null;
+  const d = new Date(+m[1], +m[2] - 1, +m[3]);
+  d.setHours(0, 0, 0, 0);
+  return d;
+}
+function diffYMD(from, to) {
+  let y = to.getFullYear() - from.getFullYear();
+  let m = to.getMonth() - from.getMonth();
+  let d = to.getDate() - from.getDate();
+  if (d < 0) {
+    m--;
+    d += new Date(to.getFullYear(), to.getMonth(), 0).getDate();
+  }
+  if (m < 0) {
+    y--;
+    m += 12;
+  }
+  return { y: Math.max(0, y), m: Math.max(0, m), d: Math.max(0, d) };
+}
+function timeLeftText(expiresStr) {
+  const target = parseLocalDate(expiresStr);
+  if (!target) return '';
+  const t0 = today0();
+  if (target < t0) return 'expired';
+  if (target.getTime() === t0.getTime()) return 'expires today';
+  const { y, m, d } = diffYMD(t0, target);
+  const unit = (n, s) => `${n} ${s}${n === 1 ? '' : 's'}`;
+  if (y > 0) return `${unit(y, 'year')}${m > 0 ? ` ${unit(m, 'month')}` : ''} left`;
+  if (m > 0) return `${unit(m, 'month')}${d > 0 ? ` ${unit(d, 'day')}` : ''} left`;
+  return `${unit(d, 'day')} left`;
+}
+function keyDurationToDate() {
+  const y = parseInt(document.getElementById('keyYears').value, 10) || 0;
+  const m = parseInt(document.getElementById('keyMonths').value, 10) || 0;
+  const d = parseInt(document.getElementById('keyDays').value, 10) || 0;
+  const dateEl = document.getElementById('keyExpiry');
+  if (y <= 0 && m <= 0 && d <= 0) {
+    dateEl.value = '';
+    return;
+  }
+  const dt = today0();
+  dt.setFullYear(dt.getFullYear() + y);
+  dt.setMonth(dt.getMonth() + m);
+  dt.setDate(dt.getDate() + d);
+  dateEl.value = fmtLocalDate(dt);
+}
+function keyDateToDuration() {
+  const target = parseLocalDate(document.getElementById('keyExpiry').value);
+  const [yEl, mEl, dEl] = ['keyYears', 'keyMonths', 'keyDays'].map((id) => document.getElementById(id));
+  if (!target) {
+    yEl.value = mEl.value = dEl.value = '';
+    return;
+  }
+  const { y, m, d } = diffYMD(today0(), target);
+  yEl.value = y || '';
+  mEl.value = m || '';
+  dEl.value = d || '';
+}
+['keyYears', 'keyMonths', 'keyDays'].forEach((id) => document.getElementById(id).addEventListener('input', keyDurationToDate));
+document.getElementById('keyExpiry').addEventListener('input', keyDateToDuration);
+document.getElementById('keyExpiry').addEventListener('change', keyDateToDuration);
+
+function setKeyFormMsg(text, isError) {
+  const el = document.getElementById('keyFormMsg');
+  el.textContent = text || '';
+  el.className = `hint${isError ? ' warn' : ''}`;
+  el.style.display = text ? '' : 'none';
+}
+
+function resetKeyForm() {
+  editingKey = null;
+  document.getElementById('keyFormTitle').textContent = 'Create a key';
+  setBtnLabel('keySaveBtn', 'Create key');
+  document.getElementById('keyFormCancelBtn').style.display = 'none';
+  document.getElementById('keyName').value = '';
+  const codeEl = document.getElementById('keyCode');
+  codeEl.value = '';
+  codeEl.disabled = false;
+  document.getElementById('keySeats').value = 2;
+  ['keyYears', 'keyMonths', 'keyDays', 'keyExpiry'].forEach((id) => (document.getElementById(id).value = ''));
+  setKeyFormMsg('');
+}
+
+function loadKeyForEdit(k) {
+  editingKey = { key: k.key, devices: k.devices || [], master: !!k.master };
+  document.getElementById('keyFormTitle').textContent = 'Edit key';
+  setBtnLabel('keySaveBtn', 'Save changes');
+  document.getElementById('keyFormCancelBtn').style.display = '';
+  document.getElementById('keyName').value = k.name || '';
+  const codeEl = document.getElementById('keyCode');
+  codeEl.value = k.key;
+  codeEl.disabled = true; // the key id itself can't be renamed
+  document.getElementById('keySeats').value = k.seats || 2;
+  document.getElementById('keyExpiry').value = k.expires || '';
+  keyDateToDuration();
+  setKeyFormMsg(`Editing ${k.key} — current expiry: ${k.expires || 'never'}.`);
+  document.getElementById('keyName').scrollIntoView({ block: 'nearest' });
+}
+
+function renderKeysTabVisibility() {
+  const isMaster = !!(STATE.license && STATE.license.master);
+  const tabBtn = document.getElementById('keysTabBtn');
+  tabBtn.style.display = isMaster ? '' : 'none';
+  const keysTabActive = document.getElementById('tab-keys').classList.contains('active');
+  if (!isMaster && keysTabActive) {
+    document.querySelector('[data-tab="messages"]').click(); // e.g. lastTab was "keys" from a master session
+  } else if (isMaster && keysTabActive && !keysLoaded) {
+    loadKeys();
+  }
+}
+
+async function loadKeys() {
+  keysLoaded = true;
+  const ul = document.getElementById('keysList');
+  ul.innerHTML = '<li class="item-text">Loading…</li>';
+  const res = await call('adminListKeys');
+  if (!res.ok) {
+    ul.innerHTML = `<li class="item-text">${escapeHtml(res.error || 'Failed to load keys')}</li>`;
+    return;
+  }
+  allKeys = res.keys || [];
+  renderKeys();
+}
+
+function renderKeys() {
+  const ul = document.getElementById('keysList');
+  const q = keysSearchQuery.trim().toLowerCase();
+  const keys = q ? allKeys.filter((k) => (k.key || '').toLowerCase().includes(q) || (k.name || '').toLowerCase().includes(q)) : allKeys;
+  document.getElementById('keysCount').textContent = `(${keys.length})`;
+  ul.innerHTML = '';
+  if (keys.length === 0) {
+    ul.innerHTML = `<li class="item-text">${q ? 'No keys match your search.' : 'No keys yet — create one above.'}</li>`;
+    return;
+  }
+  for (const k of keys) {
+    const li = document.createElement('li');
+    if (k.revoked) li.className = 'key-revoked';
+    const used = Array.isArray(k.devices) ? k.devices.length : 0;
+    const seats = k.seats == null ? '?' : k.seats;
+    const left = k.expires ? timeLeftText(k.expires) : '';
+    const metaLines = k.revoked
+      ? ['REVOKED']
+      : k.master
+        ? ['Master key — unlimited devices, never expires']
+        : [`${used}/${seats} devices`, k.expires ? `Expires ${k.expires}${left ? ` (${left})` : ''}` : 'No expiry'];
+    li.innerHTML = `<div class="item-row">
+      <div class="item-text">
+        <div class="key-code">${escapeHtml(k.key)}</div>
+        <div>${escapeHtml(k.name || '')}</div>
+        <div class="key-meta">${metaLines.map((l) => `<div>${escapeHtml(l)}</div>`).join('')}</div>
+      </div>
+      <div class="item-actions">
+        <button class="icon-btn small-icon-btn" data-act="copy" type="button" data-tooltip="Copy key">${COPY_ICON_SVG}</button>
+        ${
+          k.master
+            ? '<span class="badge badge-group">master</span>'
+            : `<button class="icon-btn small-icon-btn" data-act="edit" type="button" data-tooltip="Edit name, seats or expiry">${EDIT_ICON_SVG}</button>
+        <button class="icon-btn small-icon-btn" data-act="reset" type="button" data-tooltip="Reset devices — frees every seat on this key">${REFRESH_ICON_SVG}</button>
+        ${k.revoked ? '' : `<button class="icon-btn small-icon-btn danger" data-act="revoke" type="button" data-tooltip="Revoke — stops working within minutes">${REVOKE_ICON_SVG}</button>`}
+        <button class="icon-btn small-icon-btn danger" data-act="del" type="button" data-tooltip="Delete permanently">${DELETE_ICON_SVG}</button>`
+        }
+      </div>
+    </div>`;
+    li.querySelector('[data-act="copy"]').addEventListener('click', async () => {
+      try {
+        await navigator.clipboard.writeText(k.key);
+        showToast('Key copied.', 'success');
+      } catch (_) {
+        showToast('Could not copy — select it and copy manually.', 'error');
+      }
+    });
+    const editBtn = li.querySelector('[data-act="edit"]');
+    if (editBtn) editBtn.addEventListener('click', () => loadKeyForEdit(k));
+    const resetBtn = li.querySelector('[data-act="reset"]');
+    if (resetBtn) {
+      resetBtn.addEventListener('click', async () => {
+        if (!(await showConfirmDialog(`Free all device seats on ${k.key}? Every device using it will have to re-enter the key.`, { confirmText: 'Reset devices', danger: true }))) return;
+        const record = { name: k.name, seats: k.seats || 2, devices: [] };
+        if (k.expires) record.expires = k.expires;
+        const r = await call('adminPutKey', { key: k.key, record });
+        if (r.ok) loadKeys();
+        else showToast(r.error || 'Failed', 'error');
+      });
+    }
+    const revokeBtn = li.querySelector('[data-act="revoke"]');
+    if (revokeBtn) {
+      revokeBtn.addEventListener('click', async () => {
+        if (!(await showConfirmDialog(`Revoke ${k.key}? It stops working within minutes on every device.`, { confirmText: 'Revoke', danger: true }))) return;
+        const r = await call('adminRevokeKey', { key: k.key });
+        if (r.ok) loadKeys();
+        else showToast(r.error || 'Failed', 'error');
+      });
+    }
+    const delBtn = li.querySelector('[data-act="del"]');
+    if (delBtn) {
+      delBtn.addEventListener('click', async () => {
+        if (!(await showConfirmDialog(`Delete ${k.key} permanently? (Its synced data stays in KV until you clean it up.)`, { confirmText: 'Delete', danger: true }))) return;
+        const r = await call('adminDeleteKey', { key: k.key });
+        if (r.ok) loadKeys();
+        else showToast(r.error || 'Failed', 'error');
+      });
+    }
+    ul.appendChild(li);
+  }
+}
+
+document.getElementById('keySaveBtn').addEventListener('click', async () => {
+  const btn = document.getElementById('keySaveBtn');
+  const name = document.getElementById('keyName').value.trim() || 'Customer';
+  let seats = parseInt(document.getElementById('keySeats').value, 10);
+  if (!Number.isFinite(seats) || seats < 1) seats = 2;
+  const typedKey = document.getElementById('keyCode').value.trim();
+  if (!editingKey && typedKey.includes(':')) {
+    setKeyFormMsg('A key cannot contain ":".', true);
+    return;
+  }
+  const key = editingKey ? editingKey.key : typedKey ? withRandomSuffix(typedKey) : genKey(name);
+  const record = { name, seats, devices: editingKey ? editingKey.devices : [] };
+  const expires = document.getElementById('keyExpiry').value;
+  if (expires) record.expires = expires;
+  if (editingKey && editingKey.master) record.master = true;
+  btn.disabled = true;
+  setKeyFormMsg('Saving…');
+  const r = await call('adminPutKey', { key, record });
+  btn.disabled = false;
+  if (!r.ok) {
+    setKeyFormMsg(r.error || 'Failed', true);
+    return;
+  }
+  const wasCreate = !editingKey;
+  resetKeyForm();
+  await loadKeys();
+  setKeyFormMsg(wasCreate ? `Created — give this key to the customer: ${key}` : `Updated ${key}`);
+});
+document.getElementById('keyFormCancelBtn').addEventListener('click', resetKeyForm);
+document.getElementById('keysRefreshBtn').addEventListener('click', loadKeys);
+document.getElementById('keysTabBtn').addEventListener('click', () => {
+  if (!keysLoaded) loadKeys();
+});
+
+function updateKeysSearchClearBtn() {
+  document.getElementById('keysSearchClearBtn').classList.toggle('visible', keysSearchQuery.length > 0);
+}
+chrome.storage.local.get(['keysSearchQuery'], (data) => {
+  if (data.keysSearchQuery) {
+    keysSearchQuery = data.keysSearchQuery;
+    document.getElementById('keysSearchInput').value = keysSearchQuery;
+  }
+  updateKeysSearchClearBtn();
+});
+document.getElementById('keysSearchInput').addEventListener('input', (e) => {
+  keysSearchQuery = e.target.value;
+  chrome.storage.local.set({ keysSearchQuery });
+  updateKeysSearchClearBtn();
+  renderKeys();
+});
+document.getElementById('keysSearchClearBtn').addEventListener('click', () => {
+  keysSearchQuery = '';
+  document.getElementById('keysSearchInput').value = '';
+  chrome.storage.local.set({ keysSearchQuery });
+  updateKeysSearchClearBtn();
+  renderKeys();
 });
 
 let saveSettingsBtnResetTimer = null;
@@ -2956,11 +4439,11 @@ document.getElementById('saveSettingsBtn').addEventListener('click', async () =>
     }
   });
   refresh();
-  btn.textContent = 'Saved ✓';
+  setBtnLabel(btn, 'Saved ✓');
   btn.classList.add('save-confirmed');
   clearTimeout(saveSettingsBtnResetTimer);
   saveSettingsBtnResetTimer = setTimeout(() => {
-    btn.textContent = 'Save';
+    setBtnLabel(btn, 'Save');
     btn.classList.remove('save-confirmed');
   }, 1800);
 });
@@ -3088,6 +4571,42 @@ async function checkWaStatusLive() {
   document.addEventListener('scroll', hideTooltip, true);
 })();
 
+// ============ HEADER LOGO (SVG) ============
+// icons/header-logo.svg is the full downloaded LottieFiles animation
+// ("WhatsApp Default State" — phone-in-bubble + a wobbling accent + ring
+// arcs that fade in/out), exported as a plain SVG with native SMIL
+// (<animate>/<animateTransform>) instead of Lottie's JSON+JS player — same
+// look, no 168KB vendored library or animation loop to run. Its white
+// background rect was stripped from the file itself (so the icon sits
+// transparently on the header's own green) and its viewBox tightened from
+// "0 0 500 500" to "50 50 400 400" (checked against every layer's own
+// motion — the wobble's rotate+scale swing and both ring arcs — so nothing
+// clips at the crop edges). Fetched and inlined (rather than <img
+// src="...">) so prefers-reduced-motion can strip every animate element:
+// the phone bubble has no animation of its own so it's unaffected, while
+// the wobble/flash/ring-arc layers all settle on their own authored rest
+// state (the arcs and flash image default to opacity 0, i.e. hidden)
+// instead of freezing mid-motion.
+(function () {
+  const container = document.getElementById('appLogoImg');
+  fetch('icons/header-logo.svg')
+    .then((r) => r.text())
+    .then((svgText) => {
+      container.innerHTML = svgText;
+      if (window.matchMedia('(prefers-reduced-motion: reduce)').matches) {
+        container.querySelectorAll('animate, animateTransform').forEach((el) => el.remove());
+      }
+    })
+    .catch(() => {}); // a missing logo shouldn't break the rest of the popup
+})();
+
 restoreDraft();
+renderMessageHfControl();
 refresh();
+// Each popup open: re-validate the cached key (catches one revoked while
+// the browser was closed) and check for changes other devices pushed. Both
+// no-op instantly when not applicable; any change lands in storage and
+// comes back through the storage.onChanged -> refresh() path above.
+call('licenseStatus');
+call('syncPollNow');
 checkWaStatusLive();

@@ -230,80 +230,54 @@ store review, for the same ToS reasons noted above).
   (typically one you paused and don't want to finish). Reset only stops
   sending the rest; it doesn't re-send to chats already reached.
 - The popup reopens on whichever tab you last had open.
-- **Sign-in is required** — a fresh install (or an old one after this
-  update) shows a "Continue with Google" screen before anything else. It
-  uses whichever Google account is already active in the browser (Chrome's
-  native account picker, via `chrome.identity`) — the same button both signs
-  up (first time) and logs in (every time after), there's no separate form.
-  Sign out and see/change the sync toggle from the bottom of the Settings tab.
+- **An activation key is required** — a fresh install shows an "Activate to
+  continue" screen before anything else. There are no accounts or sign-in:
+  you paste the key you were given, and that's it. Click the initial-letter
+  avatar in the header to see the key's details, toggle cloud sync, or
+  deactivate this device. (With `LICENSE_SERVER` left empty in
+  `license.js` — dev mode — no activation is needed and sync is off.)
 
-## Account sync (Firebase)
+## Activation keys & cloud sync (Cloudflare)
 
-Turning on **"Sync messages/lists/log/settings to my account in
-real time"** (Settings tab) mirrors those four things to your own Firebase
-project under your signed-in account, so a second device signed into the
-same Google account picks them up automatically. Off by default. A
-message's schedules travel with it as part of the message itself, so
-there's nothing separate to sync for them.
+Keys and synced data live in a tiny Cloudflare Worker + KV namespace you
+deploy yourself — see **`server/README.md`** for the one-time setup (free
+tier), creating your master key, and the exact storage layout. Nothing in
+`server/` ships inside the extension.
 
-- **Push is instant**: every save here (a message and its schedules, a list, a
-  settings change, a log entry) writes to Firestore right after it writes
-  locally.
-- **Pull happens whenever this extension is active** — the popup open, a
-  scheduled send running, WhatsApp Web tab activity, etc. Manifest V3 shuts down
-  the extension's background service worker after ~30s fully idle (a Chrome
-  platform limit, not something an extension can override), so a change made
-  on another device while this one has been sitting untouched arrives the
-  next time something wakes it up, typically within seconds of you opening
-  the popup — not necessarily the literal instant it happened elsewhere.
-- **Conflict handling is whole-value, last-write-wins**, per key, compared
-  by a plain timestamp — not a field-by-field merge. Editing the *same*
-  message or list on two devices within the same sync round-trip means
-  whichever save lands later wins outright. For how this tool is actually
-  used (one person, mostly one device at a time) that trade-off keeps the
-  sync engine simple and predictable rather than adding real-time-collab-grade
-  merge logic for a scenario that rarely comes up.
-- **Media (images/PDFs/docs)** doesn't live in Firestore (documents there cap
-  out at 1MB) — it's uploaded to Firebase Storage instead, content-addressed
-  by a hash of the file so the same attachment reused across messages/devices
-  only ever uploads once. Firestore just holds a reference to it.
-
-### One-time setup (required before sign-in will work at all)
-
-This repo ships with placeholders, not real credentials — nobody's Firebase
-project or Google Cloud project can be created on your behalf. Fill in:
-
-1. **`firebase-config.js`** → `GOOGLE_OAUTH_CLIENT_ID`: a **Web application**
-   type OAuth client ID from Google Cloud Console (APIs & Services →
-   Credentials → Create Credentials → OAuth client ID → Application type
-   "Web application"), with this exact redirect URI added under "Authorized
-   redirect URIs":
-   ```
-   https://gjacnhihfadbodlcjanankehcfaomlhc.chromiumapp.org/
-   ```
-   (that's `chrome.identity.getRedirectURL()` for this extension's
-   permanently pinned ID — see `manifest.json`'s `key` field. Don't lose the
-   private key that produced it, kept *outside* this folder at
-   `ext-signing-key-WA-Bulk-Sender.pem` in the parent directory on purpose —
-   Chrome warns if a `.pem` sits inside the folder it's loading unpacked, and
-   it must never be committed or shared. Note this is deliberately **not** a
-   "Chrome Extension" type client — that type only works with
-   `chrome.identity.getAuthToken()`, which is Chrome-only and throws on
-   Edge/other Chromium browsers; `launchWebAuthFlow()` with a Web
-   application client works on all of them, one client covers every
-   browser).
-2. **`firebase-config.js`** → `firebaseConfig` (Firebase Console → Project
-   settings → General → Your apps → the web app's config).
-3. In the Firebase Console, confirm **Authentication → Sign-in method →
-   Google** is enabled, and that **Firestore Database** and **Storage** have
-   both been created.
-4. Paste **`firestore.rules`** into Firestore Database → Rules, and
-   **`storage.rules`** into Storage → Rules, then Publish each — without
-   these, either nobody's data is protected (if left in test mode) or
-   nothing will read/write at all (once test mode expires).
-
-Until all four are done, the "Continue with Google" button will fail —
-that's expected, not a bug.
+- **Keys are device-bound.** Each install gets a random device id; a key
+  works on a limited number of devices (*seats*, default 2) and the server
+  rejects any beyond that. The extension re-checks its key every 15 minutes
+  in the background and every time the popup opens, so a revoked/expired key
+  (or a device an admin reset) stops working within minutes — scheduled
+  sends included. A key holder with `master: true` gets a **Keys** tab in the
+  popup to create / edit / reset devices / revoke / delete keys.
+- **Cloud sync** — turn on **"Sync messages, lists, log & settings to the
+  cloud under this key"** (header avatar → panel) and those four things are
+  kept as one snapshot under your key, so a second device activated with the
+  same key gets the same data. Off by default. A message's schedules travel
+  with it as part of the message itself — **note that means both devices
+  will fire them**; keep a schedule's message on one device, or disable it on
+  the other.
+- **Push is automatic but rate-limited**: a local change uploads ~2s later,
+  never more than once per 30s per device (a running campaign writes to the
+  log every send, and KV's free tier is 1,000 writes/day). **Pull** is by
+  polling once a minute (`chrome.alarms` — the only thing that reliably
+  survives Manifest V3 idling the service worker out) plus immediately when
+  the popup opens; "Sync now" in the panel does both on demand. Turning sync
+  on does one pull first, so a new device joining a key doesn't start by
+  overwriting the cloud copy with its own empty state.
+- **Conflict handling is whole-snapshot, last-write-wins** by a plain
+  timestamp — not a field-by-field merge. Editing on two devices within the
+  same minute means whichever push lands later wins outright. For one person
+  mostly on one device at a time, that keeps the engine simple and
+  predictable. The sync toggle, the master on/off switch and the theme are
+  per-device and never overwritten by a pull.
+- **Media (images/PDFs/docs)** isn't inline in the snapshot — each attachment
+  is stored separately, content-addressed by a hash of the file, so the same
+  attachment reused across messages/devices only ever uploads once (up to
+  24 MB each; the extension warns above 15 MB anyway). A pull is
+  all-or-nothing: if an attachment can't be downloaded, the previous local
+  copy is kept and it retries on the next poll.
 
 ## How it works technically
 
@@ -346,26 +320,18 @@ internal data/functions instead of the rendered page.
 - Everything (messages incl. media and their schedules, fetched chats, lists,
   logs, settings, last-open tab) is stored locally via `chrome.storage.local`
   (with the `unlimitedStorage` permission, since saved images/documents can
-  be a few MB) — that's still true regardless of sync. With account sync
-  turned on (off by default — see "Account sync" above), messages/lists/
-  log/settings additionally get copied to your own Firebase
-  project under your signed-in Google account; `fetchedChats` and in-progress
-  run state stay device-local either way.
-- **`firebase-init.js`**, **`auth.js`**, and **`sync.js`** are the account
-  sync layer — sign-in and all Firestore/Storage traffic happen entirely in
-  `background.js` (the service worker), using the vendored Firebase SDK
-  (`vendor/firebase/`, Apache-2.0, © Google LLC — license notice inline at
-  the top of each vendored file) and `chrome.identity.getAuthToken()` for
-  Google sign-in. `popup.js` never touches Firebase directly; it just calls
-  `signIn`/`signOut`/reads `authUser` and `settings.syncEnabled` the same way
+  be a few MB) — that's still true regardless of sync. With cloud sync
+  turned on (off by default — see "Activation keys & cloud sync" above),
+  messages/lists/log/settings additionally get copied to the license
+  server under this install's activation key; `fetchedChats` and
+  in-progress run state stay device-local either way.
+- **`license.js`** and **`sync.js`** are the activation + cloud sync layer —
+  every call to the license server (`server/worker.js`, a Cloudflare Worker)
+  happens in `background.js` (the service worker) over plain `fetch`, no
+  SDK. `popup.js` never talks to the server; it sends
+  `activate`/`deactivate`/`syncNow`/`admin*` messages and reads
+  `license`/`cloudSync`/`settings.syncEnabled` off `getState()` the same way
   it reads everything else.
-- **`xhr-polyfill.js`** — Manifest V3 service workers have no
-  `XMLHttpRequest` at all (only `fetch`), but the Firebase SDK still uses it
-  internally in a few places (Firestore's long-polling transport, Storage's
-  uploader), which otherwise throws or makes Firestore think it's
-  permanently offline. This installs a minimal `fetch()`-backed shim before
-  any Firebase code runs — it must stay the very first import in
-  `background.js` for that ordering to hold.
 
 ## Requirements
 
