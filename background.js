@@ -23,7 +23,24 @@ const DEFAULT_SETTINGS = {
   headerText: '', // global default header — prepended to every item's text/caption, unless overridden per-message or per-thread (see resolveHeaderFooter)
   footerText: '', // global default footer — appended to every item's text/caption, unless overridden per-message or per-thread (see resolveHeaderFooter)
   syncEnabled: true, // cloud sync of messages/lists/log/settings under this install's activation key, on by default
-  privacyBlur: false // blurs chat names/avatars/message text on the WhatsApp Web page itself, for screen-sharing/public spaces — see content.js
+  privacyBlur: false, // blurs chat names/avatars/message text on the WhatsApp Web page itself, for screen-sharing/public spaces — see content.js
+  // Which parts privacyBlur actually covers, how hard, and what style —
+  // right-click the eye button in the header to configure. `style` is
+  // global (blur or a solid blackout bar); each category has its own
+  // enabled flag and intensity (0-100, see content.js's effectValue for
+  // what that maps to). See content.js's PRIVACY_BLUR_RULES for what each
+  // category actually targets on the page.
+  privacyBlurOptions: {
+    style: 'blur', // 'blur' | 'blackout'
+    categories: {
+      messages: { enabled: true, intensity: 60 },
+      media: { enabled: true, intensity: 60 },
+      chatListNames: { enabled: true, intensity: 60 },
+      chatListPreviews: { enabled: true, intensity: 60 },
+      profilePictures: { enabled: true, intensity: 60 }
+    }
+  },
+  uiMode: 'popup' // 'popup' | 'sidepanel' — see applyUiMode below and the header button in popup.js
 };
 
 // License heartbeat — re-validates the cached activation key every so often
@@ -276,11 +293,11 @@ async function pingContentScript(tabId, attempts = 5) {
 // Best-effort: no WA tab open, or its content script not ready yet, just
 // means content.js will pick up the new value itself next time it loads
 // (see its own getState call on startup) — not a failure worth surfacing.
-async function pushPrivacyBlurToTab(enabled) {
+async function pushPrivacyBlurToTab(enabled, options) {
   const tab = await findWaTab();
   if (!tab) return;
   try {
-    await sendToTab(tab.id, { action: 'setPrivacyBlur', enabled: !!enabled }, 3000);
+    await sendToTab(tab.id, { action: 'setPrivacyBlur', enabled: !!enabled, options }, 3000);
   } catch (_) {}
 }
 
@@ -1034,11 +1051,40 @@ chrome.alarms.onAlarm.addListener(async (alarm) => {
   // 'interval' alarms repeat on their own via periodInMinutes — nothing to reschedule.
 });
 
-chrome.runtime.onInstalled.addListener(() => {
+// Side panel mode — chrome.sidePanel.setPanelBehavior({openPanelOnActionClick:
+// true}) hands the toolbar icon AND any keyboard shortcut bound to
+// "Activate the extension" entirely over to Chrome's own native side-panel
+// open/close toggle — no onClicked listener, no manually tracking whether
+// it's currently open, needed at all. (An earlier version of this tried to
+// build that toggle by hand with chrome.windows.create/remove, having
+// wrongly assumed chrome.sidePanel had no way to close itself — it does,
+// just not through a JS method; this flag is the real mechanism.) Re-applied
+// on every install/startup too, not just when the setting changes, since
+// this is runtime action state rather than something guaranteed to survive
+// a browser restart on its own.
+async function applyUiMode(mode) {
+  try {
+    if (mode === 'sidepanel') {
+      await chrome.action.setPopup({ popup: '' });
+      await chrome.sidePanel.setPanelBehavior({ openPanelOnActionClick: true });
+    } else {
+      await chrome.sidePanel.setPanelBehavior({ openPanelOnActionClick: false });
+      await chrome.action.setPopup({ popup: 'popup.html' });
+    }
+  } catch (_) {}
+}
+
+chrome.runtime.onInstalled.addListener(async () => {
   rebuildAllAlarms();
   ensureFlagCache(); // one-time (or self-healing) flag download — see its own comment above
+  const { settings } = await getState();
+  await applyUiMode(settings.uiMode);
 });
-chrome.runtime.onStartup.addListener(() => rebuildAllAlarms());
+chrome.runtime.onStartup.addListener(async () => {
+  rebuildAllAlarms();
+  const { settings } = await getState();
+  await applyUiMode(settings.uiMode);
+});
 
 // Keyboard shortcut for privacy blur (default Alt+Shift+X, see manifest.json
 // "commands") — Chrome owns the actual key capture and remapping UI for
@@ -1049,7 +1095,7 @@ chrome.commands.onCommand.addListener(async (command) => {
   const { settings } = await getState();
   const next = !settings.privacyBlur;
   await setState({ settings: { ...settings, privacyBlur: next } });
-  await pushPrivacyBlurToTab(next);
+  await pushPrivacyBlurToTab(next, settings.privacyBlurOptions);
 });
 
 // ---------- messages from popup ----------
@@ -1510,6 +1556,41 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
           break;
         }
 
+        // Quick send to a chat picked from the quick-send box's own name
+        // search (popup.js resolves the name → waId live against WhatsApp
+        // itself first, see fetchLiveChatMap) — no number/country-code
+        // resolution needed here at all, unlike sendNowToNumber above; a
+        // group has no phone number to build one from in the first place.
+        case 'sendNowToChat': {
+          const { settings } = await getState();
+          if (!settings.masterEnabled) {
+            sendResponse({ ok: false, error: 'Extension is switched off — turn it back on in the header first.' });
+            break;
+          }
+          if (!msg.waId) {
+            sendResponse({ ok: false, error: 'No chat selected.' });
+            break;
+          }
+          if (!Array.isArray(msg.items) || msg.items.length === 0) {
+            sendResponse({ ok: false, error: 'Add at least one text or attachment first.' });
+            break;
+          }
+          const runId = `adhoc-${uid()}`;
+          runCampaign({
+            id: runId,
+            name: `Manual send: quick send to ${msg.name || msg.waId}`,
+            items: msg.items,
+            messageOverride: msg.messageOverride,
+            explicitTargets: [{ waId: msg.waId, name: msg.name || msg.waId }],
+            sendSeparator: msg.sendSeparator !== false,
+            useDefaultDelay: true,
+            delayBetweenMsMs: settings.defaultDelayBetweenMsMs,
+            delayBetweenListsMs: settings.defaultDelayBetweenListsMs
+          });
+          sendResponse({ ok: true, runId, chatName: msg.name || msg.waId });
+          break;
+        }
+
         // Popup-side safety net for the flag cache — normally a no-op fast
         // path (already downloaded at install time), only actually fetches
         // anything if the cache was cleared/partial, and only the missing
@@ -1626,6 +1707,8 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
           const { settings } = await getState();
           const wasSyncEnabled = settings.syncEnabled;
           const wasPrivacyBlur = settings.privacyBlur;
+          const wasPrivacyBlurOptions = JSON.stringify(settings.privacyBlurOptions);
+          const wasUiMode = settings.uiMode;
           const nextSettings = { ...settings, ...msg.settings };
           await setState({ settings: nextSettings });
           // Flipping the toggle takes effect immediately rather than waiting
@@ -1642,8 +1725,13 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
           // reads it fresh via getState on its own load, but pushing it
           // live here means flipping the toggle takes effect on an
           // already-open tab immediately instead of needing a reload.
-          if (nextSettings.privacyBlur !== wasPrivacyBlur) {
-            await pushPrivacyBlurToTab(nextSettings.privacyBlur);
+          if (nextSettings.privacyBlur !== wasPrivacyBlur || JSON.stringify(nextSettings.privacyBlurOptions) !== wasPrivacyBlurOptions) {
+            await pushPrivacyBlurToTab(nextSettings.privacyBlur, nextSettings.privacyBlurOptions);
+          }
+          // Controls whether the toolbar icon/shortcut opens the popup or
+          // the side panel from now on — see applyUiMode above.
+          if (nextSettings.uiMode !== wasUiMode) {
+            await applyUiMode(nextSettings.uiMode);
           }
           sendResponse({ ok: true });
           break;

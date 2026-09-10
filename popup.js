@@ -4,6 +4,16 @@ function call(action, payload = {}) {
   });
 }
 
+// The exact same popup.html runs both as the toolbar popup and as the side
+// panel (manifest.json points the side panel at "popup.html?panel=1"), told
+// apart here by that query param. Set immediately, before anything renders,
+// so a side-panel load never flashes the popup's fixed width/height first
+// (see the .side-panel-mode override in popup.css) — see the "side panel
+// mode" section further down for the header button that switches between
+// the two.
+const IS_SIDE_PANEL = new URLSearchParams(location.search).has('panel');
+if (IS_SIDE_PANEL) document.documentElement.classList.add('side-panel-mode');
+
 // ============ TOAST NOTIFICATIONS ============
 // Replaces every alert() in this file — non-blocking, auto-dismissing,
 // bottom-anchored, themed (see .toast-container/.toast in popup.css).
@@ -389,7 +399,7 @@ const HF_ICON_SVG =
 const REFRESH_ICON_SVG =
   '<svg viewBox="0 0 24 24" width="14" height="14"><path fill="currentColor" d="M17.65 6.35A7.958 7.958 0 0 0 12 4c-4.42 0-7.99 3.58-7.99 8s3.57 8 7.99 8c3.73 0 6.84-2.55 7.73-6h-2.08c-.82 2.33-3.04 4-5.65 4-3.31 0-6-2.69-6-6s2.69-6 6-6c1.66 0 3.14.69 4.22 1.78L13 11h7V4l-2.35 2.35z"/></svg>';
 
-function renderProgressBlock(run) {
+function renderProgressBlock(run, closeAct) {
   const doneCount = run.sent + run.failed;
   const pct = run.total > 0 ? Math.round((doneCount / run.total) * 100) : 0;
   const fillClass = run.failed > 0 ? 'progress-fill has-failures' : 'progress-fill';
@@ -403,10 +413,18 @@ function renderProgressBlock(run) {
   // listener (see below) rather than per-render, since this HTML is
   // inserted via innerHTML from two different places (message send panel,
   // campaign row).
+  // Once done, pause/reset (which only make sense mid-run) give way to a
+  // close control in the exact same spot — right end of the bar's own row
+  // — instead of a separate full-width "Close" button underneath. Schedule
+  // rows (see the two callers with no closeAct) never show one at all;
+  // there's nothing to dismiss, the row just goes back to normal on its own
+  // once the run clears.
   const controls = !run.done
     ? `<button class="icon-btn small-icon-btn progress-pause-btn" type="button" data-run-id="${run.id}" data-tooltip="${run.paused ? 'Resume' : 'Pause'}">${run.paused ? PLAY_ICON_SVG : PAUSE_ICON_SVG}</button>
        <button class="icon-btn small-icon-btn danger progress-reset-btn" type="button" data-run-id="${run.id}" data-tooltip="Reset (stop and clear this run — doesn't re-send to chats already reached)">${RESET_ICON_SVG}</button>`
-    : '';
+    : closeAct
+      ? `<button class="icon-btn small-icon-btn danger progress-close-btn" type="button" data-act="${closeAct}" data-tooltip="Close">${CLOSE_ICON_SVG}</button>`
+      : '';
   return `<div class="progress-block">
     <div class="progress-bar-row">
       <div class="progress-bar"><div class="${fillClass}" style="width:${pct}%"></div></div>
@@ -587,7 +605,9 @@ async function refresh() {
     chatSource.set(c.waId, c);
   }
   renderMasterToggle();
+  renderUiModeButton();
   renderPrivacyBlurToggle();
+  renderPrivacyBlurModal();
   renderPrivacyShortcut();
   renderMessages();
   renderCampaignsTab();
@@ -678,6 +698,47 @@ document.getElementById('masterToggleBtn').addEventListener('click', async () =>
   refresh();
 });
 
+// ---------- side panel mode ----------
+// Chrome's real chrome.sidePanel API, with chrome.sidePanel.setPanelBehavior
+// ({openPanelOnActionClick: true}) — see background.js's applyUiMode.
+// That flag hands the toolbar icon AND any keyboard shortcut bound to
+// "Activate the extension" entirely over to Chrome's own native side-panel
+// open/close toggle, so there's nothing this file needs to do to make a
+// hotkey toggle it shut on a second press — that's automatic once the flag
+// is set. This button only has two jobs: flip the stored mode, and (when
+// switching *into* panel mode) open the panel for the click happening right
+// now, which chrome.sidePanel.open() requires doing synchronously inside
+// the same user-gesture callback — NOT after an awaited message round trip,
+// which would let that gesture expire before the call runs. That's why the
+// saveSettings call below is deliberately not awaited.
+// IS_SIDE_PANEL/the side-panel-mode class are set at the very top of this
+// file, before anything renders, to avoid a flash of the fixed popup
+// width/height in a panel that should fill its own space instead.
+function renderUiModeButton() {
+  const btn = document.getElementById('sidePanelBtn');
+  if (IS_SIDE_PANEL) {
+    btn.innerHTML = '<svg viewBox="0 0 24 24" width="17" height="17"><path fill="currentColor" d="M14 3v2h3.59l-9.83 9.83 1.41 1.41L19 6.41V10h2V3h-7ZM5 5h5V3H5a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-5h-2v5H5V5Z"/></svg>';
+    btn.dataset.tooltip = 'Switch back to the popup';
+  } else {
+    btn.innerHTML = '<svg viewBox="0 0 24 24" width="17" height="17"><path fill="currentColor" d="M4 4h16a2 2 0 0 1 2 2v12a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2Zm11 2v12h5V6h-5Z"/></svg>';
+    btn.dataset.tooltip = 'Open as a side panel';
+  }
+}
+document.getElementById('sidePanelBtn').addEventListener('click', () => {
+  if (IS_SIDE_PANEL) {
+    call('saveSettings', { settings: { uiMode: 'popup' } });
+    setTimeout(() => window.close(), 60);
+    return;
+  }
+  call('saveSettings', { settings: { uiMode: 'sidepanel' } });
+  try {
+    chrome.windows.getCurrent((win) => {
+      if (chrome.sidePanel && chrome.sidePanel.open) chrome.sidePanel.open({ windowId: win.id }).catch(() => {});
+    });
+  } catch (_) {}
+  setTimeout(() => window.close(), 120); // the panel's open now — this tiny popup would just be a redundant second copy
+});
+
 // ---------- privacy screen blur ----------
 // The actual blurring happens on the WhatsApp Web page itself (content.js);
 // this button just flips the setting — background.js's saveSettings
@@ -687,14 +748,125 @@ function renderPrivacyBlurToggle() {
   const btn = document.getElementById('privacyBlurBtn');
   btn.classList.toggle('on', on);
   btn.dataset.tooltip = on
-    ? 'Blurring chat names, photos & messages — click to turn off'
-    : 'Blur chat names, photos & messages (screen-sharing)';
+    ? 'Blurring chat names, photos & messages — click to turn off, right-click for settings'
+    : 'Blur chat names, photos & messages (screen-sharing) — right-click for settings';
 }
 
 document.getElementById('privacyBlurBtn').addEventListener('click', async () => {
   const on = !!STATE.settings.privacyBlur;
   await call('saveSettings', { settings: { privacyBlur: !on } });
   refresh();
+});
+
+// Right-click the same eye button opens the settings — no separate button
+// for it (there used to be one; removed so there's only the one control to
+// find). preventDefault suppresses the browser's own right-click menu.
+document.getElementById('privacyBlurBtn').addEventListener('contextmenu', (e) => {
+  e.preventDefault();
+  openPrivacyBlurModal();
+});
+
+// Which parts of the page privacy blur actually covers, how strong, and
+// what style (soft blur vs a solid blackout bar) — a centered modal, not a
+// dropdown off the button, per request. Same shape/defaults as
+// background.js's DEFAULT_SETTINGS.privacyBlurOptions and content.js's
+// DEFAULT_PRIVACY_BLUR_OPTIONS/mergePrivacyBlurOptions — kept in sync by
+// hand since there's no shared module between the three files.
+const DEFAULT_PRIVACY_BLUR_OPTIONS = {
+  style: 'blur',
+  categories: {
+    messages: { enabled: true, intensity: 60 },
+    media: { enabled: true, intensity: 60 },
+    chatListNames: { enabled: true, intensity: 60 },
+    chatListPreviews: { enabled: true, intensity: 60 },
+    profilePictures: { enabled: true, intensity: 60 }
+  }
+};
+function mergePrivacyBlurOptions(options) {
+  const incoming = options || {};
+  const categories = {};
+  for (const key of Object.keys(DEFAULT_PRIVACY_BLUR_OPTIONS.categories)) {
+    categories[key] = { ...DEFAULT_PRIVACY_BLUR_OPTIONS.categories[key], ...((incoming.categories || {})[key] || {}) };
+  }
+  return { style: incoming.style === 'blackout' ? 'blackout' : 'blur', categories };
+}
+function currentPrivacyBlurOptions() {
+  return mergePrivacyBlurOptions(STATE.settings.privacyBlurOptions);
+}
+// Saves straight to background.js (which pushes it live to the WA tab) and
+// patches STATE locally so the modal's own controls don't reset/flicker
+// while still open — no full refresh() round trip needed for this.
+async function savePrivacyBlurOptions(opts) {
+  STATE.settings.privacyBlurOptions = opts;
+  await call('saveSettings', { settings: { privacyBlurOptions: opts } });
+}
+function renderPrivacyBlurModal() {
+  const opts = currentPrivacyBlurOptions();
+  document.querySelectorAll('.pb-style-radio').forEach((radio) => {
+    radio.checked = radio.value === opts.style;
+  });
+  document.querySelectorAll('.pb-cat-row').forEach((row) => {
+    const cat = opts.categories[row.dataset.cat];
+    if (!cat) return;
+    row.querySelector('.pb-enable').checked = !!cat.enabled;
+    row.querySelector('.pb-intensity').value = cat.intensity;
+  });
+}
+function openPrivacyBlurModal() {
+  renderPrivacyBlurModal();
+  document.getElementById('privacyBlurModal').style.display = 'flex';
+}
+function closePrivacyBlurModal() {
+  document.getElementById('privacyBlurModal').style.display = 'none';
+}
+document.getElementById('privacyBlurModalClose').addEventListener('click', closePrivacyBlurModal);
+document.getElementById('privacyBlurModal').addEventListener('click', (e) => {
+  if (e.target.id === 'privacyBlurModal') closePrivacyBlurModal();
+});
+document.addEventListener('keydown', (e) => {
+  if (e.key === 'Escape' && document.getElementById('privacyBlurModal').style.display !== 'none') closePrivacyBlurModal();
+});
+document.getElementById('privacyBlurResetBtn').addEventListener('click', async () => {
+  // Structured-clone via JSON so this is a fresh copy, not a reference to
+  // the shared DEFAULT_PRIVACY_BLUR_OPTIONS object itself — every other
+  // save mutates currentPrivacyBlurOptions()'s own return value in place,
+  // and that would otherwise corrupt the real default for the rest of the
+  // popup's lifetime.
+  const opts = JSON.parse(JSON.stringify(DEFAULT_PRIVACY_BLUR_OPTIONS));
+  await savePrivacyBlurOptions(opts);
+  renderPrivacyBlurModal();
+});
+document.querySelectorAll('.pb-style-radio').forEach((radio) => {
+  radio.addEventListener('change', async () => {
+    if (!radio.checked) return;
+    const opts = currentPrivacyBlurOptions();
+    opts.style = radio.value;
+    // Redacted's whole point is that nothing shows through — a half-opaque
+    // bar defeats it, so switching to it jumps every category to fully
+    // opaque by default. Blur doesn't get an equivalent forced bump; a
+    // lighter blur is still a deliberate, reasonable choice there.
+    if (radio.value === 'blackout') {
+      for (const cat of Object.values(opts.categories)) cat.intensity = 100;
+    }
+    await savePrivacyBlurOptions(opts);
+    renderPrivacyBlurModal();
+  });
+});
+document.querySelectorAll('.pb-cat-row').forEach((row) => {
+  const key = row.dataset.cat;
+  row.querySelector('.pb-enable').addEventListener('change', async (e) => {
+    const opts = currentPrivacyBlurOptions();
+    opts.categories[key].enabled = e.target.checked;
+    await savePrivacyBlurOptions(opts);
+  });
+  // 'change' (drag-release), not 'input' (fires continuously while
+  // dragging) — saveSettings pushes live to the WA tab on every call, and
+  // there's no need to hammer that mid-drag.
+  row.querySelector('.pb-intensity').addEventListener('change', async (e) => {
+    const opts = currentPrivacyBlurOptions();
+    opts.categories[key].intensity = Number(e.target.value);
+    await savePrivacyBlurOptions(opts);
+  });
 });
 
 // Shows the shortcut Chrome actually has bound right now, not just the
@@ -1026,8 +1198,10 @@ function addTextThread() {
   saveDraft();
 }
 document.getElementById('addTextItemBtn').addEventListener('click', addTextThread);
-// Ctrl/Cmd+Enter does the same thing as the + button — plain Enter still
-// just inserts a newline, same as any multi-line text box.
+// Ctrl/Cmd+Enter does the same thing as the + button, Ctrl/Cmd+Shift+Enter
+// quick-sends, Alt+Enter saves the message (same as clicking Save
+// message/Update message) — plain Enter still just inserts a newline, same
+// as any multi-line text box.
 document.getElementById('msgText').addEventListener('keydown', (e) => {
   if (e.key === 'Enter' && (e.ctrlKey || e.metaKey) && e.shiftKey) {
     e.preventDefault();
@@ -1035,6 +1209,9 @@ document.getElementById('msgText').addEventListener('keydown', (e) => {
   } else if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) {
     e.preventDefault();
     addTextThread();
+  } else if (e.key === 'Enter' && e.altKey) {
+    e.preventDefault();
+    document.getElementById('saveMessageBtn').click();
   }
 });
 
@@ -1216,27 +1393,204 @@ function matchDialCode(digits) {
 // the dial code back out of the field, so the field always holds just the
 // local number and the picker is the single source of truth for the dial
 // code added at send time (never both at once).
-document.getElementById('quickSendNumber').addEventListener('input', (e) => {
-  const raw = e.target.value;
-  if (!raw.trim().startsWith('+')) return;
-  const digits = raw.replace(/\D/g, '');
-  const match = matchDialCode(digits);
-  if (match) {
-    selectCountry(match, { skipFocus: true });
-    e.target.value = digits.slice(match.dial.length);
+//
+// Typing a name instead of digits searches live against WhatsApp itself
+// (fetchLiveChatMap — the same live groups/contacts/communities/open-chats
+// pull "Scan" and "Refresh against WhatsApp" already use), not this
+// extension's own saved/fetched chat list — deliberately, since that list
+// might be empty if the user's never scanned, and this needs to work
+// either way. Fetched once per popup session and cached in memory
+// (quickSendChatCache), then filtered locally on every keystroke after
+// that — no repeat WPP round trips while typing.
+let quickSendChatCache = null;
+let quickSendChatCacheLoading = null;
+let quickSendSelectedTarget = null; // {waId, name} once a search result is picked; cleared on any further edit
+function looksLikeName(raw) {
+  return /[a-zA-Z]/.test(raw);
+}
+async function ensureQuickSendChatCache() {
+  if (quickSendChatCache) return quickSendChatCache;
+  if (quickSendChatCacheLoading) return quickSendChatCacheLoading;
+  quickSendChatCacheLoading = fetchLiveChatMap()
+    .then((res) => {
+      if (!res.ok) {
+        quickSendChatCache = null;
+        return quickSendChatCache;
+      }
+      // Dedupe by id only (fetchLiveChatMap already does this, but the
+      // filter below re-derives from res.map.values() directly, so redo it
+      // here too rather than assume). NOT by name — an earlier version of
+      // this collapsed same-named entries down to one, on the assumption a
+      // repeated name meant the same person showing up twice under both a
+      // real @c.us id and an opaque @lid WhatsApp substitutes when it masks
+      // a number. Turns out plenty of *actually different* people share a
+      // saved name ("Abu Bakar" x6 in one real account's contacts) — that
+      // dedupe was quietly hiding real, distinct contacts from the search.
+      // The phone number shown under each name (see renderQuickSendSearch)
+      // is what's supposed to disambiguate that, not deduping them away.
+      const byId = new Map();
+      for (const c of res.map.values()) {
+        if (c.waId) byId.set(c.waId, c);
+      }
+      quickSendChatCache = [...byId.values()];
+      return quickSendChatCache;
+    })
+    .finally(() => {
+      quickSendChatCacheLoading = null;
+    });
+  return quickSendChatCacheLoading;
+}
+function closeQuickSendSearch() {
+  document.getElementById('quickSendSearchDropdown').style.display = 'none';
+}
+function chatTypeLabel(type) {
+  if (type === 'group') return 'Group';
+  if (type === 'community') return 'Community';
+  return 'Contact';
+}
+function renderQuickSendSearch(matches) {
+  const dropdown = document.getElementById('quickSendSearchDropdown');
+  dropdown.style.display = 'block';
+  if (matches === null) {
+    dropdown.innerHTML = '<p class="qs-loading">Searching WhatsApp…</p>';
+    return;
   }
+  if (matches.length === 0) {
+    dropdown.innerHTML = '<p class="qs-no-match">No matching contact or group.</p>';
+    return;
+  }
+  // The number rides along mainly so two different contacts saved under
+  // the same name (or a same-named group and community) are actually
+  // tellable apart in the list, not just so it's there to read.
+  dropdown.innerHTML = matches
+    .slice(0, 20)
+    .map(
+      (c) =>
+        `<button type="button" class="qs-option" data-wa-id="${escapeHtml(c.waId)}">
+          <span class="qs-name-col">
+            <span class="qs-name">${escapeHtml(c.name || c.waId)}</span>
+            ${c.number ? `<span class="qs-number">+${escapeHtml(c.number)}</span>` : ''}
+          </span>
+          <span class="qs-type">${chatTypeLabel(c.type)}</span>
+        </button>`
+    )
+    .join('');
+  dropdown.querySelectorAll('.qs-option').forEach((btn) => {
+    btn.addEventListener('click', () => {
+      const chat = (quickSendChatCache || []).find((c) => c.waId === btn.dataset.waId);
+      if (!chat) return;
+      quickSendSelectedTarget = { waId: chat.waId, name: chat.name || chat.waId };
+      document.getElementById('quickSendNumber').value = quickSendSelectedTarget.name;
+      closeQuickSendSearch();
+    });
+  });
+}
+document.getElementById('quickSendNumber').addEventListener('input', async (e) => {
+  const raw = e.target.value;
+  quickSendSelectedTarget = null; // any edit invalidates whatever was picked before
+  if (raw.trim().startsWith('+')) {
+    const digits = raw.replace(/\D/g, '');
+    const match = matchDialCode(digits);
+    if (match) {
+      selectCountry(match, { skipFocus: true });
+      e.target.value = digits.slice(match.dial.length);
+    }
+    // Falls through to the digit search below (using whatever the field
+    // holds now) rather than returning here — a full "+92300…" paste that
+    // matches a saved contact should surface them too, same as typing the
+    // local number would.
+  }
+  const query = e.target.value.trim();
+  if (!query) {
+    closeQuickSendSearch();
+    return;
+  }
+  if (looksLikeName(query)) {
+    renderQuickSendSearch(null); // loading state
+    const cache = await ensureQuickSendChatCache();
+    // The field may have changed (or been cleared) while that fetch was in
+    // flight — only render if this is still what the user's actually typed.
+    if (document.getElementById('quickSendNumber').value.trim() !== query) return;
+    if (!cache) {
+      renderQuickSendSearch([]);
+      return;
+    }
+    const q = query.toLowerCase();
+    renderQuickSendSearch(cache.filter((c) => (c.name || '').toLowerCase().includes(q)));
+    return;
+  }
+  // Pure digits — search saved numbers too (typing a friend's number shows
+  // them by name if they're saved), but stay silent (no dropdown at all,
+  // not even a "no match") when nothing matches, since typing a number
+  // that just isn't saved anywhere is completely normal, not an error —
+  // it still sends fine as a plain number either way.
+  const digitsQuery = query.replace(/\D/g, '');
+  if (digitsQuery.length < 4) {
+    closeQuickSendSearch();
+    return;
+  }
+  const cache = await ensureQuickSendChatCache();
+  if (document.getElementById('quickSendNumber').value.trim().replace(/\D/g, '') !== digitsQuery) return;
+  if (!cache) {
+    closeQuickSendSearch();
+    return;
+  }
+  const matches = cache.filter((c) => c.number && c.number.includes(digitsQuery));
+  if (matches.length === 0) {
+    closeQuickSendSearch();
+    return;
+  }
+  renderQuickSendSearch(matches);
+});
+document.addEventListener('click', (e) => {
+  if (!e.target.closest('.quick-send-number-wrap')) closeQuickSendSearch();
 });
 
-// Quick send — types a number above the composer and sends whatever's
-// staged there (Ctrl+Shift+Enter or the send icon inside the number box)
-// straight to it via sendNowToNumber, without saving anything or needing
-// the number in a list first. Same getEffectiveItems() fallback as
-// sendWithoutSavingBtn: an untouched box still sends whatever's typed.
+// Quick send — types a number (or, now, a contact/group name — see the
+// search above) and sends whatever's staged in the composer straight to it
+// (Ctrl+Shift+Enter or the send icon inside the number box), without saving
+// anything or needing the target in a list first. Same getEffectiveItems()
+// fallback as sendWithoutSavingBtn: an untouched box still sends whatever's
+// typed.
 async function quickSendToNumber() {
   const numberInput = document.getElementById('quickSendNumber');
+  if (getEffectiveItems().length === 0) {
+    showToast('Add at least one text thread or attachment first.', 'error');
+    return;
+  }
+  if (!STATE.settings.consentAccepted) {
+    showToast('Accept the consent checkbox on the Settings tab first — sending is gated behind it, even for a quick send.', 'error');
+    return;
+  }
+  const btn = document.getElementById('quickSendBtn');
+  const messageOverride = { headerFooterMode: composingHfMode, headerText: composingHfHeaderText, footerText: composingHfFooterText };
+
+  // A picked search result (contact/group) bypasses number resolution
+  // entirely — sends straight to its own chat id, no country code or digit
+  // cleanup involved (a group has no phone number to build one from).
+  if (quickSendSelectedTarget && numberInput.value.trim() === quickSendSelectedTarget.name) {
+    btn.disabled = true;
+    const res = await call('sendNowToChat', {
+      waId: quickSendSelectedTarget.waId,
+      name: quickSendSelectedTarget.name,
+      items: getEffectiveItems(),
+      sendSeparator: sendPanelSeparatorPref,
+      messageOverride
+    });
+    btn.disabled = false;
+    if (!res.ok) {
+      showToast(res.error || 'Could not send.', 'error');
+      return;
+    }
+    showToast(`Sending to ${res.chatName || quickSendSelectedTarget.name}…`, 'success');
+    numberInput.value = '';
+    quickSendSelectedTarget = null;
+    return;
+  }
+
   const localDigits = numberInput.value.replace(/\D/g, '');
   if (!localDigits) {
-    showToast('Enter a phone number to quick-send to first.', 'error');
+    showToast('Enter a phone number, contact, or group name first.', 'error');
     numberInput.focus();
     return;
   }
@@ -1248,17 +1602,7 @@ async function quickSendToNumber() {
   // itself keeps showing exactly what was typed.
   const nationalDigits = selectedCountry ? localDigits.replace(/^0/, '') : localDigits;
   const number = (selectedCountry ? selectedCountry.dial : '') + nationalDigits;
-  if (getEffectiveItems().length === 0) {
-    showToast('Add at least one text thread or attachment first.', 'error');
-    return;
-  }
-  if (!STATE.settings.consentAccepted) {
-    showToast('Accept the consent checkbox on the Settings tab first — sending is gated behind it, even for a quick send.', 'error');
-    return;
-  }
-  const btn = document.getElementById('quickSendBtn');
   btn.disabled = true;
-  const messageOverride = { headerFooterMode: composingHfMode, headerText: composingHfHeaderText, footerText: composingHfFooterText };
   const res = await call('sendNowToNumber', {
     number,
     items: getEffectiveItems(),
@@ -1278,6 +1622,8 @@ document.getElementById('quickSendNumber').addEventListener('keydown', (e) => {
   if (e.key === 'Enter' && (e.ctrlKey || e.metaKey) && e.shiftKey) {
     e.preventDefault();
     quickSendToNumber();
+  } else if (e.key === 'Escape') {
+    closeQuickSendSearch();
   }
 });
 
@@ -1869,8 +2215,8 @@ function renderAdhocSendPanel() {
   }
   if (run) {
     panel.innerHTML = `
-      ${renderProgressBlock(run)}
-      ${run.done ? `<button class="ghost small-inline" type="button" data-act="closeAdhoc">${CHECK_ICON_SVG}<span class="btn-label">Close</span></button>` : '<p class="hint">Sending — this updates live.</p>'}
+      ${renderProgressBlock(run, 'closeAdhoc')}
+      ${!run.done ? '<p class="hint">Sending — this updates live.</p>' : ''}
     `;
     const closeBtn = panel.querySelector('[data-act="closeAdhoc"]');
     if (closeBtn) {
@@ -2108,23 +2454,12 @@ async function moveMessage(id, direction) {
   refresh();
 }
 
-// Saved-message row actions: Send/Schedule (the chevron) and the quick
-// "send to current chat" button stay directly on the row since they DO
-// something with the message; Edit/Move up/Move down/Delete are "manage
-// this message" actions rather than "send" ones, and with all six as
-// separate icons the row was overflowing/wrapping at the neumorphic
-// buttons' size — folded into a "more" overflow menu instead of shrinking
-// everything to cram it back in, since fewer visible icons is the fix,
-// not smaller ones. Only one row's menu open at a time, closed by
-// clicking anywhere else (this listener is added once here, not per
-// render — renderMessages() runs on every refresh/toggle).
-let messageOverflowMenuId = null;
-document.addEventListener('click', () => {
-  if (messageOverflowMenuId !== null) {
-    messageOverflowMenuId = null;
-    renderMessages();
-  }
-});
+// Saved-message row actions: Send/Schedule (the chevron), the quick "send
+// to current chat" button, Edit, Move up/down, and Delete all sit directly
+// on the row now — used to fold Edit/Move/Delete behind a "more" overflow
+// button since six icons didn't fit at the popup's old width, but the wider
+// popup (see body's width in popup.css) has room for all of them inline
+// without needing to hide any behind a menu.
 
 function renderMessages() {
   const ul = document.getElementById('messageList');
@@ -2186,21 +2521,16 @@ function renderMessages() {
         <span class="log-time">${lastSent}</span>${scheduleLine}${autoReplyLine}
       </div>
       <div class="item-actions">
+        <button class="icon-btn small-icon-btn danger" data-act="del" type="button" data-tooltip="Delete">${DELETE_ICON_SVG}</button>
+        <span class="textarea-toolbar-sep"></span>
+        <button class="icon-btn small-icon-btn" data-act="edit" type="button" data-tooltip="Edit">${EDIT_ICON_SVG}</button>
+        <button class="icon-btn small-icon-btn" data-act="moveUp" type="button" data-tooltip="Move up" ${idx === 0 ? 'disabled' : ''}>${MOVE_UP_ICON_SVG}</button>
+        <button class="icon-btn small-icon-btn" data-act="moveDown" type="button" data-tooltip="Move down" ${idx === sortedMessages.length - 1 ? 'disabled' : ''}>${MOVE_DOWN_ICON_SVG}</button>
+        <span class="textarea-toolbar-sep"></span>
         ${quickSendBtnHtml}
         <button class="icon-btn small-icon-btn chevron-toggle-btn${isPanelOpen ? ' expanded' : ''}" data-act="send" type="button" data-tooltip="Send to lists / schedule">
           <svg viewBox="0 0 24 24" width="14" height="14"><path fill="currentColor" d="M7 10l5 5 5-5z"/></svg>
         </button>
-        <div class="row-overflow${messageOverflowMenuId === m.id ? ' open' : ''}">
-          <div class="row-fan">
-            <button class="icon-btn small-icon-btn fan-item" data-act="edit" type="button" data-tooltip="Edit">${EDIT_ICON_SVG}</button>
-            <button class="icon-btn small-icon-btn fan-item" data-act="moveUp" type="button" data-tooltip="Move up" ${idx === 0 ? 'disabled' : ''}>${MOVE_UP_ICON_SVG}</button>
-            <button class="icon-btn small-icon-btn fan-item" data-act="moveDown" type="button" data-tooltip="Move down" ${idx === sortedMessages.length - 1 ? 'disabled' : ''}>${MOVE_DOWN_ICON_SVG}</button>
-            <button class="icon-btn small-icon-btn danger fan-item" data-act="del" type="button" data-tooltip="Delete">${DELETE_ICON_SVG}</button>
-          </div>
-          <button class="icon-btn small-icon-btn overflow-toggle-btn" data-act="overflow" type="button" data-tooltip="More">
-            <svg viewBox="0 0 24 24" width="14" height="14"><path fill="currentColor" d="M19 13h-6v6h-2v-6H5v-2h6V5h2v6h6z"/></svg>
-          </button>
-        </div>
       </div>
     </div>`;
 
@@ -2304,12 +2634,6 @@ function renderMessages() {
     });
     li.querySelector('[data-act="moveUp"]').addEventListener('click', () => moveMessage(m.id, 'up'));
     li.querySelector('[data-act="moveDown"]').addEventListener('click', () => moveMessage(m.id, 'down'));
-    li.querySelector('.row-fan').addEventListener('click', (e) => e.stopPropagation());
-    li.querySelector('[data-act="overflow"]').addEventListener('click', (e) => {
-      e.stopPropagation();
-      messageOverflowMenuId = messageOverflowMenuId === m.id ? null : m.id;
-      renderMessages();
-    });
     ul.appendChild(li);
   });
 }
@@ -2342,8 +2666,8 @@ function buildSendPanel(message) {
   }
   if (run) {
     panel.innerHTML = `
-      ${renderProgressBlock(run)}
-      ${run.done ? `<button class="ghost small-inline" type="button" data-act="closeSend">${CHECK_ICON_SVG}<span class="btn-label">Close</span></button>` : '<p class="hint">Sending — this updates live.</p>'}
+      ${renderProgressBlock(run, 'closeSend')}
+      ${!run.done ? '<p class="hint">Sending — this updates live.</p>' : ''}
     `;
     const closeBtn = panel.querySelector('[data-act="closeSend"]');
     if (closeBtn) {
@@ -3853,8 +4177,8 @@ function renderLog() {
   const deleteRun = deleteRunEntry ? STATE.activeRuns[deleteRunEntry.runId] : null;
   if (deleteRun) {
     progressEl.innerHTML = `
-      ${renderProgressBlock(deleteRun)}
-      ${deleteRun.done ? `<button class="ghost small-inline" type="button" data-act="closeDeleteRun">${CHECK_ICON_SVG}<span class="btn-label">Close</span></button>` : '<p class="hint">Deleting for everyone — this updates live.</p>'}
+      ${renderProgressBlock(deleteRun, 'closeDeleteRun')}
+      ${!deleteRun.done ? '<p class="hint">Deleting for everyone — this updates live.</p>' : ''}
     `;
     const closeBtn = progressEl.querySelector('[data-act="closeDeleteRun"]');
     if (closeBtn) closeBtn.addEventListener('click', () => { setDeleteRunId(null); renderLog(); });
@@ -4480,15 +4804,15 @@ async function checkWaStatusLive() {
   const dot = document.getElementById('waStatusDot');
   const text = document.getElementById('waStatusText');
   dot.className = 'wa-status-dot checking';
-  text.textContent = 'WhatsApp Status: checking…';
+  text.textContent = 'Status: checking…';
   const res = await call('checkWaStatus');
   if (res.ok && res.ready) {
     dot.className = 'wa-status-dot ready';
-    text.textContent = 'WhatsApp Status: ready';
+    text.textContent = 'Status: ready';
     document.getElementById('waStatusLine').dataset.tooltip = 'WhatsApp Web is ready — sends should go through.';
   } else {
     dot.className = 'wa-status-dot not-ready';
-    text.textContent = 'WhatsApp Status: not ready';
+    text.textContent = 'Status: not ready';
     document.getElementById('waStatusLine').dataset.tooltip = res.reason || 'WhatsApp Web is not ready — a send would fail right now.';
   }
 }

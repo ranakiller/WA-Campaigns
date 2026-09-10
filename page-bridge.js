@@ -281,7 +281,14 @@ async function withCommunityRedirect(waId, sendFn) {
       return { result: await sendFn(resolvedId), waId: resolvedId }; // let this one's error (if any) propagate as-is
     }
 
-    throw err;
+    // Whatever's left is a raw WPP/internal error (e.g. "wid error: invalid
+    // wid", a null-property crash) — meaningless to a user reading it in a
+    // toast. Keep the original message as supporting detail, but lead with
+    // something actually actionable.
+    throw new Error(
+      `Could not send — WhatsApp rejected it (${message}). This usually means the chat isn't fully loaded/synced yet, ` +
+        `or that number/group no longer exists on WhatsApp. Try reopening that chat in WhatsApp Web once, then send again.`
+    );
   }
 }
 
@@ -310,9 +317,23 @@ async function handleRequest(action, payload) {
       return [...groups, ...contacts, ...communities];
     }
     case 'findContactByNumber': {
-      const id = `${digitsOnly(payload.number)}@c.us`;
-      const chat = await window.WPP.chat.find(id);
-      if (!chat || !chat.id) throw new Error('Could not resolve that phone number to a WhatsApp contact.');
+      const digits = digitsOnly(payload.number);
+      // A real phone number runs roughly 7-15 digits (E.164's own cap) — a
+      // wildly off length (a typo, or garbage input) is worth catching here
+      // with a message that actually makes sense, rather than letting it
+      // reach WPP.chat.find() and throw its own raw "wid error: invalid
+      // wid", which means nothing to anyone who isn't reading this code.
+      if (!digits || digits.length < 7 || digits.length > 15) {
+        throw new Error("That doesn't look like a valid phone number — check the digits (and country code) and try again.");
+      }
+      const id = `${digits}@c.us`;
+      let chat;
+      try {
+        chat = await window.WPP.chat.find(id);
+      } catch (e) {
+        throw new Error('Could not find a WhatsApp account for that number — double check the number and country code.');
+      }
+      if (!chat || !chat.id) throw new Error('Could not find a WhatsApp account for that number — double check the number and country code.');
       return {
         waId: chat.id._serialized,
         name: chat.name || chat.formattedTitle || chat.id.user,

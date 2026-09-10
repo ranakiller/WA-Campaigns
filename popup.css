@@ -119,9 +119,17 @@
 
 * { box-sizing: border-box; }
 
+/* height (not max-height) — a Chrome extension popup auto-sizes its actual
+   window to match body's rendered content height, and .tab-panel switching
+   (display:none/block, see below) means each tab's content is a genuinely
+   different height. max-height alone let the window shrink to fit whichever
+   tab happened to be shorter, so it visibly resized on every tab switch.
+   Pinning it to one constant height fixes that — a shorter tab just leaves
+   empty space at the bottom instead, and a taller one scrolls internally
+   the same as before. */
 body {
-  width: 400px;
-  max-height: 620px;
+  width: 480px;
+  height: 620px;
   overflow-y: auto;
   overflow-x: hidden;
   margin: 0;
@@ -129,6 +137,14 @@ body {
   font-size: 13px;
   color: var(--text-primary);
   background: var(--bg-app);
+}
+/* The side panel is a tall, dockable, resizable pane — nothing like the
+   popup's small fixed box — so it gets to fill whatever space Chrome gives
+   it instead of the popup's own width/height constraints. */
+html.side-panel-mode body {
+  width: 100%;
+  height: auto;
+  min-height: 100vh;
 }
 body::-webkit-scrollbar { width: 8px; }
 body::-webkit-scrollbar-track { background: transparent; }
@@ -140,13 +156,14 @@ body::-webkit-scrollbar-thumb:hover { background: var(--text-secondary); }
   display: flex;
   align-items: center;
   gap: 10px;
-  padding: 13px 16px;
+  padding: 9px 16px;
   background: linear-gradient(135deg, var(--accent), #007a61);
   box-shadow: var(--shadow-header);
   color: #fff;
   position: relative;
   z-index: 3;
 }
+.app-header-icons { display: flex; align-items: center; gap: 8px; flex-shrink: 0; }
 /* The header logo is a real Lottie animation now (icons/header-logo.json,
    downloaded from LottieFiles — "WhatsApp Default State" by its original
    creator), played by the vendored lottie-light player (vendor/lottie-
@@ -169,8 +186,13 @@ body::-webkit-scrollbar-thumb:hover { background: var(--text-secondary); }
    are plain white and were never green, so they didn't need touching. */
 .app-logo-icon svg { display: block; width: 100%; height: 100%; }
 .app-header-text { flex: 1; min-width: 0; }
-.app-header h1 { font-size: 14.5px; margin: 0; font-weight: 700; letter-spacing: 0.01em; }
-.app-header .subtitle { margin: 3px 0 0; font-size: 11px; opacity: 0.9; }
+/* white-space:nowrap + ellipsis is a safety belt, not the primary fix (that's
+   the wider body width above + dropping the redundant "WhatsApp" from the
+   status line, see waStatusText in popup.js) — if the header ever gets
+   tight again, it truncates gracefully instead of wrapping to a second line
+   and growing the whole header taller. */
+.app-header h1 { font-size: 14.5px; margin: 0; font-weight: 700; letter-spacing: 0.01em; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.app-header .subtitle { margin: 3px 0 0; font-size: 11px; opacity: 0.9; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .wa-status-line { display: flex; align-items: center; gap: 5px; }
 .wa-status-dot { width: 7px; height: 7px; border-radius: 50%; flex-shrink: 0; }
 .wa-status-dot.checking { background: #ffcd45; box-shadow: 0 0 5px 2px rgba(255, 205, 69, 0.6); }
@@ -244,6 +266,78 @@ body::-webkit-scrollbar-thumb:hover { background: var(--text-secondary); }
 @media (prefers-reduced-motion: reduce) {
   .icon-btn svg { animation: none !important; }
 }
+
+/* Blur settings — right-click the eye button in the header (see
+   #privacyBlurBtn's contextmenu listener in popup.js) opens this as a
+   centered modal, same fixed-inset/dimmed-backdrop pattern as
+   .confirm-overlay, just its own class since it's static markup (persistent
+   sliders/checkboxes) rather than built fresh per open like confirm's is. */
+.modal-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(6, 12, 15, 0.5);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 20px;
+  z-index: 600;
+}
+.modal-dialog {
+  background: var(--bg-panel);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  box-shadow: var(--shadow-md);
+  padding: 16px;
+  width: 100%;
+  max-width: 320px;
+  color: var(--text-primary);
+  text-align: left;
+}
+.modal-dialog-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-bottom: 2px; }
+.modal-dialog-head h3 { margin: 0; font-size: 13.5px; }
+.modal-dialog-head-actions { display: flex; align-items: center; gap: 6px; }
+.privacy-blur-dialog .hint { margin: 4px 0 10px; }
+.pb-style-radios { display: flex; gap: 16px; margin-bottom: 12px; }
+.pb-style-radios .checkbox-row { margin: 0; font-size: 12.5px; font-weight: 600; }
+.pb-cat-list { display: flex; flex-direction: column; gap: 10px; }
+.pb-cat-row { padding-bottom: 8px; border-bottom: 1px solid var(--border); }
+.pb-cat-row:last-child { border-bottom: none; padding-bottom: 0; }
+.pb-cat-row .checkbox-row { margin: 0 0 4px; font-size: 12px; }
+/* Disabled (category unchecked) — the slider's still there, just visibly
+   inert, rather than disappearing and reflowing the row on every toggle. */
+.pb-cat-row:has(.pb-enable:not(:checked)) .pb-intensity { opacity: 0.35; pointer-events: none; }
+input[type="range"].pb-intensity {
+  width: 100%;
+  margin: 4px 0 0;
+  height: 4px;
+  padding: 0;
+  border-radius: 3px;
+  background: var(--cap-bg);
+  box-shadow: inset 2px 2px 4px var(--neu-inset-d), inset -1px -1px 3px var(--neu-inset-l);
+  appearance: none;
+  -webkit-appearance: none;
+  cursor: pointer;
+}
+input[type="range"].pb-intensity::-webkit-slider-thumb {
+  appearance: none;
+  -webkit-appearance: none;
+  width: 14px;
+  height: 14px;
+  border-radius: 50%;
+  background: var(--accent);
+  box-shadow: 2px 2px 4px var(--neu-dark), -1px -1px 3px var(--neu-light);
+  cursor: pointer;
+  margin-top: -5px;
+}
+input[type="range"].pb-intensity::-moz-range-thumb {
+  width: 14px;
+  height: 14px;
+  border: none;
+  border-radius: 50%;
+  background: var(--accent);
+  cursor: pointer;
+}
+.privacy-blur-dialog .shortcut-row { margin-top: 12px; padding-top: 12px; border-top: 1px solid var(--border); }
 
 .master-off-banner {
   background: var(--danger-bg);
@@ -344,15 +438,41 @@ body::-webkit-scrollbar-thumb:hover { background: var(--text-secondary); }
 button.ghost.small-inline { padding: 5px 10px; margin: 0; font-size: 11px; gap: 5px; }
 button.ghost.small-inline svg { width: 12px; height: 12px; }
 
-/* A label row with one or more icon-button actions docked to its right. */
-.field-row-with-actions {
+/* Composer actions (header/footer, auto-reply, attach, add-as-thread) live
+   inside the textarea itself now, docked bottom-right, instead of a
+   separate icon row above it. resize:none on the textarea specifically
+   claims that corner for the toolbar — the browser's own resize grip would
+   otherwise sit in the exact same spot and fight with it. Padding on the
+   textarea keeps typed text from running under the floating bar; the
+   toolbar's own opaque background (not just the icons' own raised caps)
+   is what actually masks scrolled-under text cleanly. */
+.textarea-wrap { position: relative; }
+.textarea-wrap textarea {
+  /* display:block matters here, not just cosmetic — a textarea defaults to
+     inline-block, which reserves a few px of baseline/descender space below
+     its own rendered box. .textarea-wrap's height (it has no content of its
+     own but the textarea) picks that gap up too, so the toolbar's
+     bottom:7px below was measuring from below that phantom gap — landing
+     outside the textarea's actual visible border, not inside it. */
+  display: block;
+  resize: none;
+  padding-right: 10px;
+  padding-bottom: 40px;
+}
+.textarea-toolbar {
+  position: absolute;
+  right: 7px;
+  bottom: 7px;
   display: flex;
   align-items: center;
-  justify-content: space-between;
-  margin-top: 4px;
+  gap: 3px;
+  padding: 3px;
+  border-radius: 10px;
+  background: var(--bg-panel);
+  box-shadow: 3px 3px 6px var(--neu-dark), -2px -2px 5px var(--neu-light-weak);
 }
-.field-row-with-actions label { margin: 0; }
-.field-row-icons { display: flex; gap: 6px; }
+.textarea-toolbar .small-icon-btn { width: 27px; height: 27px; flex-shrink: 0; }
+.textarea-toolbar-sep { width: 1px; height: 18px; background: var(--border-strong); flex-shrink: 0; margin: 0 2px; }
 
 /* ---------- panel cards (groups a form/section into a visually distinct
    block, so "compose" and "browse saved" zones read as separate areas
@@ -742,7 +862,7 @@ button.ghost.small-inline svg { width: 12px; height: 12px; }
 }
 .progress-fill { background: var(--accent-bright); height: 100%; border-radius: 6px; transition: width 0.3s ease; }
 .progress-fill.has-failures { background: var(--danger-fg); }
-.progress-pause-btn, .progress-reset-btn { width: 26px; height: 26px; flex-shrink: 0; }
+.progress-pause-btn, .progress-reset-btn, .progress-close-btn { width: 26px; height: 26px; flex-shrink: 0; }
 .progress-pause-btn { background: var(--bg-hover); color: var(--accent); }
 .progress-pause-btn:hover { background: var(--accent-soft); }
 .progress-label { font-size: 11px; color: var(--text-secondary); margin-top: 5px; display: block; }
@@ -1090,6 +1210,58 @@ select {
 }
 .quick-send-number-wrap .quick-send-btn:hover { color: var(--accent-bright); }
 
+/* Name search results (typing a contact/group name instead of digits) —
+   same visual language as .country-code-dropdown's option list, full width
+   of the number field it hangs off instead of a fixed narrow picker. */
+.quick-send-search-dropdown {
+  position: absolute;
+  top: calc(100% + 6px);
+  left: 0;
+  right: 0;
+  z-index: 40;
+  background: var(--bg-panel);
+  border-radius: var(--radius-sm);
+  box-shadow: 6px 6px 14px var(--neu-dark), -6px -6px 14px var(--neu-light);
+  padding: 6px;
+  max-height: 220px;
+  overflow-y: auto;
+  scrollbar-width: none;
+}
+.quick-send-search-dropdown::-webkit-scrollbar { display: none; }
+.qs-option {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  padding: 7px 8px;
+  border: none;
+  background: none;
+  color: var(--text-primary);
+  font-size: 12px;
+  font-family: inherit;
+  text-align: left;
+  cursor: pointer;
+  border-radius: 6px;
+}
+.qs-option:hover { background: var(--accent-soft); color: var(--accent); }
+.qs-option .qs-name-col { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 1px; }
+.qs-option .qs-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.qs-option .qs-number { font-size: 10.5px; color: var(--text-secondary); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-variant-numeric: tabular-nums; }
+.qs-option:hover .qs-number { color: var(--accent); }
+.qs-option .qs-type {
+  flex-shrink: 0;
+  font-size: 9.5px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--text-secondary);
+  background: var(--cap-bg);
+  padding: 2px 6px;
+  border-radius: 999px;
+}
+.qs-option:hover .qs-type { color: var(--accent); }
+.qs-loading, .qs-no-match { padding: 10px 8px; font-size: 11.5px; color: var(--text-secondary); text-align: center; }
+
 /* ---------- country code picker ---------- */
 .country-code-picker { position: relative; flex-shrink: 0; }
 .country-code-trigger {
@@ -1293,64 +1465,34 @@ button.ghost.danger:hover svg { animation: famShake 0.45s ease !important; }
   transition: box-shadow 0.15s ease, border-color 0.15s ease;
 }
 .item-list li:hover { box-shadow: var(--shadow-md); border-color: var(--border-strong); }
-.item-list .item-row { display: flex; justify-content: space-between; align-items: flex-start; gap: 8px; }
+/* center, not flex-start — text is often multi-line (name + preview +
+   timestamp) while the action row is always a single line, so flex-start
+   pinned the buttons to the top of a taller card instead of centering them
+   against its full height. */
+.item-list .item-row { display: flex; justify-content: space-between; align-items: center; gap: 8px; }
 .item-list .item-text { flex: 1; font-size: 12.5px; word-break: break-word; color: var(--text-primary); line-height: 1.45; }
-.item-list .item-actions { display: flex; flex-wrap: wrap; gap: 4px; flex-shrink: 0; justify-content: flex-end; max-width: 172px; }
+/* All 6 possible saved-message-row actions (send/schedule, quick-send,
+   edit, move up/down, delete) sit inline now — the popup's wider (see
+   body's width) than when these first got folded behind a "more" button
+   for lack of room. max-width is a generous cap, not a tight fit: 6 icons
+   at 30px + 5 gaps comfortably clears it well before flex-wrap would ever
+   need to kick in at the current popup width. */
+/* align-items:center matters here beyond the buttons themselves (all 30px,
+   wouldn't visibly differ) — the group-separator between Delete/Edit-group/
+   Send has its own shorter fixed height, and without this it aligns to the
+   row's cross-axis start instead of sitting centered between the icons. */
+.item-list .item-actions { display: flex; align-items: center; flex-wrap: wrap; gap: 4px; flex-shrink: 0; justify-content: flex-end; max-width: 260px; }
 .item-list .item-actions button[data-act="moveUp"],
 .item-list .item-actions button[data-act="moveDown"] { font-size: 11px; }
 .item-list .item-actions button:disabled { opacity: 0.3; cursor: not-allowed; }
-
-/* "More" speed-dial — saved-message rows have 6 possible actions
-   (send/schedule, quick-send, edit, move up/down, delete), which no
-   longer fit in one line at the neumorphic buttons' size; Edit/Move/
-   Delete ("manage this message") folded in here, leaving Send/Schedule
-   and quick-send ("do something with this message") on the row itself.
-   Explicitly NOT a dropdown list — each action is its own floating
-   neumorphic cap (same look as every other row icon) that fans out in a
-   line from the "more" button itself and back in on close, rather than a
-   bordered menu card appearing/disappearing. Positioned nearest-to-
-   furthest by how often each is likely needed: Edit right next to the
-   toggle, Delete at the far end — reaching further for the destructive
-   one is a deliberate small speed bump, not just leftover ordering. */
-.row-overflow { position: relative; display: flex; align-items: center; }
-/* A horizontal line here (the first version) extended left directly over
-   the send/chevron buttons already sitting in the same row — they'd get
-   visually covered every time this opened. Dropping straight down instead
-   grows into empty space below the row rather than over other buttons, and
-   a 2x2 grid keeps that downward reach short enough to not run into the
-   next card either (a single column of 4 would reach much further down). */
-.row-fan {
-  position: absolute;
-  top: calc(100% + 4px);
-  right: 0;
-  display: grid;
-  grid-template-columns: repeat(2, 30px);
-  gap: 4px;
-  z-index: 20;
-}
-.row-fan .fan-item {
-  opacity: 0;
-  transform: scale(0.3);
-  pointer-events: none;
-  transition: opacity 0.16s ease, transform 0.16s cubic-bezier(0.34, 1.56, 0.64, 1);
-}
-.row-overflow.open .row-fan .fan-item {
-  opacity: 1;
-  transform: scale(1);
-  pointer-events: auto;
-}
-/* Staggered in reading order (top-left to bottom-right) so it reads as
-   unfurling out of the button rather than all four popping at once. */
-.row-fan .fan-item:nth-child(1) { transition-delay: 0s; }
-.row-fan .fan-item:nth-child(2) { transition-delay: 0.04s; }
-.row-fan .fan-item:nth-child(3) { transition-delay: 0.08s; }
-.row-fan .fan-item:nth-child(4) { transition-delay: 0.12s; }
-/* The "more" button morphs from + to x, the standard speed-dial trigger
-   convention, instead of a kebab that just sits there unchanged. */
-.overflow-toggle-btn svg { transition: transform 0.22s ease; }
-.row-overflow.open .overflow-toggle-btn svg { transform: rotate(45deg); }
-.row-overflow.open .overflow-toggle-btn { color: var(--accent); box-shadow: inset 2px 2px 5px var(--neu-dark), inset -2px -2px 5px var(--neu-light); }
-.log-entry-actions { display: flex; align-items: center; gap: 6px; margin-top: 8px; }
+/* The log row's own li isn't the shared .item-list flex-row pattern (its
+   content is a free-flowing text block, not a fixed-height single line),
+   so it's put in flex here specifically for #logList — delete sits
+   vertically centered against the whole card, pinned to the right edge,
+   instead of stacking below the text as its own full-width row. */
+#logList li { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
+#logList .item-text { min-width: 0; }
+.log-entry-actions { display: flex; align-items: center; gap: 6px; flex-shrink: 0; }
 button.small {
   display: inline-flex;
   align-items: center;
