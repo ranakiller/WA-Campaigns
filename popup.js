@@ -372,12 +372,17 @@ const RESET_ICON_SVG = '<svg viewBox="0 0 24 24" width="14" height="14"><path fi
 const MOVE_UP_ICON_SVG = '<svg viewBox="0 0 24 24" width="14" height="14"><path fill="currentColor" d="M12 5.5 5 13h4v6h6v-6h4L12 5.5Z"/></svg>';
 const MOVE_DOWN_ICON_SVG = '<svg viewBox="0 0 24 24" width="14" height="14"><path fill="currentColor" d="M12 18.5 19 11h-4V5H9v6H5l7 7.5Z"/></svg>';
 // Icons for the primary/ghost CTA buttons (Send Now, Save, Cancel, etc —
-// see popup.css's neumorphic button.primary/.ghost). SEND_ICON_SVG carries
-// its own class so button.primary:hover .send-icon can give it the little
-// paper-airplane fly-off instead of the generic pop every other button icon
-// gets on hover.
-const SEND_ICON_SVG =
-  '<svg class="send-icon" viewBox="0 0 24 24" width="15" height="15"><path fill="currentColor" d="M2 21l21-9L2 3v7l15 2-15 2z"/></svg>';
+// see popup.css's neumorphic button.primary/.ghost) and for the icon-only
+// "send to active chat" buttons. Every send button — labeled or icon-only —
+// shares this same markup so popup.css's flying-paper-airplane hover
+// animation stays one single implementation instead of being duplicated
+// per button. `wide` (labeled buttons only) lets the plane fly across the
+// whole button, over the text label, instead of staying inside its own
+// small icon-sized box — see .send-icon-wrap-wide in popup.css.
+function sendIconSvg(wide, size = 15) {
+  return `<span class="send-icon-wrap${wide ? ' send-icon-wrap-wide' : ''}"><span class="send-icon-trail"></span><svg class="send-icon" viewBox="0 0 24 24" width="${size}" height="${size}"><path fill="currentColor" d="M2 21l21-9L2 3v7l15 2-15 2z"/></svg></span>`;
+}
+const SEND_ICON_SVG = sendIconSvg(true, 15);
 const CHECK_ICON_SVG =
   '<svg viewBox="0 0 24 24" width="15" height="15"><path fill="currentColor" d="M9 16.2 4.8 12l-1.4 1.4L9 19 21 7l-1.4-1.4z"/></svg>';
 const CLOSE_ICON_SVG =
@@ -910,6 +915,25 @@ chrome.storage.local.get(['lastTab'], (data) => {
   }
 });
 
+// The Log tab's clock icon hour hand isn't a looping CSS animation like the
+// minute hand — it's a real clock, so each hover just nudges it forward one
+// hour (30deg) from wherever it last stopped, instead of resetting to 1
+// o'clock every time. rotate(390deg) looks identical to rotate(30deg), so
+// the count is left to climb rather than wrapped back down.
+{
+  const logTabBtn = document.querySelector('.tab-btn[data-tab="log"]');
+  const logTabHourHand = logTabBtn && logTabBtn.querySelector('.icon-history-hour');
+  const reduceMotion = window.matchMedia('(prefers-reduced-motion: reduce)');
+  if (logTabBtn && logTabHourHand) {
+    let hourStep = 1;
+    logTabBtn.addEventListener('mouseenter', () => {
+      if (reduceMotion.matches) return;
+      hourStep++;
+      logTabHourHand.style.transform = `rotate(${hourStep * 30}deg)`;
+    });
+  }
+}
+
 // ============ MESSAGES ============
 // A message is an ordered list of items (composingItems while being built).
 // The paperclip attaches a file as its own item immediately (caption edited
@@ -1291,9 +1315,8 @@ call('ensureFlagsCached', {}).then((res) => {
   // matters the first time only (right after a fresh install, before the
   // cache exists yet); every later popup open already has it and this is a
   // no-op repaint of the same images.
-  if (selectedCountry) document.getElementById('countryCodeFlag').innerHTML = flagIconHtml(selectedCountry.iso2);
-  const dropdown = document.getElementById('countryCodeDropdown');
-  if (dropdown.style.display !== 'none') renderCountryList(document.getElementById('countryCodeSearch').value);
+  quickSendWidget.refreshFlags();
+  listAddWidget.refreshFlags();
 });
 function flagIconHtml(iso2) {
   const dataUrl = flagCache[iso2];
@@ -1301,86 +1324,264 @@ function flagIconHtml(iso2) {
   return '<span class="cc-flag-placeholder"></span>'; // only shown for the few seconds before the very first cache finishes
 }
 
-let selectedCountry = null;
-chrome.storage.local.get(['quickSendCountryIso'], (data) => {
-  if (data.quickSendCountryIso) {
-    const c = COUNTRIES.find((x) => x.iso2 === data.quickSendCountryIso);
-    if (c) selectCountry(c, { skipFocus: true });
-  }
-});
-
-// Only updates the picker's own state/display — trimming a typed dial code
-// back out of the number field (see the auto-detect input listener below)
-// is the caller's job, not this function's, since a plain dropdown pick has
-// nothing in the field to trim.
-function selectCountry(country, { skipFocus = false } = {}) {
-  selectedCountry = country;
-  document.getElementById('countryCodeFlag').innerHTML = flagIconHtml(country.iso2);
-  // Display is flag-only (no "+92" text alongside it) — the dial code still
-  // shows up as the button's tooltip so it's not lost, just not cluttering
-  // the row.
-  document.getElementById('countryCodeBtn').dataset.tooltip = `${country.name} (+${country.dial})`;
-  chrome.storage.local.set({ quickSendCountryIso: country.iso2 });
-  closeCountryDropdown();
-  if (!skipFocus) document.getElementById('quickSendNumber').focus();
-}
-
-function renderCountryList(filter) {
-  const list = document.getElementById('countryCodeList');
-  const q = (filter || '').trim().toLowerCase();
-  const qDigits = q.replace(/^\+/, '');
-  const matches = !q
-    ? COUNTRIES
-    : COUNTRIES.filter((c) => c.name.toLowerCase().includes(q) || (qDigits && c.dial.startsWith(qDigits)));
-  if (matches.length === 0) {
-    list.innerHTML = '<p class="cc-no-match">No matching country.</p>';
-    return;
-  }
-  list.innerHTML = matches
-    .map(
-      (c) => `<button type="button" class="cc-option${selectedCountry && selectedCountry.iso2 === c.iso2 ? ' active' : ''}" data-iso2="${c.iso2}">
-        <span class="cc-flag">${flagIconHtml(c.iso2)}</span><span class="cc-name">${escapeHtml(c.name)}</span><span class="cc-code">+${c.dial}</span>
-      </button>`
-    )
-    .join('');
-  list.querySelectorAll('.cc-option').forEach((btn) => {
-    btn.addEventListener('click', () => {
-      const c = COUNTRIES.find((x) => x.iso2 === btn.dataset.iso2);
-      if (c) selectCountry(c);
-    });
-  });
-}
-
-function openCountryDropdown() {
-  document.getElementById('countryCodeDropdown').style.display = 'block';
-  document.getElementById('countryCodeBtn').classList.add('open');
-  const search = document.getElementById('countryCodeSearch');
-  search.value = '';
-  renderCountryList('');
-  search.focus();
-}
-function closeCountryDropdown() {
-  document.getElementById('countryCodeDropdown').style.display = 'none';
-  document.getElementById('countryCodeBtn').classList.remove('open');
-}
-document.getElementById('countryCodeBtn').addEventListener('click', () => {
-  const open = document.getElementById('countryCodeDropdown').style.display !== 'none';
-  if (open) closeCountryDropdown();
-  else openCountryDropdown();
-});
-document.getElementById('countryCodeSearch').addEventListener('input', (e) => renderCountryList(e.target.value));
-document.getElementById('countryCodeSearch').addEventListener('keydown', (e) => {
-  if (e.key === 'Escape') {
-    closeCountryDropdown();
+// Arrow-key navigation shared by both dropdown lists below (country and
+// chat search) — Up/Down moves a highlighted (.kb-active) option, Enter
+// clicks whichever is highlighted. Also used right after a (re)render to
+// pin the highlight onto the first option, so "first available result" is
+// always what Enter picks until the user actually presses an arrow key.
+function handleListKeyNav(e, containerId, optionSelector) {
+  const container = document.getElementById(containerId);
+  const options = Array.from(container.querySelectorAll(optionSelector));
+  if (options.length === 0) return;
+  const activeIndex = options.findIndex((el) => el.classList.contains('kb-active'));
+  if (e.key === 'ArrowDown') {
+    e.preventDefault();
+    const next = activeIndex < 0 ? 0 : Math.min(activeIndex + 1, options.length - 1);
+    options.forEach((el, i) => el.classList.toggle('kb-active', i === next));
+    options[next].scrollIntoView({ block: 'nearest' });
+  } else if (e.key === 'ArrowUp') {
+    e.preventDefault();
+    const prev = activeIndex < 0 ? 0 : Math.max(activeIndex - 1, 0);
+    options.forEach((el, i) => el.classList.toggle('kb-active', i === prev));
+    options[prev].scrollIntoView({ block: 'nearest' });
   } else if (e.key === 'Enter') {
     e.preventDefault();
-    const first = document.querySelector('#countryCodeList .cc-option');
-    if (first) first.click(); // top result of whatever's currently filtered — same one a mouse click on the first row would pick
+    (activeIndex >= 0 ? options[activeIndex] : options[0]).click();
   }
-});
-document.addEventListener('click', (e) => {
-  if (!e.target.closest('.country-code-picker')) closeCountryDropdown();
-});
+}
+
+// ---------- reusable chat-picker widget: country code + live WhatsApp search ----------
+// One widget, two mounted instances — the Messages tab's quick-send box
+// (sends now) and the Lists tab's manual-add box (adds to the list being
+// built) — sharing every line of this logic instead of two near-identical
+// copies. Each instance gets its own DOM ids and its own state (selected
+// country/search result); the live chat data itself (see
+// ensureLiveChatSearchCache further down) is shared across both, since
+// it's the same WhatsApp account regardless of which box is searching it.
+function createChatPickerWidget(ids) {
+  const { countryBtn, countryFlag, countryDropdown, countrySearch, countryList, numberInput, searchDropdown, storageKey } = ids;
+  let selectedCountry = null;
+  let selectedTarget = null; // {waId, name} once a search result is picked; cleared on any further edit
+
+  chrome.storage.local.get([storageKey], (data) => {
+    if (data[storageKey]) {
+      const c = COUNTRIES.find((x) => x.iso2 === data[storageKey]);
+      if (c) selectCountry(c, { skipFocus: true });
+    }
+  });
+
+  // Only updates the picker's own state/display — trimming a typed dial
+  // code back out of the number field (see the input listener below) is
+  // the caller's job, not this function's, since a plain dropdown pick has
+  // nothing in the field to trim.
+  function selectCountry(country, { skipFocus = false } = {}) {
+    selectedCountry = country;
+    document.getElementById(countryFlag).innerHTML = flagIconHtml(country.iso2);
+    // Display is flag-only (no "+92" text alongside it) — the dial code
+    // still shows up as the button's tooltip so it's not lost, just not
+    // cluttering the row.
+    document.getElementById(countryBtn).dataset.tooltip = `${country.name} (+${country.dial})`;
+    chrome.storage.local.set({ [storageKey]: country.iso2 });
+    closeCountryDropdown();
+    if (!skipFocus) document.getElementById(numberInput).focus();
+  }
+
+  function renderCountryList(filter) {
+    const list = document.getElementById(countryList);
+    const q = (filter || '').trim().toLowerCase();
+    const qDigits = q.replace(/^\+/, '');
+    const matches = !q
+      ? COUNTRIES
+      : COUNTRIES.filter((c) => c.name.toLowerCase().includes(q) || (qDigits && c.dial.startsWith(qDigits)));
+    if (matches.length === 0) {
+      list.innerHTML = '<p class="cc-no-match">No matching country.</p>';
+      return;
+    }
+    list.innerHTML = matches
+      .map(
+        (c, i) =>
+          `<button type="button" class="cc-option${selectedCountry && selectedCountry.iso2 === c.iso2 ? ' active' : ''}${i === 0 ? ' kb-active' : ''}" data-iso2="${c.iso2}">
+          <span class="cc-flag">${flagIconHtml(c.iso2)}</span><span class="cc-name">${escapeHtml(c.name)}</span><span class="cc-code">+${c.dial}</span>
+        </button>`
+      )
+      .join('');
+    list.querySelectorAll('.cc-option').forEach((btn) => {
+      btn.addEventListener('click', () => {
+        const c = COUNTRIES.find((x) => x.iso2 === btn.dataset.iso2);
+        if (c) selectCountry(c);
+      });
+    });
+  }
+
+  function openCountryDropdown() {
+    document.getElementById(countryDropdown).style.display = 'block';
+    document.getElementById(countryBtn).classList.add('open');
+    const search = document.getElementById(countrySearch);
+    search.value = '';
+    renderCountryList('');
+    search.focus();
+  }
+  function closeCountryDropdown() {
+    document.getElementById(countryDropdown).style.display = 'none';
+    document.getElementById(countryBtn).classList.remove('open');
+  }
+  document.getElementById(countryBtn).addEventListener('click', () => {
+    const open = document.getElementById(countryDropdown).style.display !== 'none';
+    if (open) closeCountryDropdown();
+    else openCountryDropdown();
+  });
+  document.getElementById(countrySearch).addEventListener('input', (e) => renderCountryList(e.target.value));
+  document.getElementById(countrySearch).addEventListener('keydown', (e) => {
+    if (e.key === 'Escape') {
+      closeCountryDropdown();
+    } else {
+      handleListKeyNav(e, countryList, '.cc-option');
+    }
+  });
+  document.addEventListener('click', (e) => {
+    if (!e.target.closest(`#${countryBtn}`) && !e.target.closest(`#${countryDropdown}`)) closeCountryDropdown();
+  });
+
+  function closeSearch() {
+    document.getElementById(searchDropdown).style.display = 'none';
+  }
+  function renderSearch(matches) {
+    const dropdown = document.getElementById(searchDropdown);
+    dropdown.style.display = 'block';
+    if (matches === null) {
+      dropdown.innerHTML = '<p class="qs-loading">Searching WhatsApp…</p>';
+      return;
+    }
+    if (matches.length === 0) {
+      dropdown.innerHTML = '<p class="qs-no-match">No matching contact or group.</p>';
+      return;
+    }
+    // The number rides along mainly so two different contacts saved under
+    // the same name (or a same-named group and community) are actually
+    // tellable apart in the list, not just so it's there to read.
+    dropdown.innerHTML = matches
+      .slice(0, 20)
+      .map(
+        (c, i) =>
+          `<button type="button" class="qs-option${i === 0 ? ' kb-active' : ''}" data-wa-id="${escapeHtml(c.waId)}">
+            <span class="qs-name-col">
+              <span class="qs-name">${escapeHtml(c.name || c.waId)}</span>
+              ${c.number ? `<span class="qs-number">+${escapeHtml(c.number)}</span>` : ''}
+            </span>
+            <span class="qs-type">${chatTypeLabel(c.type)}</span>
+          </button>`
+      )
+      .join('');
+    dropdown.querySelectorAll('.qs-option').forEach((btn) => {
+      btn.addEventListener('click', () => {
+        const chat = (liveChatSearchCache || []).find((c) => c.waId === btn.dataset.waId);
+        if (!chat) return;
+        selectedTarget = { waId: chat.waId, name: chat.name || chat.waId };
+        document.getElementById(numberInput).value = selectedTarget.name;
+        closeSearch();
+      });
+    });
+  }
+  document.getElementById(numberInput).addEventListener('input', async (e) => {
+    const raw = e.target.value;
+    selectedTarget = null; // any edit invalidates whatever was picked before
+    if (raw.trim().startsWith('+')) {
+      const digits = raw.replace(/\D/g, '');
+      const match = matchDialCode(digits);
+      if (match) {
+        selectCountry(match, { skipFocus: true });
+        e.target.value = digits.slice(match.dial.length);
+      }
+      // Falls through to the digit search below (using whatever the field
+      // holds now) rather than returning here — a full "+92300…" paste
+      // that matches a saved contact should surface them too, same as
+      // typing the local number would.
+    }
+    const query = e.target.value.trim();
+    if (!query) {
+      closeSearch();
+      return;
+    }
+    if (looksLikeName(query)) {
+      renderSearch(null); // loading state
+      const cache = await ensureLiveChatSearchCache();
+      // The field may have changed (or been cleared) while that fetch was
+      // in flight — only render if this is still what the user typed.
+      if (document.getElementById(numberInput).value.trim() !== query) return;
+      if (!cache) {
+        renderSearch([]);
+        return;
+      }
+      const q = query.toLowerCase();
+      renderSearch(cache.filter((c) => (c.name || '').toLowerCase().includes(q)));
+      return;
+    }
+    // Pure digits — search saved numbers too (typing a friend's number
+    // shows them by name if they're saved), but stay silent (no dropdown
+    // at all, not even a "no match") when nothing matches, since typing a
+    // number that just isn't saved anywhere is completely normal, not an
+    // error — it still works fine as a plain number either way.
+    const digitsQuery = query.replace(/\D/g, '');
+    if (digitsQuery.length < 4) {
+      closeSearch();
+      return;
+    }
+    const cache = await ensureLiveChatSearchCache();
+    if (document.getElementById(numberInput).value.trim().replace(/\D/g, '') !== digitsQuery) return;
+    if (!cache) {
+      closeSearch();
+      return;
+    }
+    const matches = cache.filter((c) => c.number && c.number.includes(digitsQuery));
+    if (matches.length === 0) {
+      closeSearch();
+      return;
+    }
+    renderSearch(matches);
+  });
+  document.getElementById(numberInput).addEventListener('keydown', (e) => {
+    if (e.key === 'Escape') {
+      closeSearch();
+      return;
+    }
+    // Only steal Up/Down/Enter while the dropdown is actually open with
+    // results showing — closeSearch() just hides it, the old option
+    // buttons can still be sitting in the DOM, and this shouldn't hijack
+    // plain typing/Enter otherwise (Ctrl+Shift+Enter, wired separately on
+    // this same input outside the widget, still sends either way).
+    if (document.getElementById(searchDropdown).style.display === 'none') return;
+    // Plain Enter only — Ctrl/Cmd+Shift+Enter is the quick-send box's own
+    // send shortcut (wired separately, outside this widget) and must reach
+    // that handler untouched, not get intercepted here as "pick the
+    // highlighted result" instead.
+    const plainEnter = e.key === 'Enter' && !e.ctrlKey && !e.metaKey && !e.altKey && !e.shiftKey;
+    if (e.key === 'ArrowDown' || e.key === 'ArrowUp' || plainEnter) {
+      handleListKeyNav(e, searchDropdown, '.qs-option');
+    }
+  });
+  document.addEventListener('click', (e) => {
+    if (!e.target.closest(`#${numberInput}`) && !e.target.closest(`#${searchDropdown}`)) closeSearch();
+  });
+
+  return {
+    getSelectedCountry: () => selectedCountry,
+    getSelectedTarget: () => selectedTarget,
+    clearSelectedTarget: () => {
+      selectedTarget = null;
+    },
+    // Re-render whatever's already on screen once the real flag images
+    // finish loading (see the ensureFlagsCached call below this factory) —
+    // matters the first time only, right after a fresh install before the
+    // cache exists yet; every later popup open already has it and this is
+    // just a no-op repaint of the same images.
+    refreshFlags: () => {
+      if (selectedCountry) document.getElementById(countryFlag).innerHTML = flagIconHtml(selectedCountry.iso2);
+      if (document.getElementById(countryDropdown).style.display !== 'none') {
+        renderCountryList(document.getElementById(countrySearch).value);
+      }
+    }
+  };
+}
 
 // Longest-dial-code-first match, so e.g. "+1246" resolves to Barbados
 // rather than stopping at the shorter "+1" (US/Canada) prefix.
@@ -1388,162 +1589,74 @@ const COUNTRIES_BY_DIAL_LEN = [...COUNTRIES].sort((a, b) => b.dial.length - a.di
 function matchDialCode(digits) {
   return COUNTRIES_BY_DIAL_LEN.find((c) => digits.startsWith(c.dial));
 }
-// Typing (or pasting) a full international number straight into the number
-// box — e.g. "+923344300709" — auto-selects the matching country and trims
-// the dial code back out of the field, so the field always holds just the
-// local number and the picker is the single source of truth for the dial
-// code added at send time (never both at once).
-//
-// Typing a name instead of digits searches live against WhatsApp itself
-// (fetchLiveChatMap — the same live groups/contacts/communities/open-chats
-// pull "Scan" and "Refresh against WhatsApp" already use), not this
-// extension's own saved/fetched chat list — deliberately, since that list
-// might be empty if the user's never scanned, and this needs to work
-// either way. Fetched once per popup session and cached in memory
-// (quickSendChatCache), then filtered locally on every keystroke after
-// that — no repeat WPP round trips while typing.
-let quickSendChatCache = null;
-let quickSendChatCacheLoading = null;
-let quickSendSelectedTarget = null; // {waId, name} once a search result is picked; cleared on any further edit
 function looksLikeName(raw) {
   return /[a-zA-Z]/.test(raw);
-}
-async function ensureQuickSendChatCache() {
-  if (quickSendChatCache) return quickSendChatCache;
-  if (quickSendChatCacheLoading) return quickSendChatCacheLoading;
-  quickSendChatCacheLoading = fetchLiveChatMap()
-    .then((res) => {
-      if (!res.ok) {
-        quickSendChatCache = null;
-        return quickSendChatCache;
-      }
-      // Dedupe by id only (fetchLiveChatMap already does this, but the
-      // filter below re-derives from res.map.values() directly, so redo it
-      // here too rather than assume). NOT by name — an earlier version of
-      // this collapsed same-named entries down to one, on the assumption a
-      // repeated name meant the same person showing up twice under both a
-      // real @c.us id and an opaque @lid WhatsApp substitutes when it masks
-      // a number. Turns out plenty of *actually different* people share a
-      // saved name ("Abu Bakar" x6 in one real account's contacts) — that
-      // dedupe was quietly hiding real, distinct contacts from the search.
-      // The phone number shown under each name (see renderQuickSendSearch)
-      // is what's supposed to disambiguate that, not deduping them away.
-      const byId = new Map();
-      for (const c of res.map.values()) {
-        if (c.waId) byId.set(c.waId, c);
-      }
-      quickSendChatCache = [...byId.values()];
-      return quickSendChatCache;
-    })
-    .finally(() => {
-      quickSendChatCacheLoading = null;
-    });
-  return quickSendChatCacheLoading;
-}
-function closeQuickSendSearch() {
-  document.getElementById('quickSendSearchDropdown').style.display = 'none';
 }
 function chatTypeLabel(type) {
   if (type === 'group') return 'Group';
   if (type === 'community') return 'Community';
   return 'Contact';
 }
-function renderQuickSendSearch(matches) {
-  const dropdown = document.getElementById('quickSendSearchDropdown');
-  dropdown.style.display = 'block';
-  if (matches === null) {
-    dropdown.innerHTML = '<p class="qs-loading">Searching WhatsApp…</p>';
-    return;
-  }
-  if (matches.length === 0) {
-    dropdown.innerHTML = '<p class="qs-no-match">No matching contact or group.</p>';
-    return;
-  }
-  // The number rides along mainly so two different contacts saved under
-  // the same name (or a same-named group and community) are actually
-  // tellable apart in the list, not just so it's there to read.
-  dropdown.innerHTML = matches
-    .slice(0, 20)
-    .map(
-      (c) =>
-        `<button type="button" class="qs-option" data-wa-id="${escapeHtml(c.waId)}">
-          <span class="qs-name-col">
-            <span class="qs-name">${escapeHtml(c.name || c.waId)}</span>
-            ${c.number ? `<span class="qs-number">+${escapeHtml(c.number)}</span>` : ''}
-          </span>
-          <span class="qs-type">${chatTypeLabel(c.type)}</span>
-        </button>`
-    )
-    .join('');
-  dropdown.querySelectorAll('.qs-option').forEach((btn) => {
-    btn.addEventListener('click', () => {
-      const chat = (quickSendChatCache || []).find((c) => c.waId === btn.dataset.waId);
-      if (!chat) return;
-      quickSendSelectedTarget = { waId: chat.waId, name: chat.name || chat.waId };
-      document.getElementById('quickSendNumber').value = quickSendSelectedTarget.name;
-      closeQuickSendSearch();
+// Typing a name searches live against WhatsApp itself (fetchLiveChatMap —
+// the same live groups/contacts/communities/open-chats pull "Scan" and
+// "Refresh against WhatsApp" already use), not this extension's own saved/
+// fetched chat list — deliberately, since that list might be empty if the
+// user's never scanned, and this needs to work either way. Fetched once
+// per popup session and cached in memory, then filtered locally on every
+// keystroke after that — no repeat WPP round trips while typing, and both
+// widget instances below share this one fetch/cache.
+let liveChatSearchCache = null;
+let liveChatSearchCacheLoading = null;
+async function ensureLiveChatSearchCache() {
+  if (liveChatSearchCache) return liveChatSearchCache;
+  if (liveChatSearchCacheLoading) return liveChatSearchCacheLoading;
+  liveChatSearchCacheLoading = fetchLiveChatMap()
+    .then((res) => {
+      if (!res.ok) {
+        liveChatSearchCache = null;
+        return liveChatSearchCache;
+      }
+      // Dedupe by id only — NOT by name. An earlier version deduped by
+      // name, on the assumption a repeated name meant the same person
+      // showing up twice under both a real @c.us id and an opaque @lid
+      // WhatsApp substitutes when it masks a number. Turns out plenty of
+      // *actually different* people share a saved name ("Abu Bakar" x6 in
+      // one real account's contacts) — that dedupe was quietly hiding
+      // real, distinct contacts from the search. The phone number shown
+      // under each name (see renderSearch in createChatPickerWidget) is
+      // what's supposed to disambiguate that, not deduping them away.
+      const byId = new Map();
+      for (const c of res.map.values()) {
+        if (c.waId) byId.set(c.waId, c);
+      }
+      liveChatSearchCache = [...byId.values()];
+      return liveChatSearchCache;
+    })
+    .finally(() => {
+      liveChatSearchCacheLoading = null;
     });
-  });
+  return liveChatSearchCacheLoading;
 }
-document.getElementById('quickSendNumber').addEventListener('input', async (e) => {
-  const raw = e.target.value;
-  quickSendSelectedTarget = null; // any edit invalidates whatever was picked before
-  if (raw.trim().startsWith('+')) {
-    const digits = raw.replace(/\D/g, '');
-    const match = matchDialCode(digits);
-    if (match) {
-      selectCountry(match, { skipFocus: true });
-      e.target.value = digits.slice(match.dial.length);
-    }
-    // Falls through to the digit search below (using whatever the field
-    // holds now) rather than returning here — a full "+92300…" paste that
-    // matches a saved contact should surface them too, same as typing the
-    // local number would.
-  }
-  const query = e.target.value.trim();
-  if (!query) {
-    closeQuickSendSearch();
-    return;
-  }
-  if (looksLikeName(query)) {
-    renderQuickSendSearch(null); // loading state
-    const cache = await ensureQuickSendChatCache();
-    // The field may have changed (or been cleared) while that fetch was in
-    // flight — only render if this is still what the user's actually typed.
-    if (document.getElementById('quickSendNumber').value.trim() !== query) return;
-    if (!cache) {
-      renderQuickSendSearch([]);
-      return;
-    }
-    const q = query.toLowerCase();
-    renderQuickSendSearch(cache.filter((c) => (c.name || '').toLowerCase().includes(q)));
-    return;
-  }
-  // Pure digits — search saved numbers too (typing a friend's number shows
-  // them by name if they're saved), but stay silent (no dropdown at all,
-  // not even a "no match") when nothing matches, since typing a number
-  // that just isn't saved anywhere is completely normal, not an error —
-  // it still sends fine as a plain number either way.
-  const digitsQuery = query.replace(/\D/g, '');
-  if (digitsQuery.length < 4) {
-    closeQuickSendSearch();
-    return;
-  }
-  const cache = await ensureQuickSendChatCache();
-  if (document.getElementById('quickSendNumber').value.trim().replace(/\D/g, '') !== digitsQuery) return;
-  if (!cache) {
-    closeQuickSendSearch();
-    return;
-  }
-  const matches = cache.filter((c) => c.number && c.number.includes(digitsQuery));
-  if (matches.length === 0) {
-    closeQuickSendSearch();
-    return;
-  }
-  renderQuickSendSearch(matches);
+
+const quickSendWidget = createChatPickerWidget({
+  countryBtn: 'countryCodeBtn',
+  countryFlag: 'countryCodeFlag',
+  countryDropdown: 'countryCodeDropdown',
+  countrySearch: 'countryCodeSearch',
+  countryList: 'countryCodeList',
+  numberInput: 'quickSendNumber',
+  searchDropdown: 'quickSendSearchDropdown',
+  storageKey: 'quickSendCountryIso'
 });
-document.addEventListener('click', (e) => {
-  if (!e.target.closest('.quick-send-number-wrap')) closeQuickSendSearch();
+const listAddWidget = createChatPickerWidget({
+  countryBtn: 'listAddCountryCodeBtn',
+  countryFlag: 'listAddCountryCodeFlag',
+  countryDropdown: 'listAddCountryCodeDropdown',
+  countrySearch: 'listAddCountryCodeSearch',
+  countryList: 'listAddCountryCodeList',
+  numberInput: 'listAddNumber',
+  searchDropdown: 'listAddSearchDropdown',
+  storageKey: 'listAddCountryIso'
 });
 
 // Quick send — types a number (or, now, a contact/group name — see the
@@ -1564,15 +1677,16 @@ async function quickSendToNumber() {
   }
   const btn = document.getElementById('quickSendBtn');
   const messageOverride = { headerFooterMode: composingHfMode, headerText: composingHfHeaderText, footerText: composingHfFooterText };
+  const selectedTarget = quickSendWidget.getSelectedTarget();
 
   // A picked search result (contact/group) bypasses number resolution
   // entirely — sends straight to its own chat id, no country code or digit
   // cleanup involved (a group has no phone number to build one from).
-  if (quickSendSelectedTarget && numberInput.value.trim() === quickSendSelectedTarget.name) {
+  if (selectedTarget && numberInput.value.trim() === selectedTarget.name) {
     btn.disabled = true;
     const res = await call('sendNowToChat', {
-      waId: quickSendSelectedTarget.waId,
-      name: quickSendSelectedTarget.name,
+      waId: selectedTarget.waId,
+      name: selectedTarget.name,
       items: getEffectiveItems(),
       sendSeparator: sendPanelSeparatorPref,
       messageOverride
@@ -1582,9 +1696,9 @@ async function quickSendToNumber() {
       showToast(res.error || 'Could not send.', 'error');
       return;
     }
-    showToast(`Sending to ${res.chatName || quickSendSelectedTarget.name}…`, 'success');
+    showToast(`Sending to ${res.chatName || selectedTarget.name}…`, 'success');
     numberInput.value = '';
-    quickSendSelectedTarget = null;
+    quickSendWidget.clearSelectedTarget();
     return;
   }
 
@@ -1600,6 +1714,7 @@ async function quickSendToNumber() {
   // the number is wrong (e.g. 0332... under +92 must send as 92332..., not
   // 920332...). Only touches the copy sent to background.js — the box
   // itself keeps showing exactly what was typed.
+  const selectedCountry = quickSendWidget.getSelectedCountry();
   const nationalDigits = selectedCountry ? localDigits.replace(/^0/, '') : localDigits;
   const number = (selectedCountry ? selectedCountry.dial : '') + nationalDigits;
   btn.disabled = true;
@@ -1618,12 +1733,13 @@ async function quickSendToNumber() {
   numberInput.value = ''; // only the number clears — text/attachments stay, same as Send Now leaves the composer untouched
 }
 document.getElementById('quickSendBtn').addEventListener('click', quickSendToNumber);
+// Escape-closes-the-search-dropdown is already wired inside
+// createChatPickerWidget's own keydown listener on this same input — this
+// one's just for the send shortcut.
 document.getElementById('quickSendNumber').addEventListener('keydown', (e) => {
   if (e.key === 'Enter' && (e.ctrlKey || e.metaKey) && e.shiftKey) {
     e.preventDefault();
     quickSendToNumber();
-  } else if (e.key === 'Escape') {
-    closeQuickSendSearch();
   }
 });
 
@@ -2511,7 +2627,7 @@ function renderMessages() {
     const quickSendBtnHtml = activeChatBtnHtml({
       act: 'sendActiveChat',
       title: 'Send to currently open chat — sends only to whatever chat is open right now in the WhatsApp Web tab, no list needed.',
-      iconSvg: '<svg viewBox="0 0 24 24" width="14" height="14"><path fill="currentColor" d="M2 21l21-9L2 3v7l15 2-15 2z"/></svg>',
+      iconSvg: sendIconSvg(false, 14),
       run: activeChatRunFor(`msg-${m.id}`),
       runKey: `msg-${m.id}`
     });
@@ -2751,7 +2867,7 @@ function buildSendPanel(message) {
                 act: 'sendItemActiveChat',
                 idx,
                 title: 'Send only this item to the currently open chat',
-                iconSvg: '<svg viewBox="0 0 24 24" width="14" height="14"><path fill="currentColor" d="M2 21l21-9L2 3v7l15 2-15 2z"/></svg>',
+                iconSvg: sendIconSvg(false, 14),
                 run: activeChatRunFor(`msg-${message.id}:${idx}`),
                 runKey: `msg-${message.id}:${idx}`
               })}
@@ -3638,26 +3754,48 @@ document.getElementById('scanChatsBtn').addEventListener('click', async () => {
   renderListBuilder();
 });
 
+// Same createChatPickerWidget as the Messages tab's quick-send box
+// (listAddWidget) — a picked search result (contact or group, found live
+// against WhatsApp itself) is added directly by its own id; typed digits
+// still resolve through findContactByNumber same as before, just with the
+// country-code picker's dial code composed in first.
 async function addManualContact() {
-  const input = document.getElementById('manualContactNumber');
-  const number = input.value.trim();
-  if (!number) return;
-  const btn = document.getElementById('manualAddBtn');
-  btn.disabled = true;
-  const res = await call('findContactByNumber', { number });
-  btn.disabled = false;
-  if (!res.ok) {
-    showToast(res.error || 'Could not find that contact.', 'error');
-    return;
+  const input = document.getElementById('listAddNumber');
+  const btn = document.getElementById('listAddBtn');
+  const selectedTarget = listAddWidget.getSelectedTarget();
+
+  let contact;
+  if (selectedTarget && input.value.trim() === selectedTarget.name) {
+    // The widget's own selectedTarget only carries {waId, name} — enough to
+    // send to, but the list builder also wants type/number (group vs
+    // contact icon, the number shown in exports) — look the full record
+    // back up in the shared search cache rather than adding a half-empty
+    // entry.
+    contact = (liveChatSearchCache || []).find((c) => c.waId === selectedTarget.waId) || selectedTarget;
+  } else {
+    const localDigits = input.value.replace(/\D/g, '');
+    if (!localDigits) return;
+    const selectedCountry = listAddWidget.getSelectedCountry();
+    const nationalDigits = selectedCountry ? localDigits.replace(/^0/, '') : localDigits;
+    const number = (selectedCountry ? selectedCountry.dial : '') + nationalDigits;
+    btn.disabled = true;
+    const res = await call('findContactByNumber', { number });
+    btn.disabled = false;
+    if (!res.ok) {
+      showToast(res.error || 'Could not find that contact.', 'error');
+      return;
+    }
+    contact = res.contact;
   }
-  chatSource.set(res.contact.waId, res.contact);
-  selectedWaIds.add(res.contact.waId); // explicitly added, so pre-select it
-  await call('saveFetchedChats', { chats: [res.contact] });
+  chatSource.set(contact.waId, contact);
+  selectedWaIds.add(contact.waId); // explicitly added, so pre-select it
+  await call('saveFetchedChats', { chats: [contact] });
   input.value = '';
+  listAddWidget.clearSelectedTarget();
   renderListBuilder();
 }
-document.getElementById('manualAddBtn').addEventListener('click', addManualContact);
-document.getElementById('manualContactNumber').addEventListener('keydown', (e) => {
+document.getElementById('listAddBtn').addEventListener('click', addManualContact);
+document.getElementById('listAddNumber').addEventListener('keydown', (e) => {
   if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) {
     e.preventDefault();
     addManualContact();

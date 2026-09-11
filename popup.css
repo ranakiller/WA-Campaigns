@@ -399,7 +399,6 @@ input[type="range"].pb-intensity::-moz-range-thumb {
 @keyframes famShake { 0%,100%{transform:translateX(0) rotate(0)} 20%{transform:translateX(-2px) rotate(-6deg)} 40%{transform:translateX(2px) rotate(6deg)} 60%{transform:translateX(-2px) rotate(-4deg)} 80%{transform:translateX(2px) rotate(3deg)} }
 @keyframes famRotate { 0%{transform:rotate(0)} 100%{transform:rotate(180deg)} }
 @keyframes famPaperclipBounce { 0%,100%{transform:translateY(0) rotate(0)} 30%{transform:translateY(-3px) rotate(-8deg)} 60%{transform:translateY(0) rotate(5deg)} }
-@keyframes famFly { 0%{transform:translate(0,0) rotate(0); opacity:1} 45%{transform:translate(7px,-5px) rotate(18deg); opacity:0.4} 46%{transform:translate(-7px,5px) rotate(18deg); opacity:0} 55%{transform:translate(-7px,5px) rotate(18deg); opacity:0} 100%{transform:translate(0,0) rotate(0); opacity:1} }
 .small-icon-btn:not(.sending-ring):not(.danger):hover svg { animation: famPop 0.4s ease; }
 .small-icon-btn.danger:not(.sending-ring):hover svg { animation: famShake 0.45s ease; }
 #attachToggleBtn:hover svg { animation: famPaperclipBounce 0.5s ease; }
@@ -931,14 +930,32 @@ button.ghost.small-inline svg { width: 12px; height: 12px; }
 @keyframes navIconBlast { 0%{transform:scale(1) rotate(0)} 35%{transform:scale(0.82) rotate(-3deg)} 65%{transform:scale(1.22) rotate(2deg)} 100%{transform:scale(1) rotate(0)} }
 @keyframes navIconFlash { 0%,100%{opacity:1; transform:scale(1) skewX(0);} 30%{opacity:0.3; transform:scale(0.88) skewX(-6deg);} 55%{opacity:1; transform:scale(1.28) skewX(4deg);} 78%{transform:scale(0.95) skewX(0);} }
 @keyframes navIconBounce { 0%,100%{transform:translateY(0)} 30%{transform:translateY(-4px)} 50%{transform:translateY(0)} 65%{transform:translateY(-2px)} 80%{transform:translateY(0)} }
-@keyframes navIconSweep { 0%{transform:rotate(0)} 100%{transform:rotate(-340deg)} }
+/* The clock face: three independent pieces instead of one rigid unit.
+   .icon-history-ring (the circular arrow) grows slightly on hover/click,
+   same "reacts, doesn't just replay a motion" feel as the other icons.
+   Both hands rotate around the same pivot (12,13 in the icon's 24x24
+   viewBox — where they actually meet), but only the minute hand loops a
+   full turn on every hover/select (see navIconMinuteHand below) — the
+   hour hand advances a real, remembered 30deg step per hover instead (see
+   popup.js), same as a real clock's hands never moving at the same rate.
+   Browsers use the SVG viewBox's own coordinate system for transform-origin
+   on a path by default, so neither needs a transform-box override to line
+   up correctly. */
+.icon-history-ring { transform-origin: 12px 12px; transition: transform 0.2s ease; }
+.tab-btn:hover .icon-history-ring, .tab-btn.just-selected .icon-history-ring { transform: scale(1.16); }
+.icon-history-hour, .icon-history-minute { transform-origin: 12px 13px; }
+/* The hour hand is a real clock, not a loop: it rests at 1 o'clock and popup.js
+   nudges it forward one hour on every hover, so its rotation is a live value
+   set via inline style, not a keyframe — this transition just smooths each step. */
+.icon-history-hour { transform: rotate(30deg); transition: transform 0.5s cubic-bezier(.34,1.2,.4,1); }
+@keyframes navIconMinuteHand { 0%{transform:rotate(0)} 100%{transform:rotate(-360deg)} }
 @keyframes navIconSpin { 0%{transform:rotate(0)} 100%{transform:rotate(130deg)} }
 @keyframes navIconKeyTurn { 0%,100%{transform:rotate(0)} 25%{transform:rotate(-25deg)} 55%{transform:rotate(18deg)} 80%{transform:rotate(-8deg)} }
 .tab-btn:hover .icon-bubble, .tab-btn.just-selected .icon-bubble { animation: navIconWiggle 0.5s ease; }
 .tab-btn:hover .icon-megaphone, .tab-btn.just-selected .icon-megaphone { animation: navIconBlast 0.5s ease; }
 .tab-btn:hover .icon-bolt, .tab-btn.just-selected .icon-bolt { animation: navIconFlash 0.5s ease; }
 .tab-btn:hover .icon-groups, .tab-btn.just-selected .icon-groups { animation: navIconBounce 0.6s ease; }
-.tab-btn:hover .icon-history, .tab-btn.just-selected .icon-history { animation: navIconSweep 0.6s ease; }
+.tab-btn:hover .icon-history-minute, .tab-btn.just-selected .icon-history-minute { animation: navIconMinuteHand 0.6s ease; }
 .tab-btn:hover .icon-gear, .tab-btn.just-selected .icon-gear { animation: navIconSpin 0.5s ease; }
 .tab-btn:hover .icon-key, .tab-btn.just-selected .icon-key { animation: navIconKeyTurn 0.5s ease; }
 @keyframes tabKeyPop {
@@ -950,6 +967,9 @@ button.ghost.small-inline svg { width: 12px; height: 12px; }
 .tab-btn.just-selected .neu-cap { animation: tabKeyPop 0.42s cubic-bezier(.34,1.56,.64,1); }
 @media (prefers-reduced-motion: reduce) {
   .tab-btn .neu-cap svg { animation: none !important; }
+  .tab-btn .icon-history-minute { animation: none !important; }
+  .tab-btn .icon-history-hour { transition: none !important; transform: rotate(30deg) !important; }
+  .tab-btn .icon-history-ring { transition: none !important; transform: none !important; }
   .tab-btn.just-selected .neu-cap { animation: none !important; }
 }
 
@@ -1243,11 +1263,11 @@ select {
   cursor: pointer;
   border-radius: 6px;
 }
-.qs-option:hover { background: var(--accent-soft); color: var(--accent); }
+.qs-option:hover, .qs-option.kb-active { background: var(--accent-soft); color: var(--accent); }
 .qs-option .qs-name-col { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 1px; }
 .qs-option .qs-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .qs-option .qs-number { font-size: 10.5px; color: var(--text-secondary); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-variant-numeric: tabular-nums; }
-.qs-option:hover .qs-number { color: var(--accent); }
+.qs-option:hover .qs-number, .qs-option.kb-active .qs-number { color: var(--accent); }
 .qs-option .qs-type {
   flex-shrink: 0;
   font-size: 9.5px;
@@ -1259,7 +1279,7 @@ select {
   padding: 2px 6px;
   border-radius: 999px;
 }
-.qs-option:hover .qs-type { color: var(--accent); }
+.qs-option:hover .qs-type, .qs-option.kb-active .qs-type { color: var(--accent); }
 .qs-loading, .qs-no-match { padding: 10px 8px; font-size: 11.5px; color: var(--text-secondary); text-align: center; }
 
 /* ---------- country code picker ---------- */
@@ -1341,10 +1361,11 @@ select {
   border-radius: 6px;
 }
 .cc-option:hover,
-.cc-option.active { background: var(--accent-soft); color: var(--accent); }
+.cc-option.active,
+.cc-option.kb-active { background: var(--accent-soft); color: var(--accent); }
 .cc-option .cc-name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .cc-option .cc-code { flex-shrink: 0; color: var(--text-secondary); font-variant-numeric: tabular-nums; }
-.cc-option:hover .cc-code, .cc-option.active .cc-code { color: var(--accent); }
+.cc-option:hover .cc-code, .cc-option.active .cc-code, .cc-option.kb-active .cc-code { color: var(--accent); }
 .cc-no-match { padding: 10px 8px; font-size: 11.5px; color: var(--text-secondary); text-align: center; }
 
 label { font-size: 11.5px; font-weight: 600; color: var(--text-secondary); display: block; }
@@ -1388,9 +1409,38 @@ button.ghost {
   font-weight: 600;
   font-family: inherit;
   background: var(--cap-bg);
+  position: relative;
+  /* Clips the wide send-icon flight (below) to the button's own edges, so
+     the plane visibly disappears/reappears exactly at the button's walls
+     instead of fading somewhere past them — overflow:hidden on an element
+     doesn't clip that same element's own box-shadow, so the neumorphic
+     shadow this button relies on is unaffected. */
+  overflow: hidden;
   transition: box-shadow 0.2s ease, color 0.2s ease, transform 0.1s ease;
 }
 button.primary svg, button.ghost svg { width: 15px; height: 15px; flex-shrink: 0; transform-origin: 50% 50%; }
+/* The Send button's paper airplane, shared by every send button (icon-only
+   or labeled — see popup.js's sendIconSvg()). .send-icon-wrap is normally a
+   15x15 clip window (same footprint the bare svg used to occupy, so layout
+   is unaffected) that the plane and its contrail fly across and out of on
+   loop while hovered — the wraparound at each cycle's end is what makes it
+   look like it exits right and re-enters left, not a back-and-forth slide.
+   .send-icon-wrap-wide (labeled buttons) overrides this: it hands off
+   positioning to the button itself (position:relative, above) so the same
+   loop flies across the *button's* full width, over the label — see the
+   -wide rules and keyframes further down. */
+.send-icon-wrap { position: relative; display: inline-flex; align-items: center; justify-content: center; width: 15px; height: 15px; flex-shrink: 0; overflow: hidden; }
+.send-icon-wrap .send-icon { position: relative; z-index: 1; }
+.send-icon-trail {
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  width: 9px;
+  height: 1.6px;
+  border-radius: 2px;
+  background: linear-gradient(to right, transparent, currentColor 85%);
+  opacity: 0;
+}
 button.primary:active, button.ghost:active { transform: translateY(1px) scale(0.98); }
 button.primary {
   color: var(--accent);
@@ -1413,11 +1463,65 @@ button.ghost {
 }
 button.ghost:hover { color: var(--text-primary); }
 button.primary:hover svg, button.ghost:hover svg { animation: famPop 0.4s ease; }
-button.primary:hover .send-icon { animation: famFly 0.55s ease !important; }
+button.primary:hover .send-icon-wrap:not(.send-icon-wrap-wide) .send-icon { animation: sendIconFly 1.1s linear infinite !important; }
+button.primary:hover .send-icon-wrap:not(.send-icon-wrap-wide) .send-icon-trail { animation: sendIconTrail 1.1s linear infinite !important; }
+.small-icon-btn:not(.sending-ring):hover .send-icon-wrap .send-icon { animation: sendIconFly 1.1s linear infinite !important; }
+.small-icon-btn:not(.sending-ring):hover .send-icon-wrap .send-icon-trail { animation: sendIconTrail 1.1s linear infinite !important; }
+@keyframes sendIconFly {
+  0% { transform: translateX(-220%); opacity: 0; }
+  8% { opacity: 1; }
+  48% { transform: translateX(220%); opacity: 1; }
+  58% { opacity: 0; }
+  100% { transform: translateX(-220%); opacity: 0; }
+}
+@keyframes sendIconTrail {
+  0% { transform: translate(-220%, -50%) scaleX(0.4); opacity: 0; }
+  8% { transform: translate(-220%, -50%) scaleX(0.4); opacity: 0; }
+  18% { opacity: 0.65; transform: translate(-160%, -50%) scaleX(1); }
+  48% { transform: translate(150%, -50%) scaleX(1); opacity: 0.65; }
+  58% { opacity: 0; }
+  100% { transform: translate(-220%, -50%) scaleX(0.4); opacity: 0; }
+}
+/* Wide variant (labeled Send buttons): the icon itself stays exactly where
+   layout already puts it (position:relative, from the shared .send-icon
+   rule above — never switched to position:absolute), so the flight is a
+   pure `transform: translateX()` starting at its real resting spot with
+   zero snap. The wrap gets an explicit z-index instead: flex items respect
+   z-index even at position:static, so this alone is enough to paint the
+   icon above the later .btn-label sibling as it crosses over the text —
+   no position juggling needed for stacking either. The button's own
+   overflow:hidden (above) does the actual disappear/reappear-at-the-wall
+   clipping once the translateX carries it past either edge. */
+.send-icon-wrap-wide { position: static; overflow: visible; z-index: 2; }
+button.primary:hover .send-icon-wrap-wide .send-icon,
+button.ghost:hover .send-icon-wrap-wide .send-icon {
+  animation: sendIconFlyWide 1.3s linear infinite !important;
+}
+button.primary:hover .send-icon-wrap-wide .send-icon-trail,
+button.ghost:hover .send-icon-wrap-wide .send-icon-trail {
+  position: absolute;
+  top: 50%;
+  left: -20%;
+  animation: sendIconTrailWide 1.3s linear infinite !important;
+}
+@keyframes sendIconFlyWide {
+  0% { transform: translateX(0); }
+  100% { transform: translateX(200px); }
+}
+@keyframes sendIconTrailWide {
+  0% { left: -20%; transform: translateY(-50%) scaleX(0.4); opacity: 0; }
+  12% { opacity: 0.6; transform: translateY(-50%) scaleX(1); }
+  88% { opacity: 0.6; transform: translateY(-50%) scaleX(1); }
+  100% { left: 120%; opacity: 0; transform: translateY(-50%) scaleX(0.4); }
+}
 button.ghost.danger { color: var(--danger-fg); }
 button.ghost.danger:hover svg { animation: famShake 0.45s ease !important; }
 @media (prefers-reduced-motion: reduce) {
   button.primary svg, button.ghost svg { animation: none !important; }
+  button.primary:hover .send-icon-wrap .send-icon { animation: none !important; }
+  button.primary:hover .send-icon-wrap .send-icon-trail { animation: none !important; opacity: 0 !important; }
+  .small-icon-btn:hover .send-icon-wrap .send-icon { animation: none !important; }
+  .small-icon-btn:hover .send-icon-wrap .send-icon-trail { animation: none !important; opacity: 0 !important; }
 }
 
 /* Groups a form's commit actions (Save / Send / Cancel) into one aligned
@@ -1676,10 +1780,18 @@ button.settings-save-btn { width: 100%; margin: 4px 0 10px; justify-content: cen
 .consent-gate { background: var(--bg-panel); border: 1px solid var(--border); border-radius: var(--radius-md); padding: 14px; }
 
 .manual-add { display: flex; gap: 6px; margin: 10px 0; align-items: center; }
-.manual-add input { margin: 0; flex: 1; }
-.manual-add select { margin: 0; width: auto; }
-.manual-add button:not(.icon-btn) { padding: 0 14px; border-radius: var(--radius-sm); border: 1px solid var(--border-strong); background: var(--bg-panel); color: var(--text-primary); cursor: pointer; height: 34px; font-size: 12px; }
-.manual-add button:not(.icon-btn):hover { background: var(--bg-hover); }
+/* Direct-child combinators (>), not descendant selectors — the chat-picker
+   widget nests its own buttons/inputs (.cc-option, .qs-option, the country
+   search box) several levels deep inside .manual-add now, and a plain
+   descendant selector here was matching those too: every actual direct
+   child button already carries .icon-btn, so button:not(.icon-btn) had no
+   real target left except those nested option buttons, stamping them with
+   a border/fixed height that fought the widget's own styling (and, on
+   specificity, silently beat its .kb-active highlight color). */
+.manual-add > input { margin: 0; flex: 1; }
+.manual-add > select { margin: 0; width: auto; }
+.manual-add > button:not(.icon-btn) { padding: 0 14px; border-radius: var(--radius-sm); border: 1px solid var(--border-strong); background: var(--bg-panel); color: var(--text-primary); cursor: pointer; height: 34px; font-size: 12px; }
+.manual-add > button:not(.icon-btn):hover { background: var(--bg-hover); }
 .manual-add .icon-btn { flex-shrink: 0; }
 
 .select-all-row {
