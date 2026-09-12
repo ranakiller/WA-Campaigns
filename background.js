@@ -22,7 +22,7 @@ const DEFAULT_SETTINGS = {
   masterEnabled: true, // instant kill switch — off blocks new sends and stops any run in progress
   headerText: '', // global default header — prepended to every item's text/caption, unless overridden per-message or per-thread (see resolveHeaderFooter)
   footerText: '', // global default footer — appended to every item's text/caption, unless overridden per-message or per-thread (see resolveHeaderFooter)
-  syncEnabled: true, // cloud sync of messages/lists/log/settings under this install's activation key, on by default
+  syncEnabled: false, // cloud sync of messages/lists/log/settings under this install's activation key — opt-in: a fresh device only starts syncing once the user turns it on (see the Settings tab), so activation alone never triggers a pull/push race
   privacyBlur: false, // blurs chat names/avatars/message text on the WhatsApp Web page itself, for screen-sharing/public spaces — see content.js
   // Which parts privacyBlur actually covers, how hard, and what style —
   // right-click the eye button in the header to configure. `style` is

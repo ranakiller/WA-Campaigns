@@ -39,16 +39,15 @@ const PUSH_MIN_INTERVAL_MS = 30000;
 const base = LICENSE_SERVER.replace(/\/+$/, '');
 
 // ---------- resuming sync after an uninstall/reinstall ----------
-// chrome.storage.local (where settings.syncEnabled actually lives) is
-// wiped completely on uninstall — that's normal browser behavior, not a
-// bug. Since syncEnabled now defaults to true (see background.js's
-// DEFAULT_SETTINGS), a fresh install after a reinstall already comes back
-// with sync "on" — it just doesn't have anything to pull until the user
-// re-activates (activation itself — the key/device id — is also wiped).
-// So the only thing needed here is: right after that re-activation
-// succeeds, force one pull instead of waiting for the next once-a-minute
-// poll, so whatever's already saved under that key on the server comes
-// back immediately.
+// syncEnabled defaults to false (see background.js's DEFAULT_SETTINGS) —
+// sync is opt-in, so a fresh activation alone never starts pulling/pushing
+// anything; the user has to explicitly flip the toggle in Settings, which is
+// what actually calls pollPull(true) (see background.js's saveSettings
+// case). This function only matters for the case where sync WAS already on
+// before an uninstall wiped chrome.storage.local back to defaults (which
+// resets syncEnabled to off too) — once the user re-activates AND turns
+// sync back on themselves, this forces one immediate pull instead of
+// waiting for the next once-a-minute poll.
 export async function pullAfterActivate() {
   if (!(await syncEnabled())) return;
   await setSyncAlarm(true);
@@ -264,6 +263,8 @@ export async function pushNow() {
   }
 }
 
+const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
 // ---------- pull (cloud -> local) ----------
 // Applies the server snapshot ONLY if it's newer than what this device
 // already reflects (cloudSync.lastAt, which both push and pull keep up to
@@ -281,7 +282,20 @@ export async function pollPull(force = false) {
   pulling = true;
   try {
     await setSyncStatus({ inProgress: true });
-    const r = await postJson('/sync/pull', {}, headers);
+    let r = await postJson('/sync/pull', {}, headers);
+    // Cloudflare KV reads can lag a write by a few seconds across edge
+    // locations — a forced pull (a brand-new device joining an existing
+    // key) is the one time a false "no data yet" here is actually
+    // dangerous, since the caller's next move is to push and seed the
+    // cloud copy. A couple of short retries makes that a lot less likely
+    // to race a very recent write from another device.
+    if (force && (!r.data || !r.data.ok) && /no synced data/i.test((r.data && r.data.error) || '')) {
+      for (const delayMs of [1500, 3000]) {
+        await sleep(delayMs);
+        r = await postJson('/sync/pull', {}, headers);
+        if (r.data && r.data.ok) break;
+      }
+    }
     const d = r.data;
     if (!d || !d.ok || !d.data || typeof d.data !== 'object') {
       const err = (d && d.error) || 'Pull failed';
@@ -300,12 +314,37 @@ export async function pollPull(force = false) {
       await setSyncStatus({ inProgress: false });
       return;
     }
-    const local = await chrome.storage.local.get(['messages', 'settings']);
+    const local = await chrome.storage.local.get(['messages', 'lists', 'log', 'settings']);
     const remote = d.data;
+    const remoteMessages = Array.isArray(remote.messages) ? remote.messages : null;
+    const remoteLists = Array.isArray(remote.lists) ? remote.lists : null;
+    const remoteLog = Array.isArray(remote.log) ? remote.log : null;
+    // Guard against a blank snapshot wiping out real local data. This is
+    // what actually happened in the wild: a second device joined a key,
+    // its own forced pull came back empty (KV lag, a dropped request,
+    // whatever), it went ahead and pushed its still-blank local state, and
+    // every other device polling that key faithfully overwrote its real
+    // data with nothing. If the incoming snapshot has nothing in it but
+    // this device visibly does, don't apply it — push this device's data
+    // back up instead, so the bad write gets corrected (and every other
+    // device picks up the real data on its next poll) instead of the
+    // emptiness spreading further.
+    const remoteLooksBlank =
+      (remoteMessages == null || remoteMessages.length === 0) &&
+      (remoteLists == null || remoteLists.length === 0) &&
+      (remoteLog == null || remoteLog.length === 0);
+    const localHasData =
+      (local.messages || []).length > 0 || (local.lists || []).length > 0 || (local.log || []).length > 0;
+    if (remoteLooksBlank && localHasData) {
+      await setSyncStatus({ lastAt: serverAt, inProgress: false, lastError: '' });
+      notifyPopup("Cloud copy looked empty — kept this device's data and re-synced it up.", 'info');
+      scheduleAutoPush();
+      return;
+    }
     const next = {};
-    if (Array.isArray(remote.messages)) next.messages = await fromCloudShape(remote.messages, local.messages || [], headers);
-    if (Array.isArray(remote.lists)) next.lists = remote.lists;
-    if (Array.isArray(remote.log)) next.log = remote.log;
+    if (remoteMessages) next.messages = await fromCloudShape(remoteMessages, local.messages || [], headers);
+    if (remoteLists) next.lists = remoteLists;
+    if (remoteLog) next.log = remoteLog;
     if (remote.settings && typeof remote.settings === 'object') {
       const localSettings = local.settings || {};
       const merged = { ...localSettings, ...remote.settings };
