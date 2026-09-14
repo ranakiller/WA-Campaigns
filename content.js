@@ -183,6 +183,9 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
       } else if (msg.action === 'getActiveChat') {
         const chat = await bridgeRequest('getActiveChat', {}, 10000);
         sendResponse({ ok: true, chat });
+      } else if (msg.action === 'openChat') {
+        await bridgeRequest('openChat', { waId: msg.waId }, 15000);
+        sendResponse({ ok: true });
       } else if (msg.action === 'getGroupAdminInfo') {
         // Generous timeout — this checks admin status one group at a time,
         // so a large export can genuinely take a while.

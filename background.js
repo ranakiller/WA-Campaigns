@@ -43,6 +43,11 @@ const DEFAULT_SETTINGS = {
   uiMode: 'popup' // 'popup' | 'sidepanel' — see applyUiMode below and the header button in popup.js
 };
 
+// The contacts pipeline — fixed for now (not user-configurable), same
+// simplicity call already made on skipping custom fields for v1. A contact's
+// `status` is always one of these; popup.js keeps its own copy for the UI.
+const CONTACT_STATUSES = ['Lead', 'Contacted', 'Customer', 'Cold'];
+
 // License heartbeat — re-validates the cached activation key every so often
 // so a revoked/expired key (or a device an admin reset) stops working
 // within minutes even if the popup is never opened. The popup also triggers
@@ -179,18 +184,80 @@ async function getState() {
     'log',
     'settings',
     'activeRuns',
-    'cloudSync'
+    'cloudSync',
+    'contacts'
   ]);
+  const contacts = data.contacts || [];
+  // Keeps every smart list's `members` current every time the popup asks
+  // for state — see resolveSmartLists's own comment for why this, plus one
+  // more call right before a scheduled send resolves its targets, are the
+  // only two places that need to know smart lists exist at all.
+  const lists = await resolveSmartLists(data.lists || [], contacts);
   return {
     fetchedChats: data.fetchedChats || [],
-    lists: data.lists || [],
+    lists,
     messages: (data.messages || []).map(migrateMessage),
     log: data.log || [],
     settings: { ...DEFAULT_SETTINGS, ...(data.settings || {}) },
     activeRuns: data.activeRuns || {},
     license: await getLicense(),
-    cloudSync: data.cloudSync || {}
+    cloudSync: data.cloudSync || {},
+    contacts,
+    contactStatuses: CONTACT_STATUSES
   };
+}
+
+// ---------- contacts / smart lists ----------
+
+// Pure matching: a contact passes a smart list's filter if it's in one of
+// the chosen statuses (when any are chosen), has at least one of the chosen
+// tags (when any are chosen), and — if followUpDue is set — its next
+// follow-up is today or earlier. An empty statuses/tags selection means "no
+// restriction on that axis", not "matches nothing".
+function contactMatchesFilter(contact, filter) {
+  const f = filter || {};
+  if (Array.isArray(f.statuses) && f.statuses.length > 0 && !f.statuses.includes(contact.status)) return false;
+  if (Array.isArray(f.tags) && f.tags.length > 0) {
+    const tags = contact.tags || [];
+    if (!f.tags.some((t) => tags.includes(t))) return false;
+  }
+  if (f.followUpDue && !(contact.nextFollowUpAt && contact.nextFollowUpAt <= Date.now())) return false;
+  return true;
+}
+
+function computeSmartListMembers(filter, contacts) {
+  return contacts
+    .filter((c) => contactMatchesFilter(c, filter))
+    .map((c) => ({ waId: c.waId, name: c.name, type: 'contact', number: c.number || '' }));
+}
+
+// Recomputes `members` for every smart list against the current contacts
+// database and persists the result if anything actually changed (skips the
+// write — and the sync push it would trigger — when nothing moved). Static
+// lists pass through completely untouched. Called from getState() (so the
+// UI is always current) and again right before runCampaign resolves its
+// targets (so an alarm firing with the popup closed still sees today's
+// data, not whatever getState last computed).
+async function resolveSmartLists(lists, contacts) {
+  let changed = false;
+  const next = lists.map((l) => {
+    if (l.type !== 'smart') return l;
+    const members = computeSmartListMembers(l.filter, contacts);
+    const same =
+      Array.isArray(l.members) &&
+      l.members.length === members.length &&
+      l.members.every((m, i) => m.waId === members[i].waId);
+    if (same) return l;
+    changed = true;
+    return { ...l, members };
+  });
+  // Written straight to storage, not through setState() — a smart list's
+  // members are fully derived from `contacts`, which is itself synced, so
+  // every device recomputes the same membership locally; pushing this
+  // derived write too would just be sync noise (e.g. a push every time a
+  // follow-up date rolls over to "due") for no information gain.
+  if (changed) await chrome.storage.local.set({ lists: next });
+  return next;
 }
 
 async function setState(partial) {
@@ -613,6 +680,10 @@ async function runCampaign(campaign) {
 
   let stopped = false;
   let stopReason = null;
+  // Every waId anything actually went out to, across every list in this
+  // run — used once at the end to stamp lastContactedAt/nextFollowUpAt on
+  // matching contacts (one batched write, not one per send).
+  const touchedWaIds = new Set();
 
   for (let li = 0; li < targetLists.length && !stopped; li++) {
     const list = targetLists[li];
@@ -707,6 +778,7 @@ async function runCampaign(campaign) {
         }
       }
 
+      if (sentAnyForTarget) touchedWaIds.add(target.waId);
       if (stopped) break;
 
       // Pace before moving to the next chat — not after the last chat in this
@@ -736,6 +808,29 @@ async function runCampaign(campaign) {
     await setState({
       messages: messages.map((m) => (m.id === message.id ? { ...m, lastSentAt: Date.now() } : m))
     });
+  }
+  // Follow-up tracking: every send path (ad-hoc, scheduled, active-chat)
+  // funnels through this one function, so this one hook is enough to keep
+  // the contacts database current no matter how the send was triggered.
+  // Cadence is remind-only — this only ever sets a reminder date, never
+  // sends anything by itself.
+  if (touchedWaIds.size > 0) {
+    const { contacts } = await getState();
+    if (contacts.some((c) => touchedWaIds.has(c.waId))) {
+      const now = Date.now();
+      await setState({
+        contacts: contacts.map((c) =>
+          touchedWaIds.has(c.waId)
+            ? {
+                ...c,
+                lastContactedAt: now,
+                nextFollowUpAt: c.followUpCadenceDays ? now + c.followUpCadenceDays * 86400000 : c.nextFollowUpAt,
+                updatedAt: now
+              }
+            : c
+        )
+      });
+    }
   }
   await finishActiveRun(campaign.id);
 
@@ -1235,6 +1330,77 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
               schedules: (m.schedules || []).map((s) => ({ ...s, listIds: (s.listIds || []).filter((id) => id !== msg.id) }))
             }))
           });
+          break;
+        }
+
+        // ---- contacts (database) ----
+        case 'saveContact': {
+          const { contacts } = await getState();
+          const existingIdx = contacts.findIndex((c) => c.id === msg.contact.id);
+          const now = Date.now();
+          let next;
+          if (existingIdx >= 0) {
+            next = contacts.slice();
+            next[existingIdx] = { ...next[existingIdx], ...msg.contact, updatedAt: now };
+          } else {
+            next = [
+              ...contacts,
+              {
+                status: CONTACT_STATUSES[0],
+                tags: [],
+                notes: [],
+                nextFollowUpAt: null,
+                followUpCadenceDays: null,
+                lastContactedAt: null,
+                ...msg.contact,
+                id: msg.contact.id || uid(),
+                createdAt: now,
+                updatedAt: now
+              }
+            ];
+          }
+          await setState({ contacts: next });
+          sendResponse({ ok: true });
+          break;
+        }
+        case 'deleteContact': {
+          const { contacts } = await getState();
+          await setState({ contacts: contacts.filter((c) => c.id !== msg.id) });
+          sendResponse({ ok: true });
+          break;
+        }
+        // Live "N contacts match" preview while building a smart list's
+        // filter — reads contacts directly rather than the full getState()
+        // (which also resolves every smart list's members) since this is
+        // called on every filter tweak and doesn't need any of that.
+        case 'previewSmartListMatch': {
+          const data = await chrome.storage.local.get(['contacts']);
+          const matches = computeSmartListMembers(msg.filter, data.contacts || []);
+          sendResponse({ ok: true, count: matches.length, names: matches.map((m) => m.name) });
+          break;
+        }
+        // Brings WhatsApp Web to the front and opens a specific chat — the
+        // Contacts detail panel's "Open chat" button. Unlike every other
+        // WA-facing action here, this one also has to make the tab visible
+        // (everything else runs fine in the background), since the whole
+        // point is for the user to actually look at the conversation.
+        case 'openChatById': {
+          const tab = await ensureWaTab();
+          const ready = await pingContentScript(tab.id);
+          if (!ready) {
+            sendResponse({ ok: false, error: 'WhatsApp Web tab is not ready (make sure you are logged in and the page finished loading).' });
+            break;
+          }
+          try {
+            const res = await sendToTab(tab.id, { action: 'openChat', waId: msg.waId }, 15000);
+            if (!res || !res.ok) throw new Error((res && res.error) || 'Unknown error opening chat.');
+          } catch (err) {
+            sendResponse({ ok: false, error: String(err.message || err) });
+            break;
+          }
+          await chrome.tabs.update(tab.id, { active: true });
+          await chrome.windows.update(tab.windowId, { focused: true });
+          sendResponse({ ok: true });
           break;
         }
 

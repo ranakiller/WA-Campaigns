@@ -429,6 +429,14 @@ async function handleRequest(action, payload) {
         name: chat.formattedTitle || chat.name || chat.id.user
       };
     }
+    case 'openChat': {
+      try {
+        await window.WPP.chat.openChatBottom(payload.waId);
+      } catch (e) {
+        throw new Error("Couldn't open that chat — it may no longer exist on WhatsApp.");
+      }
+      return {};
+    }
     case 'sendMessage': {
       const { result, waId } = await withCommunityRedirect(payload.waId, (id) => window.WPP.chat.sendTextMessage(id, payload.text));
       return { sent: true, msgId: result && result.id, waId: chatIdFromMsgId(result && result.id) || waId };

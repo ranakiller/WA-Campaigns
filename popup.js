@@ -126,7 +126,10 @@ chrome.runtime.onMessage.addListener((msg) => {
   }
 });
 
-let STATE = { fetchedChats: [], lists: [], messages: [], log: [], settings: {}, activeRuns: {} };
+let STATE = { fetchedChats: [], lists: [], messages: [], log: [], settings: {}, activeRuns: {}, contacts: [], contactStatuses: [] };
+// Mirrors background.js's own CONTACT_STATUSES — used as a fallback before
+// the first getState() response lands (STATE.contactStatuses after that).
+const CONTACT_STATUSES = ['Lead', 'Contacted', 'Customer', 'Cold'];
 // Which "send now" run (a background.js activeRuns id) belongs to which
 // saved message, so the send panel can show that message's own progress
 // bar instead of a generic one — populated when sendNow() returns its runId.
@@ -620,6 +623,7 @@ async function refresh() {
   renderAdhocSendPanel();
   renderListBuilder();
   renderLists();
+  renderContactsTab();
   renderLog();
   renderSettings();
   renderKeysTabVisibility();
@@ -1317,6 +1321,7 @@ call('ensureFlagsCached', {}).then((res) => {
   // no-op repaint of the same images.
   quickSendWidget.refreshFlags();
   listAddWidget.refreshFlags();
+  contactAddWidget.refreshFlags();
 });
 function flagIconHtml(iso2) {
   const dataUrl = flagCache[iso2];
@@ -1569,6 +1574,15 @@ function createChatPickerWidget(ids) {
     clearSelectedTarget: () => {
       selectedTarget = null;
     },
+    // Pre-fills the box from elsewhere (e.g. the Contacts detail panel's
+    // "Send now" hand-off) as if the user had just picked this result from
+    // the search dropdown themselves — the number field's value must match
+    // target.name exactly (same condition the input listener checks) for
+    // the "send straight to this chat id" path to recognize it afterward.
+    setSelectedTarget: (target) => {
+      selectedTarget = target;
+      document.getElementById(numberInput).value = target ? target.name : '';
+    },
     // Re-render whatever's already on screen once the real flag images
     // finish loading (see the ensureFlagsCached call below this factory) —
     // matters the first time only, right after a fresh install before the
@@ -1657,6 +1671,16 @@ const listAddWidget = createChatPickerWidget({
   numberInput: 'listAddNumber',
   searchDropdown: 'listAddSearchDropdown',
   storageKey: 'listAddCountryIso'
+});
+const contactAddWidget = createChatPickerWidget({
+  countryBtn: 'contactAddCountryCodeBtn',
+  countryFlag: 'contactAddCountryCodeFlag',
+  countryDropdown: 'contactAddCountryCodeDropdown',
+  countrySearch: 'contactAddCountryCodeSearch',
+  countryList: 'contactAddCountryCodeList',
+  numberInput: 'contactAddNumber',
+  searchDropdown: 'contactAddSearchDropdown',
+  storageKey: 'contactAddCountryIso'
 });
 
 // Quick send — types a number (or, now, a contact/group name — see the
@@ -4055,15 +4079,99 @@ function renderListBuilder() {
   document.getElementById('selectedCount').textContent = `${selectedWaIds.size} selected`;
 }
 
+// ---------- smart lists (a filter over the contacts database instead of a
+// fixed member set) — see popup.css's #listKindToggle/.filter-chip-row and
+// background.js's computeSmartListMembers/resolveSmartLists. ----------
+let listKind = 'static'; // 'static' | 'smart'
+let smartFilterStatuses = new Set();
+let smartFilterTags = new Set();
+let smartFilterDue = false;
+
+function setListKindUI(kind) {
+  listKind = kind;
+  document.querySelectorAll('#listKindToggle .kind-btn').forEach((b) => b.classList.toggle('active', b.dataset.kind === kind));
+  document.getElementById('listManualBuilder').style.display = kind === 'static' ? '' : 'none';
+  document.getElementById('listSmartBuilder').style.display = kind === 'smart' ? '' : 'none';
+}
+document.querySelectorAll('#listKindToggle .kind-btn').forEach((btn) => {
+  btn.addEventListener('click', () => {
+    setListKindUI(btn.dataset.kind);
+    if (listKind === 'smart') {
+      renderSmartFilterBuilder();
+      updateSmartMatchPreview();
+    }
+  });
+});
+
+function allContactTags() {
+  const set = new Set();
+  for (const c of STATE.contacts || []) for (const t of c.tags || []) set.add(t);
+  return Array.from(set).sort();
+}
+
+function renderSmartFilterBuilder() {
+  const statuses = STATE.contactStatuses && STATE.contactStatuses.length ? STATE.contactStatuses : CONTACT_STATUSES;
+  const statusBox = document.getElementById('smartFilterStatusChips');
+  statusBox.innerHTML = statuses
+    .map((s) => `<button type="button" class="filter-chip${smartFilterStatuses.has(s) ? ' on' : ''}" data-status="${escapeHtml(s)}">${escapeHtml(s)}</button>`)
+    .join('');
+  statusBox.querySelectorAll('.filter-chip').forEach((chip) => {
+    chip.addEventListener('click', () => {
+      const s = chip.dataset.status;
+      if (smartFilterStatuses.has(s)) smartFilterStatuses.delete(s);
+      else smartFilterStatuses.add(s);
+      chip.classList.toggle('on');
+      updateSmartMatchPreview();
+    });
+  });
+  const tags = allContactTags();
+  const tagBox = document.getElementById('smartFilterTagChips');
+  tagBox.innerHTML = tags.length
+    ? tags.map((t) => `<button type="button" class="filter-chip${smartFilterTags.has(t) ? ' on' : ''}" data-tag="${escapeHtml(t)}">${escapeHtml(t)}</button>`).join('')
+    : '<span class="hint">No tags yet — add some from the Contacts tab.</span>';
+  tagBox.querySelectorAll('.filter-chip').forEach((chip) => {
+    chip.addEventListener('click', () => {
+      const t = chip.dataset.tag;
+      if (smartFilterTags.has(t)) smartFilterTags.delete(t);
+      else smartFilterTags.add(t);
+      chip.classList.toggle('on');
+      updateSmartMatchPreview();
+    });
+  });
+}
+document.getElementById('smartFilterDueCheck').addEventListener('change', (e) => {
+  smartFilterDue = e.target.checked;
+  updateSmartMatchPreview();
+});
+
+function currentSmartFilter() {
+  return { statuses: Array.from(smartFilterStatuses), tags: Array.from(smartFilterTags), followUpDue: smartFilterDue };
+}
+
+// Debounced so rapid chip clicking doesn't fire a message per click.
+let smartPreviewTimer = null;
+function updateSmartMatchPreview() {
+  clearTimeout(smartPreviewTimer);
+  smartPreviewTimer = setTimeout(async () => {
+    const res = await call('previewSmartListMatch', { filter: currentSmartFilter() });
+    document.getElementById('smartMatchCount').textContent = res.ok ? `${res.count} contact${res.count === 1 ? '' : 's'} match` : '—';
+  }, 250);
+}
+
 function resetListForm() {
   editingListId = null;
   selectedWaIds = new Set();
   listSearchQuery = '';
+  smartFilterStatuses = new Set();
+  smartFilterTags = new Set();
+  smartFilterDue = false;
   document.getElementById('listName').value = '';
   document.getElementById('listSearchInput').value = '';
   document.getElementById('listBuilderTitle').textContent = 'Build a list';
   setBtnLabel('saveListBtn', 'Save list');
   document.getElementById('cancelEditListBtn').style.display = 'none';
+  document.getElementById('smartFilterDueCheck').checked = false;
+  setListKindUI('static');
   renderListBuilder();
 }
 document.getElementById('cancelEditListBtn').addEventListener('click', resetListForm);
@@ -4074,12 +4182,18 @@ document.getElementById('saveListBtn').addEventListener('click', async () => {
     showToast('Give this list a name.', 'error');
     return;
   }
+  if (listKind === 'smart') {
+    await call('saveList', { list: { id: editingListId, name, type: 'smart', filter: currentSmartFilter() } });
+    resetListForm();
+    refresh();
+    return;
+  }
   if (selectedWaIds.size === 0) {
     showToast('Select at least one group/contact.', 'error');
     return;
   }
   const members = Array.from(selectedWaIds).map((waId) => chatSource.get(waId)).filter(Boolean);
-  await call('saveList', { list: { id: editingListId, name, members } });
+  await call('saveList', { list: { id: editingListId, name, type: 'static', members } });
   resetListForm();
   refresh();
 });
@@ -4198,9 +4312,10 @@ function renderLists() {
     const members = l.members || [];
     const names = members.map((m) => m.name);
     const li = document.createElement('li');
+    const smartBadge = l.type === 'smart' ? '<span class="smart-list-badge">⚡ Smart</span>' : '';
     li.innerHTML = `<div class="item-row">
       <div class="item-text">
-        <b>${escapeHtml(l.name)}</b> <span class="muted">(${members.length})</span><br/>
+        <b>${escapeHtml(l.name)}</b>${smartBadge} <span class="muted">(${members.length})</span><br/>
         <span class="log-time">${escapeHtml(names.slice(0, 4).join(', '))}${names.length > 4 ? '…' : ''}</span>
       </div>
       <div class="item-actions">
@@ -4215,15 +4330,26 @@ function renderLists() {
     });
     li.querySelector('[data-act="edit"]').addEventListener('click', () => {
       editingListId = l.id;
-      selectedWaIds = new Set(members.map((m) => m.waId));
-      for (const m of members) chatSource.set(m.waId, m); // merge so they show without a fresh scan
-      listSearchQuery = '';
-      document.getElementById('listSearchInput').value = '';
       document.getElementById('listName').value = l.name;
       document.getElementById('listBuilderTitle').textContent = `Editing "${l.name}"`;
       setBtnLabel('saveListBtn', 'Update list');
       document.getElementById('cancelEditListBtn').style.display = '';
-      renderListBuilder();
+      if (l.type === 'smart') {
+        smartFilterStatuses = new Set((l.filter && l.filter.statuses) || []);
+        smartFilterTags = new Set((l.filter && l.filter.tags) || []);
+        smartFilterDue = !!(l.filter && l.filter.followUpDue);
+        document.getElementById('smartFilterDueCheck').checked = smartFilterDue;
+        setListKindUI('smart');
+        renderSmartFilterBuilder();
+        updateSmartMatchPreview();
+      } else {
+        selectedWaIds = new Set(members.map((m) => m.waId));
+        for (const m of members) chatSource.set(m.waId, m); // merge so they show without a fresh scan
+        listSearchQuery = '';
+        document.getElementById('listSearchInput').value = '';
+        setListKindUI('static');
+        renderListBuilder();
+      }
       document.querySelector('[data-tab="lists"]').click();
     });
     li.querySelector('[data-act="export"]').addEventListener('click', async (e) => {
@@ -4244,6 +4370,325 @@ function renderLists() {
     ul.appendChild(li);
   }
 }
+
+// ============ CONTACTS ============
+// A lightweight CRM: status/tags/notes/follow-up per WhatsApp contact,
+// independent of Lists (which can now *filter* this database — see the
+// LISTS section's smart-list code above). Sends from here reuse the
+// existing sendNowToChat/openChat plumbing; nothing new on the send path.
+
+let contactStatusFilter = 'all'; // 'all' | 'due' | one of STATE.contactStatuses
+let contactSearchQuery = '';
+let openContactId = null;
+
+function findContact(id) {
+  return (STATE.contacts || []).find((c) => c.id === id) || null;
+}
+
+// Buckets a follow-up date into overdue/today/future by calendar day (not
+// a raw 24h subtraction) so "due at 11pm today" doesn't read as tomorrow's
+// problem just because it's a few hours old.
+function followUpBadge(ts) {
+  if (!ts) return null;
+  const startOfToday = new Date();
+  startOfToday.setHours(0, 0, 0, 0);
+  const startOfDue = new Date(ts);
+  startOfDue.setHours(0, 0, 0, 0);
+  const diffDays = Math.round((startOfToday - startOfDue) / 86400000);
+  if (diffDays > 0) return { cls: 'overdue', text: `${diffDays}d overdue` };
+  if (diffDays === 0) return { cls: 'today', text: 'Today' };
+  return { cls: 'future', text: new Date(ts).toLocaleDateString(undefined, { day: 'numeric', month: 'short' }) };
+}
+
+function isoDateOnly(ts) {
+  const d = new Date(ts);
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+}
+
+function renderContactsTab() {
+  renderContactStatusChips();
+  renderContactsList();
+  if (openContactId) renderContactDetailModal();
+}
+
+function renderContactStatusChips() {
+  const box = document.getElementById('contactStatusChips');
+  const statuses = STATE.contactStatuses && STATE.contactStatuses.length ? STATE.contactStatuses : CONTACT_STATUSES;
+  const counts = {};
+  for (const s of statuses) counts[s] = 0;
+  let dueCount = 0;
+  const now = Date.now();
+  for (const c of STATE.contacts || []) {
+    if (counts[c.status] !== undefined) counts[c.status]++;
+    if (c.nextFollowUpAt && c.nextFollowUpAt <= now) dueCount++;
+  }
+  const total = (STATE.contacts || []).length;
+  const chips = [
+    `<button type="button" class="filter-chip${contactStatusFilter === 'all' ? ' on' : ''}" data-filter="all">All <span class="muted">${total}</span></button>`,
+    ...statuses.map(
+      (s) =>
+        `<button type="button" class="filter-chip${contactStatusFilter === s ? ' on' : ''}" data-filter="${escapeHtml(s)}">${escapeHtml(s)} <span class="muted">${counts[s] || 0}</span></button>`
+    ),
+    `<button type="button" class="filter-chip due${contactStatusFilter === 'due' ? ' on' : ''}" data-filter="due">⏰ Due <span class="muted">${dueCount}</span></button>`
+  ];
+  box.innerHTML = chips.join('');
+  box.querySelectorAll('.filter-chip').forEach((chip) => {
+    chip.addEventListener('click', () => {
+      contactStatusFilter = chip.dataset.filter;
+      renderContactStatusChips();
+      renderContactsList();
+    });
+  });
+}
+
+function renderContactsList() {
+  const ul = document.getElementById('contactsListEl');
+  const contacts = STATE.contacts || [];
+  document.getElementById('contactsEmptyHint').style.display = contacts.length === 0 ? '' : 'none';
+  const q = contactSearchQuery.trim().toLowerCase();
+  const now = Date.now();
+  const visible = contacts.filter((c) => {
+    if (contactStatusFilter === 'due') {
+      if (!(c.nextFollowUpAt && c.nextFollowUpAt <= now)) return false;
+    } else if (contactStatusFilter !== 'all' && c.status !== contactStatusFilter) {
+      return false;
+    }
+    if (q && !`${c.name} ${c.number || ''}`.toLowerCase().includes(q)) return false;
+    return true;
+  });
+  ul.innerHTML = '';
+  for (const c of visible) {
+    const li = document.createElement('li');
+    const tagsHtml = (c.tags || []).map((t) => `<span class="contact-row-tag">${escapeHtml(t)}</span>`).join('');
+    const fu = followUpBadge(c.nextFollowUpAt);
+    li.innerHTML = `<div class="item-row">
+      <div class="item-text">
+        <b>${escapeHtml(c.name)}</b><br/>
+        <span class="contact-row-ph">${escapeHtml(c.number || '')}</span>
+        <div class="contact-row-meta">
+          <span class="status-pill" data-status="${escapeHtml(c.status)}">${escapeHtml(c.status)}</span>
+          ${tagsHtml}
+        </div>
+      </div>
+      <div class="item-actions">
+        ${fu ? `<span class="contact-row-followup ${fu.cls}">${fu.text}</span>` : ''}
+        <button class="icon-btn small-icon-btn" data-act="open" type="button" data-tooltip="Open">${EDIT_ICON_SVG}</button>
+      </div>
+    </div>`;
+    li.querySelector('[data-act="open"]').addEventListener('click', () => openContactDetail(c.id));
+    ul.appendChild(li);
+  }
+}
+
+document.getElementById('contactSearchInput').addEventListener('input', (e) => {
+  contactSearchQuery = e.target.value;
+  document.getElementById('contactSearchClearBtn').classList.toggle('visible', contactSearchQuery.length > 0);
+  renderContactsList();
+});
+document.getElementById('contactSearchClearBtn').addEventListener('click', () => {
+  contactSearchQuery = '';
+  document.getElementById('contactSearchInput').value = '';
+  document.getElementById('contactSearchClearBtn').classList.remove('visible');
+  renderContactsList();
+});
+
+// ---------- add a contact — same reused search/country-code widget as
+// quick-send and the Lists manual-add box (contactAddWidget). ----------
+async function addContactToDatabase() {
+  const input = document.getElementById('contactAddNumber');
+  const btn = document.getElementById('contactAddBtn');
+  const selectedTarget = contactAddWidget.getSelectedTarget();
+
+  let contact;
+  if (selectedTarget && input.value.trim() === selectedTarget.name) {
+    contact = (liveChatSearchCache || []).find((c) => c.waId === selectedTarget.waId) || selectedTarget;
+  } else {
+    const localDigits = input.value.replace(/\D/g, '');
+    if (!localDigits) return;
+    const selectedCountry = contactAddWidget.getSelectedCountry();
+    const nationalDigits = selectedCountry ? localDigits.replace(/^0/, '') : localDigits;
+    const number = (selectedCountry ? selectedCountry.dial : '') + nationalDigits;
+    btn.disabled = true;
+    const res = await call('findContactByNumber', { number });
+    btn.disabled = false;
+    if (!res.ok) {
+      showToast(res.error || 'Could not find that contact.', 'error');
+      return;
+    }
+    contact = res.contact;
+  }
+  if ((STATE.contacts || []).some((c) => c.waId === contact.waId)) {
+    showToast(`${contact.name} is already in your contacts database.`, 'info');
+    input.value = '';
+    contactAddWidget.clearSelectedTarget();
+    return;
+  }
+  await call('saveContact', { contact: { waId: contact.waId, name: contact.name, number: contact.number || '' } });
+  input.value = '';
+  contactAddWidget.clearSelectedTarget();
+  await refresh();
+  showToast(`Added ${contact.name}.`, 'success');
+}
+document.getElementById('contactAddBtn').addEventListener('click', addContactToDatabase);
+document.getElementById('contactAddNumber').addEventListener('keydown', (e) => {
+  if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) {
+    e.preventDefault();
+    addContactToDatabase();
+  }
+});
+
+// ---------- contact detail modal ----------
+function openContactDetail(id) {
+  openContactId = id;
+  renderContactDetailModal();
+  document.getElementById('contactDetailModal').style.display = 'flex';
+}
+function closeContactDetail() {
+  openContactId = null;
+  document.getElementById('contactDetailModal').style.display = 'none';
+}
+document.getElementById('contactDetailModalClose').addEventListener('click', closeContactDetail);
+document.getElementById('contactDetailModal').addEventListener('click', (e) => {
+  if (e.target.id === 'contactDetailModal') closeContactDetail();
+});
+document.addEventListener('keydown', (e) => {
+  if (e.key === 'Escape' && document.getElementById('contactDetailModal').style.display !== 'none') closeContactDetail();
+});
+
+async function updateContact(patch) {
+  const c = findContact(openContactId);
+  if (!c) return;
+  await call('saveContact', { contact: { ...c, ...patch, id: c.id } });
+  await refresh();
+}
+
+function renderContactDetailModal() {
+  const c = findContact(openContactId);
+  if (!c) {
+    closeContactDetail();
+    return;
+  }
+  document.getElementById('contactDetailName').textContent = c.name;
+  document.getElementById('contactDetailNumber').textContent = c.number || '';
+
+  const statuses = STATE.contactStatuses && STATE.contactStatuses.length ? STATE.contactStatuses : CONTACT_STATUSES;
+  const curIdx = statuses.indexOf(c.status);
+  const stepper = document.getElementById('contactStatusStepper');
+  stepper.innerHTML = statuses
+    .map((s, i) => `<button type="button" class="cd-step${i < curIdx ? ' done' : ''}${i === curIdx ? ' now' : ''}" data-status="${escapeHtml(s)}">${escapeHtml(s)}</button>`)
+    .join('');
+  stepper.querySelectorAll('.cd-step').forEach((btn) => {
+    btn.addEventListener('click', () => updateContact({ status: btn.dataset.status }));
+  });
+
+  renderContactTagChips(c);
+
+  document.getElementById('contactFollowUpDate').value = c.nextFollowUpAt ? isoDateOnly(c.nextFollowUpAt) : '';
+  document.getElementById('contactCadenceSelect').value = c.followUpCadenceDays ? String(c.followUpCadenceDays) : '';
+
+  const notesBox = document.getElementById('contactNotesList');
+  const notes = (c.notes || []).slice().sort((a, b) => b.at - a.at);
+  notesBox.innerHTML = notes.length
+    ? notes
+        .map(
+          (n) =>
+            `<div class="cd-note"><div class="cd-note-when">${escapeHtml(new Date(n.at).toLocaleString())}</div><div class="cd-note-txt">${escapeHtml(n.text)}</div></div>`
+        )
+        .join('')
+    : '<p class="hint">No notes yet.</p>';
+}
+
+function renderContactTagChips(c) {
+  const box = document.getElementById('contactTagChips');
+  box.innerHTML = (c.tags || [])
+    .map((t) => `<span class="chip">${escapeHtml(t)}<button type="button" data-tag="${escapeHtml(t)}">✕</button></span>`)
+    .join('');
+  box.querySelectorAll('button[data-tag]').forEach((btn) => {
+    btn.addEventListener('click', () => {
+      updateContact({ tags: (c.tags || []).filter((t) => t !== btn.dataset.tag) });
+    });
+  });
+}
+
+function addContactTag() {
+  const input = document.getElementById('contactTagInput');
+  const tag = input.value.trim();
+  const c = findContact(openContactId);
+  if (!tag || !c) return;
+  input.value = '';
+  if ((c.tags || []).includes(tag)) return;
+  updateContact({ tags: [...(c.tags || []), tag] });
+}
+document.getElementById('contactTagAddBtn').addEventListener('click', addContactTag);
+document.getElementById('contactTagInput').addEventListener('keydown', (e) => {
+  if (e.key === 'Enter') {
+    e.preventDefault();
+    addContactTag();
+  }
+});
+
+document.getElementById('contactFollowUpDate').addEventListener('change', (e) => {
+  // Midday, not midnight — keeps the date from shifting a calendar day
+  // backward for anyone west of UTC once it round-trips through Date.
+  const ts = e.target.value ? new Date(`${e.target.value}T12:00:00`).getTime() : null;
+  updateContact({ nextFollowUpAt: ts });
+});
+document.getElementById('contactCadenceSelect').addEventListener('change', (e) => {
+  updateContact({ followUpCadenceDays: e.target.value ? Number(e.target.value) : null });
+});
+
+function addContactNote() {
+  const input = document.getElementById('contactNoteInput');
+  const text = input.value.trim();
+  const c = findContact(openContactId);
+  if (!text || !c) return;
+  input.value = '';
+  updateContact({ notes: [...(c.notes || []), { id: crypto.randomUUID(), text, at: Date.now() }] });
+}
+document.getElementById('contactNoteAddBtn').addEventListener('click', addContactNote);
+document.getElementById('contactNoteInput').addEventListener('keydown', (e) => {
+  if (e.key === 'Enter') {
+    e.preventDefault();
+    addContactNote();
+  }
+});
+
+// "Send now" hands off to the Messages tab's quick-send box rather than
+// blind-firing whatever's leftover in the composer — sending still needs
+// real content and the consent checkbox, same as every other send path.
+document.getElementById('contactDetailSendBtn').addEventListener('click', () => {
+  const c = findContact(openContactId);
+  if (!c) return;
+  closeContactDetail();
+  quickSendWidget.setSelectedTarget({ waId: c.waId, name: c.name });
+  document.querySelector('[data-tab="messages"]').click();
+  const textarea = document.getElementById('msgText');
+  if (textarea) textarea.focus();
+  showToast(`Ready to send to ${c.name} — type your message and hit send.`, 'info');
+});
+
+document.getElementById('contactDetailOpenChatBtn').addEventListener('click', async () => {
+  const c = findContact(openContactId);
+  if (!c) return;
+  const btn = document.getElementById('contactDetailOpenChatBtn');
+  btn.disabled = true;
+  const res = await call('openChatById', { waId: c.waId });
+  btn.disabled = false;
+  if (!res.ok) showToast(res.error || 'Could not open that chat.', 'error');
+});
+
+document.getElementById('contactDetailDeleteBtn').addEventListener('click', async () => {
+  const c = findContact(openContactId);
+  if (!c) return;
+  const ok = await showConfirmDialog(`Delete "${c.name}" from your contacts database? This doesn't affect WhatsApp itself.`, {
+    confirmText: 'Delete',
+    danger: true
+  });
+  if (!ok) return;
+  await call('deleteContact', { id: c.id });
+  closeContactDetail();
+  refresh();
+});
 
 // ============ LOG ============
 document.getElementById('clearLogBtn').addEventListener('click', async () => {
