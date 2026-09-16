@@ -33,6 +33,14 @@ document.addEventListener('wa-ext-notify', (event) => {
   }
 });
 
+// Separate one-way push for the external API (Nuskomate) — every message,
+// unfiltered, unlike wa-ext-notify above. Relayed to background.js over the
+// normal (same-extension) runtime messaging; background.js's own
+// externally_connectable port to Nuskomate is what actually forwards it on.
+document.addEventListener('wa-ext-relay', (event) => {
+  chrome.runtime.sendMessage({ action: 'externalRelayMessage', payload: event.detail || {} }).catch(() => {});
+});
+
 // ---------- privacy screen blur ----------
 // Blurs WhatsApp Web's own page content (chat list names/avatars, the
 // open chat's header, message text) — for screen-sharing or working
@@ -199,6 +207,14 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
         sendResponse({ ok: true, ...result });
       } else if (msg.action === 'sendMedia') {
         const result = await bridgeRequest('sendMedia', { waId: msg.waId, media: msg.media, caption: msg.caption }, 45000);
+        sendResponse({ ok: true, ...result });
+      } else if (msg.action === 'getMessageMedia') {
+        // Generous timeout — downloading/decrypting a large attachment can
+        // genuinely take a while, same reasoning as sendMedia's own cap.
+        const result = await bridgeRequest('getMessageMedia', { messageId: msg.messageId }, 60000);
+        sendResponse({ ok: true, ...result });
+      } else if (msg.action === 'mentionInChat') {
+        const result = await bridgeRequest('mentionInChat', { waId: msg.waId, text: msg.text, mentionWaId: msg.mentionWaId }, 30000);
         sendResponse({ ok: true, ...result });
       } else if (msg.action === 'deleteMessage') {
         const result = await bridgeRequest('deleteMessage', { waId: msg.waId, msgId: msg.msgId }, 20000);

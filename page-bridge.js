@@ -452,6 +452,48 @@ async function handleRequest(action, payload) {
       );
       return { sent: true, msgId: result && result.id, waId: chatIdFromMsgId(result && result.id) || waId };
     }
+    // External API only (Nuskomate) — fetches a specific message's media.
+    // WPP.chat.downloadMedia resolves to a Blob, not a data URL; converted
+    // here so media crosses the messaging boundary the same way every other
+    // attachment in this codebase already does (see sendMedia above,
+    // sync.js's attachment transport).
+    case 'getMessageMedia': {
+      let blob;
+      try {
+        blob = await window.WPP.chat.downloadMedia(payload.messageId);
+      } catch (e) {
+        throw new Error("Couldn't download that message's media — it may have expired or been deleted.");
+      }
+      if (!blob) throw new Error("That message doesn't have any media.");
+      const dataUrl = await new Promise((resolve, reject) => {
+        const reader = new FileReader();
+        reader.onload = () => resolve(reader.result);
+        reader.onerror = () => reject(new Error('Could not read the downloaded media.'));
+        reader.readAsDataURL(blob);
+      });
+      // Best-effort filename — a Blob alone carries no name, and the exact
+      // field wa-js stores it under on the message object isn't confirmed
+      // for this vendored version; falls back to empty rather than guessing
+      // wrong, the caller can name the file itself if this comes back blank.
+      let filename = '';
+      try {
+        const message = window.WPP.chat.getMessageById ? await window.WPP.chat.getMessageById(payload.messageId) : null;
+        filename = (message && (message.filename || message.mediaData?.filename)) || '';
+      } catch (_) {
+        // best-effort only
+      }
+      return { dataUrl, mimetype: blob.type || '', filename };
+    }
+    // External API only (Nuskomate) — same send path as sendMessage above,
+    // plus wa-js's mentionedList option so `mentionWaId` renders as a real
+    // @mention in the group. No literal "@number" needed in payload.text —
+    // that's only for wa-js's separate auto-detect mode, not used here.
+    case 'mentionInChat': {
+      const { result, waId } = await withCommunityRedirect(payload.waId, (id) =>
+        window.WPP.chat.sendTextMessage(id, payload.text, { mentionedList: [payload.mentionWaId] })
+      );
+      return { sent: true, msgId: result && result.id, waId: chatIdFromMsgId(result && result.id) || waId };
+    }
     // "Delete for everyone" — WhatsApp only allows this within a limited
     // time window after sending and only for messages sent by this account;
     // past that it throws or comes back with isRevoked:false, which the
@@ -519,6 +561,52 @@ async function installIncomingMessageHook() {
   });
 }
 installIncomingMessageHook();
+
+// ---------- incoming-message relay (external API, e.g. Nuskomate) ----------
+// A second, independent subscription to the same WPP event as the hook
+// above — deliberately NOT reusing it, since that one drops fromMe messages
+// and anything with no text/caption (a photo or voice note with nothing
+// typed alongside it), both of which an external caller reading the full
+// conversation needs to see. This one passes everything through as-is and
+// leaves the auto-reply hook completely untouched.
+let externalRelayHookInstalled = false;
+async function installExternalRelayHook() {
+  if (externalRelayHookInstalled) return;
+  const ready = await waitForWppReady();
+  if (!ready || externalRelayHookInstalled) return;
+  externalRelayHookInstalled = true;
+  window.WPP.on('chat.new_message', (msg) => {
+    try {
+      if (!msg || !msg.id) return;
+      const chatId = msg.from && (msg.from._serialized || String(msg.from));
+      if (!chatId) return;
+      document.dispatchEvent(
+        new CustomEvent('wa-ext-relay', {
+          detail: {
+            waId: chatId,
+            isGroup: !!msg.isGroupMsg,
+            // Best-effort — msg.chat isn't guaranteed to carry a resolved
+            // name on every message; falls back to the raw id below.
+            chatName: (msg.chat && (msg.chat.formattedTitle || msg.chat.name)) || chatId,
+            fromMe: !!msg.id.fromMe,
+            messageId: msg.id._serialized,
+            // Passed through exactly as WPP reports it — not reinterpreted
+            // or narrowed to a fixed enum, since this file has no business
+            // logic that depends on the specific value.
+            messageType: msg.type || 'chat',
+            text: msg.body || msg.caption || '',
+            // msg.t is WhatsApp's own timestamp, in seconds; falls back to
+            // "now" on the rare message that doesn't carry one.
+            timestamp: msg.t ? msg.t * 1000 : Date.now()
+          }
+        })
+      );
+    } catch (_) {
+      // never let a malformed event break WPP's own listener chain
+    }
+  });
+}
+installExternalRelayHook();
 
 document.addEventListener('wa-ext-request', async (event) => {
   const { id, action, payload } = event.detail || {};

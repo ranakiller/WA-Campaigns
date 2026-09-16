@@ -38,6 +38,9 @@
   "side_panel": {
     "default_path": "popup.html?panel=1"
   },
+  "externally_connectable": {
+    "ids": ["mcikbecdcddegpbonhndegmpjgbangdl"]
+  },
   "commands": {
     "toggle-privacy-blur": {
       "suggested_key": { "default": "Alt+Shift+X" },

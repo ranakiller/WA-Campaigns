@@ -1952,6 +1952,25 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
           sendResponse(await licenseAdmin('/admin/delete', { key: msg.key }));
           break;
         }
+
+        // From content.js's wa-ext-relay listener (see page-bridge.js's
+        // installExternalRelayHook) — same-extension messaging, not
+        // external, so this stays in the regular switch. Just forwards to
+        // whichever external extension (Nuskomate) currently holds the
+        // long-lived port opened below; a no-op if nothing's connected.
+        case 'externalRelayMessage': {
+          if (nuskomatePort) {
+            try {
+              nuskomatePort.postMessage({ type: 'new-message', ...msg.payload });
+            } catch (_) {
+              // port went stale between the check and the send — next
+              // relayed message will find nuskomatePort already cleared
+              // by onDisconnect below.
+            }
+          }
+          sendResponse({ ok: true });
+          break;
+        }
         default:
           sendResponse({ ok: false, error: 'Unknown action' });
       }
@@ -1960,4 +1979,124 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     }
   })();
   return true;
+});
+
+// ---------- external API (allow-listed sister extensions) ----------
+// A small, generic "read new messages / open a chat / send a message"
+// surface for Nuskomate (a separate, unrelated extension) to drive
+// WhatsApp through this extension's existing WPPConnect/wa-js integration
+// instead of vendoring its own. Deliberately generic — this file has no
+// idea what Nuskomate actually does with any of it, and nothing here
+// changes WA-Campaigns' own scheduling/campaign/contacts/auto-reply
+// behavior; it's a second, independent entry point into the same
+// ensureWaTab/pingContentScript/sendToTab plumbing every internal action
+// above already uses.
+const NUSKOMATE_EXTENSION_ID = 'mcikbecdcddegpbonhndegmpjgbangdl';
+
+// The one currently-connected event port, if any — chrome.runtime ports
+// don't survive a service worker suspend/wake, so this is expected to go
+// null and get re-established by Nuskomate reconnecting; nothing here needs
+// to persist it across restarts.
+let nuskomatePort = null;
+chrome.runtime.onConnectExternal.addListener((port) => {
+  if (port.sender?.id !== NUSKOMATE_EXTENSION_ID || port.name !== 'nuskomate-events') {
+    port.disconnect();
+    return;
+  }
+  nuskomatePort = port;
+  port.onDisconnect.addListener(() => {
+    if (nuskomatePort === port) nuskomatePort = null;
+  });
+});
+
+chrome.runtime.onMessageExternal.addListener((msg, sender, sendResponse) => {
+  if (sender.id !== NUSKOMATE_EXTENSION_ID) return; // unhandled — Chrome treats this the same as no listener at all
+  (async () => {
+    try {
+      switch (msg.action) {
+        case 'openChat': {
+          const tab = await ensureWaTab();
+          const ready = await pingContentScript(tab.id);
+          if (!ready) {
+            sendResponse({ ok: false, error: 'WhatsApp Web tab is not ready (make sure you are logged in and the page finished loading).' });
+            break;
+          }
+          const res = await sendToTab(tab.id, { action: 'openChat', waId: msg.waId }, 15000);
+          if (!res || !res.ok) {
+            sendResponse({ ok: false, error: (res && res.error) || 'Unknown error opening chat.' });
+            break;
+          }
+          // Deliberately doesn't also focus the tab/window the way the
+          // Contacts panel's own "Open chat" button does — that's right for
+          // a single explicit click, but this can be called repeatedly by
+          // an external automation and shouldn't keep yanking focus away
+          // from whatever the user is actually doing.
+          sendResponse({ ok: true });
+          break;
+        }
+        case 'sendText':
+        case 'sendMedia':
+        case 'mentionInChat': {
+          const { settings } = await getState();
+          if (!settings.masterEnabled) {
+            sendResponse({ ok: false, error: 'Extension is switched off — turn it back on in the header first.' });
+            break;
+          }
+          const tab = await ensureWaTab();
+          const ready = await pingContentScript(tab.id);
+          if (!ready) {
+            sendResponse({ ok: false, error: 'WhatsApp Web tab is not ready (make sure you are logged in and the page finished loading).' });
+            break;
+          }
+          let res;
+          if (msg.action === 'sendText') {
+            res = await sendToTab(tab.id, { action: 'sendMessage', waId: msg.waId, text: msg.text }, 30000);
+          } else if (msg.action === 'sendMedia') {
+            // mimetype wasn't part of the requested external shape (just
+            // waId/dataUrl/filename/caption) — a data URL always carries its
+            // own MIME type as a "data:<mimetype>;base64,..." prefix, so
+            // that's the fallback when the caller doesn't pass one.
+            const mimeMatch = typeof msg.dataUrl === 'string' && msg.dataUrl.match(/^data:([^;,]+)/);
+            const mimeType = msg.mimetype || (mimeMatch && mimeMatch[1]) || '';
+            res = await sendToTab(
+              tab.id,
+              { action: 'sendMedia', waId: msg.waId, media: { dataUrl: msg.dataUrl, filename: msg.filename, mimeType }, caption: msg.caption },
+              45000
+            );
+          } else {
+            res = await sendToTab(tab.id, { action: 'mentionInChat', waId: msg.waId, text: msg.text, mentionWaId: msg.mentionWaId }, 30000);
+          }
+          if (!res || !res.ok) {
+            sendResponse({ ok: false, error: (res && res.error) || 'Unknown send failure.' });
+            break;
+          }
+          sendResponse({ ok: true, msgId: res.msgId, waId: res.waId });
+          break;
+        }
+        case 'getMessageMedia': {
+          const tab = await ensureWaTab();
+          const ready = await pingContentScript(tab.id);
+          if (!ready) {
+            sendResponse({ ok: false, error: 'WhatsApp Web tab is not ready (make sure you are logged in and the page finished loading).' });
+            break;
+          }
+          // waId isn't actually needed by WPP.chat.downloadMedia (a message
+          // id alone is globally unique) — accepted on the external request
+          // for a consistent shape, just not forwarded any further.
+          const res = await sendToTab(tab.id, { action: 'getMessageMedia', messageId: msg.messageId }, 65000);
+          if (!res || !res.ok) {
+            sendResponse({ ok: false, error: (res && res.error) || 'Could not download that media.' });
+            break;
+          }
+          sendResponse({ ok: true, dataUrl: res.dataUrl, mimetype: res.mimetype, filename: res.filename });
+          break;
+        }
+        default:
+          sendResponse({ ok: false, error: 'Unknown action' });
+      }
+    } catch (err) {
+      sendResponse({ ok: false, error: String((err && err.message) || err) });
+    }
+  })();
+  return true; // keep the channel open for the async response
 });
