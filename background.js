@@ -185,7 +185,8 @@ async function getState() {
     'settings',
     'activeRuns',
     'cloudSync',
-    'contacts'
+    'contacts',
+    'nuskomateStatus'
   ]);
   const contacts = data.contacts || [];
   // Keeps every smart list's `members` current every time the popup asks
@@ -203,7 +204,8 @@ async function getState() {
     license: await getLicense(),
     cloudSync: data.cloudSync || {},
     contacts,
-    contactStatuses: CONTACT_STATUSES
+    contactStatuses: CONTACT_STATUSES,
+    nuskomateStatus: data.nuskomateStatus || {}
   };
 }
 
@@ -1962,6 +1964,7 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
           if (nuskomatePort) {
             try {
               nuskomatePort.postMessage({ type: 'new-message', ...msg.payload });
+              setNuskomateStatus({ lastMessageAt: Date.now() });
             } catch (_) {
               // port went stale between the check and the send — next
               // relayed message will find nuskomatePort already cleared
@@ -1993,6 +1996,17 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
 // above already uses.
 const NUSKOMATE_EXTENSION_ID = 'mcikbecdcddegpbonhndegmpjgbangdl';
 
+// Persisted connection/activity status — surfaced in getState() so the popup
+// can show whether Nuskomate is actually connected and using this, instead
+// of that being invisible outside the console. Persisted (not just the live
+// nuskomatePort variable below) because a service worker restart drops the
+// port silently; "connected as of a few seconds ago" is still meaningful
+// signal for "is this bridge actually working" even right after a restart.
+async function setNuskomateStatus(patch) {
+  const { nuskomateStatus } = await chrome.storage.local.get(['nuskomateStatus']);
+  await chrome.storage.local.set({ nuskomateStatus: { ...(nuskomateStatus || {}), ...patch } });
+}
+
 // The one currently-connected event port, if any — chrome.runtime ports
 // don't survive a service worker suspend/wake, so this is expected to go
 // null and get re-established by Nuskomate reconnecting; nothing here needs
@@ -2004,13 +2018,16 @@ chrome.runtime.onConnectExternal.addListener((port) => {
     return;
   }
   nuskomatePort = port;
+  setNuskomateStatus({ connected: true, connectedAt: Date.now() });
   port.onDisconnect.addListener(() => {
     if (nuskomatePort === port) nuskomatePort = null;
+    setNuskomateStatus({ connected: false, disconnectedAt: Date.now() });
   });
 });
 
 chrome.runtime.onMessageExternal.addListener((msg, sender, sendResponse) => {
   if (sender.id !== NUSKOMATE_EXTENSION_ID) return; // unhandled — Chrome treats this the same as no listener at all
+  setNuskomateStatus({ lastRequestAt: Date.now(), lastRequestAction: msg.action });
   (async () => {
     try {
       switch (msg.action) {

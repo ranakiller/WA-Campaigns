@@ -209,7 +209,11 @@ store review, for the same ToS reasons noted above).
   header/footer. When set, the header and footer are added to *every*
   item/thread of every sent message — text items in the text, media items
   in the caption — each separated from that item's own content by a blank
-  line. Leave either empty to skip it.
+  line. Leave either empty to skip it. An **External API (Nuskomate)** card
+  shows a live green/red/gray dot for whether the allow-listed Nuskomate
+  extension (see "How it works technically" below) is actually connected
+  right now, plus a relative timestamp for its most recent activity — purely
+  informational, this extension never initiates anything toward Nuskomate.
 - **WhatsApp Status** (under the header title) — a glowing dot, checked
   fresh every time the popup opens rather than cached: green means a send
   would actually go through right now, red means it wouldn't (no
@@ -332,6 +336,20 @@ internal data/functions instead of the rendered page.
   `activate`/`deactivate`/`syncNow`/`admin*` messages and reads
   `license`/`cloudSync`/`settings.syncEnabled` off `getState()` the same way
   it reads everything else.
+- **External API** — `manifest.json`'s `externally_connectable` allow-lists
+  exactly one sister extension (Nuskomate, by its fixed extension id) to
+  read incoming WhatsApp messages and send through this extension's own
+  WhatsApp connection, instead of building its own. Handled entirely in
+  `background.js` (`onConnectExternal`/`onMessageExternal`), reusing the same
+  `ensureWaTab`/`pingContentScript`/`sendToTab` plumbing every internal
+  action already uses — none of this extension's own scheduling, campaigns,
+  contacts, or auto-reply behavior is affected either way. The Settings
+  tab's **External API (Nuskomate)** card is a read-only status light for
+  this connection (see above); if Nuskomate isn't connecting, check that
+  it's actually installed/enabled and, when testing a local Nuskomate build,
+  that its loaded `dist/` folder is up to date (`node build.js` in its own
+  repo) — an unbuilt/stale `dist/` simply won't contain whatever bridging
+  code its current source has.
 
 ## Requirements
 

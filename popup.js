@@ -126,7 +126,7 @@ chrome.runtime.onMessage.addListener((msg) => {
   }
 });
 
-let STATE = { fetchedChats: [], lists: [], messages: [], log: [], settings: {}, activeRuns: {}, contacts: [], contactStatuses: [] };
+let STATE = { fetchedChats: [], lists: [], messages: [], log: [], settings: {}, activeRuns: {}, contacts: [], contactStatuses: [], nuskomateStatus: {} };
 // Mirrors background.js's own CONTACT_STATUSES — used as a fallback before
 // the first getState() response lands (STATE.contactStatuses after that).
 const CONTACT_STATUSES = ['Lead', 'Contacted', 'Customer', 'Cold'];
@@ -4886,6 +4886,7 @@ document.getElementById('bulkDeleteForEveryoneBtn').addEventListener('click', as
 // ============ SETTINGS ============
 function renderSettings() {
   renderActivationCard();
+  renderNuskomateStatus();
   const s = STATE.settings;
   document.getElementById('jitterMinutes').value = s.jitterMinutes ?? 4;
   const [min, max] = s.defaultDelayBetweenMsMs || [20000, 45000];
@@ -5003,6 +5004,30 @@ function renderActivationCard() {
     text.textContent = 'Waiting for first sync…';
   }
   text.dataset.tooltip = cs.lastError || (cs.lastAt ? `Cloud copy last changed ${new Date(cs.lastAt).toLocaleString()}` : '');
+}
+
+// Nuskomate's connection to this extension (see background.js's
+// onConnectExternal/onMessageExternal) — purely informational, this popup
+// never talks to Nuskomate itself. `connected` reflects the live port right
+// now; lastMessageAt/lastRequestAt keep showing recent activity even right
+// after a service worker restart silently dropped that port (see
+// setNuskomateStatus's own comment in background.js).
+function renderNuskomateStatus() {
+  const dot = document.getElementById('nuskomateStatusDot');
+  const text = document.getElementById('nuskomateStatusText');
+  if (!dot || !text) return;
+  const st = STATE.nuskomateStatus || {};
+  const lastActivity = Math.max(st.lastMessageAt || 0, st.lastRequestAt || 0);
+  if (st.connected) {
+    dot.className = 'wa-status-dot ready';
+    text.textContent = lastActivity ? `Connected · last activity ${relativeTime(lastActivity)}` : `Connected · ${relativeTime(st.connectedAt)}`;
+  } else if (st.disconnectedAt || lastActivity) {
+    dot.className = 'wa-status-dot not-ready';
+    text.textContent = `Not connected · last seen ${relativeTime(Math.max(st.disconnectedAt || 0, lastActivity))}`;
+  } else {
+    dot.className = 'wa-status-dot off';
+    text.textContent = 'Never connected';
+  }
 }
 
 document.getElementById('syncEnabledCheck').addEventListener('change', async (e) => {
