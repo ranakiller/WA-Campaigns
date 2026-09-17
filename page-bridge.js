@@ -543,24 +543,52 @@ async function handleRequest(action, payload) {
         throw new Error("Couldn't download that message's media — it may have expired or been deleted.");
       }
       if (!blob) throw new Error("That message doesn't have any media.");
+      // An empty download used to silently turn into a "successful" but
+      // content-less data: URL — the caller would open a new tab for it and
+      // see nothing at all, with no error anywhere to explain why. Seen in
+      // practice on Status/Story attachments, which wa-js doesn't expose
+      // the same way as a normal chat message's media.
+      if (!blob.size) {
+        throw new Error("Downloaded media was empty — WhatsApp Web didn't return any actual content for this attachment (seen with some Status/Story media).");
+      }
+      // Best-effort filename/type — a Blob alone carries no name, and the
+      // exact field wa-js stores it under on the message object isn't
+      // confirmed for this vendored version; falls back to empty rather
+      // than guessing wrong, the caller can name the file itself if this
+      // comes back blank.
+      let filename = '';
+      let msgType = '';
+      try {
+        const message = window.WPP.chat.getMessageById ? await window.WPP.chat.getMessageById(payload.messageId) : null;
+        filename = (message && (message.filename || message.mediaData?.filename)) || '';
+        msgType = (message && message.type) || '';
+      } catch (_) {
+        // best-effort only
+      }
+      // blob.type comes back blank for some media wa-js hasn't fully typed
+      // (again, mostly Status/Story attachments) — reading a typeless Blob
+      // as a data: URL bakes in an empty/generic mimetype, which is exactly
+      // what makes the browser open a blank tab instead of actually
+      // rendering an image/video/etc. The mimetype is part of the data: URL
+      // itself at read time, not something that can be patched on
+      // afterward, so a guessed one (from the message's own type) has to
+      // replace it on the Blob *before* reading, not just in the response.
+      const FALLBACK_MIME = {
+        image: 'image/jpeg',
+        video: 'video/mp4',
+        ptt: 'audio/ogg',
+        audio: 'audio/mpeg',
+        document: 'application/pdf',
+        sticker: 'image/webp'
+      };
+      const effectiveBlob = blob.type ? blob : new Blob([blob], { type: FALLBACK_MIME[msgType] || 'application/octet-stream' });
       const dataUrl = await new Promise((resolve, reject) => {
         const reader = new FileReader();
         reader.onload = () => resolve(reader.result);
         reader.onerror = () => reject(new Error('Could not read the downloaded media.'));
-        reader.readAsDataURL(blob);
+        reader.readAsDataURL(effectiveBlob);
       });
-      // Best-effort filename — a Blob alone carries no name, and the exact
-      // field wa-js stores it under on the message object isn't confirmed
-      // for this vendored version; falls back to empty rather than guessing
-      // wrong, the caller can name the file itself if this comes back blank.
-      let filename = '';
-      try {
-        const message = window.WPP.chat.getMessageById ? await window.WPP.chat.getMessageById(payload.messageId) : null;
-        filename = (message && (message.filename || message.mediaData?.filename)) || '';
-      } catch (_) {
-        // best-effort only
-      }
-      return { dataUrl, mimetype: blob.type || '', filename };
+      return { dataUrl, mimetype: effectiveBlob.type, filename };
     }
     // External API only (Nuskomate) — same send path as sendMessage above,
     // plus wa-js's mentionedList option so `mentionWaId` renders as a real
@@ -645,7 +673,11 @@ async function installIncomingMessageHook() {
       if (!msg || (msg.id && msg.id.fromMe)) return;
       const chatId = msg.from && (msg.from._serialized || String(msg.from));
       if (!chatId) return;
-      const text = msg.body || msg.caption || '';
+      // .body on a media message is raw/internal, not user-facing text (see
+      // installExternalRelayHook's own comment on this) — only trust it for
+      // an actual plain-text message; a media message's real text (if any)
+      // is its .caption.
+      const text = msg.mimetype ? msg.caption || '' : msg.body || '';
       if (!text) return;
       document.dispatchEvent(
         new CustomEvent('wa-ext-notify', {
@@ -685,21 +717,54 @@ async function installExternalRelayHook() {
       if (!msg || !msg.id) return;
       const chatId = msg.from && (msg.from._serialized || String(msg.from));
       if (!chatId) return;
+      // status@broadcast (a WhatsApp Status/Story update) reports the
+      // actual poster in .author, with .from itself just being the fixed
+      // broadcast id — chatName falling back to that literal id told you
+      // nothing about who actually posted it. Groups carry the same
+      // .author shape for their individual senders too, so this is
+      // resolved unconditionally (getChatExportData resolves it the same
+      // way for the same reason).
+      const authorWaId = msg.author ? msg.author._serialized || String(msg.author) : null;
+      let authorName = null;
+      if (msg.author) {
+        try {
+          const c = window.WPP.whatsapp.ContactStore.get(msg.author);
+          authorName = (c && (c.name || c.pushname || c.formattedName)) || null;
+        } catch (_) {
+          authorName = null;
+        }
+      }
+      const isStatus = chatId === 'status@broadcast';
+      const baseName = (msg.chat && (msg.chat.formattedTitle || msg.chat.name)) || chatId;
       document.dispatchEvent(
         new CustomEvent('wa-ext-relay', {
           detail: {
             waId: chatId,
             isGroup: !!msg.isGroupMsg,
+            isStatus,
+            // Who to actually open/reply to for a status entry — "chatId"
+            // here is the shared broadcast id, not a real openable chat.
+            authorWaId,
             // Best-effort — msg.chat isn't guaranteed to carry a resolved
-            // name on every message; falls back to the raw id below.
-            chatName: (msg.chat && (msg.chat.formattedTitle || msg.chat.name)) || chatId,
+            // name on every message; falls back to the raw id below. For a
+            // status, that fallback is instead whoever posted it.
+            chatName: isStatus ? authorName || (authorWaId && authorWaId.split('@')[0]) || 'Unknown poster' : baseName,
             fromMe: !!msg.id.fromMe,
             messageId: msg.id._serialized,
             // Passed through exactly as WPP reports it — not reinterpreted
             // or narrowed to a fixed enum, since this file has no business
             // logic that depends on the specific value.
             messageType: msg.type || 'chat',
-            text: msg.body || msg.caption || '',
+            // Whether this message actually has a downloadable attachment —
+            // a real signal (same one getChatExportData uses), not a guess
+            // from messageType string-matching a fixed list, which can miss
+            // types that fixed list doesn't happen to include.
+            hasMedia: !!msg.mimetype,
+            // .body on a media message is raw/internal data (this is what
+            // made a Status image/video show up as a wall of base64-looking
+            // text before) — only trust it for an actual plain-text
+            // message; a media message's real text, if any, is .caption.
+            text: msg.mimetype ? msg.caption || '' : msg.body || '',
             // msg.t is WhatsApp's own timestamp, in seconds; falls back to
             // "now" on the rare message that doesn't carry one.
             timestamp: msg.t ? msg.t * 1000 : Date.now()

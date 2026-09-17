@@ -5273,6 +5273,51 @@ let incomingSearchQuery = '';
 let incomingTypeFilterValue = 'all';
 let incomingShowMine = true;
 
+// ---------- inline reply (reply to a chat straight from its Incoming card) ----------
+// Only one card's reply box open at a time, same convention as every other
+// single-open-panel in this app. incomingReplyDraft survives re-renders —
+// new incoming traffic re-runs renderIncomingTab() constantly (see the
+// storage.onChanged listener below), which would otherwise wipe out
+// whatever's mid-typed every time an unrelated message arrives from any
+// chat; the onChanged handler instead skips that re-render entirely while
+// a reply is open, and catches up the instant it closes.
+let incomingReplyOpenId = null;
+let incomingReplyDraft = { text: '', media: null };
+let incomingReplyFontPanelOpen = false;
+const REPLY_ICON_SVG =
+  '<svg viewBox="0 0 24 24" width="14" height="14"><path fill="currentColor" d="M10 9V5l-7 7 7 7v-4.1c5 0 8.5 1.6 11 5.1-1-5-4-10-11-11z"/></svg>';
+
+function resetIncomingReplyDraft() {
+  incomingReplyOpenId = null;
+  incomingReplyDraft = { text: '', media: null };
+  incomingReplyFontPanelOpen = false;
+}
+
+function incomingReplyPanelHtml() {
+  return `<div class="incoming-reply-panel">
+    <div class="textarea-wrap">
+      <textarea id="incomingReplyText" rows="2" placeholder="Write a reply, then tap send (or Ctrl+Enter)...">${escapeHtml(incomingReplyDraft.text)}</textarea>
+      <div class="textarea-toolbar">
+        <button id="incomingReplyFontBtn" class="icon-btn small-icon-btn" type="button" data-tooltip="Fancy text styles">
+          <svg viewBox="0 0 24 24" width="15" height="15"><text x="0" y="16" font-size="15" font-family="Georgia, 'Times New Roman', serif" font-weight="700" fill="currentColor">Aa</text></svg>
+        </button>
+        <button id="incomingReplyAttachBtn" class="icon-btn small-icon-btn" type="button" data-tooltip="Attach image or document">
+          <svg viewBox="0 0 24 24" width="15" height="15"><path fill="currentColor" d="M16.5 6.5v9a4 4 0 0 1-8 0v-9a2.5 2.5 0 0 1 5 0v8a1 1 0 0 1-2 0v-8H10v8a2.5 2.5 0 0 0 5 0v-9a4 4 0 0 0-8 0v9.5a5.5 5.5 0 0 0 11 0V6.5Z"/></svg>
+        </button>
+        <span class="textarea-toolbar-sep"></span>
+        <button id="incomingReplySendBtn" class="icon-btn small-icon-btn" type="button" data-tooltip="Send (Ctrl+Enter)">${sendIconSvg(false, 14)}</button>
+      </div>
+    </div>
+    <input id="incomingReplyFile" type="file" style="display:none" accept="image/*,video/*,application/pdf,.doc,.docx,.xls,.xlsx,.ppt,.pptx,.zip" />
+    <div id="incomingReplyFontControl"></div>
+    ${
+      incomingReplyDraft.media
+        ? `<div class="chip-list"><span class="chip">📎 ${escapeHtml(incomingReplyDraft.media.filename)}<button type="button" id="incomingReplyRemoveAttachmentBtn">✕</button></span></div>`
+        : ''
+    }
+  </div>`;
+}
+
 function updateIncomingSearchClearBtn() {
   document.getElementById('incomingSearchClearBtn').classList.toggle('visible', incomingSearchQuery.length > 0);
 }
@@ -5367,31 +5412,51 @@ function renderIncomingTab() {
   }
   ul.innerHTML = visible
     .map((e) => {
-      const isMedia = INCOMING_MEDIA_TYPES.has(e.messageType);
+      // hasMedia is the real signal (same one chat export uses — whether
+      // WPP actually reports a mimetype on this message); messageType is
+      // kept as a fallback only for older stored entries from before that
+      // field existed.
+      const isMedia = e.hasMedia || INCOMING_MEDIA_TYPES.has(e.messageType);
       const preview = e.text
         ? escapeHtml(e.text)
         : isMedia
           ? `<span class="muted">[${incomingTypeLabel(e.messageType).toLowerCase()}, no caption]</span>`
           : '<span class="muted">[no text]</span>';
-      return `<li class="item-row incoming-row">
-        <div class="item-text">
-          <b>${escapeHtml(e.chatName)}</b>
-          <span class="badge badge-${e.isGroup ? 'group' : 'contact'}">${e.isGroup ? 'group' : 'contact'}</span>
-          <span class="incoming-type-badge">${incomingTypeLabel(e.messageType)}</span>
-          ${e.fromMe ? '<span class="incoming-mine-badge">You</span>' : ''}
-          <br/>
-          ${preview}
-          <div class="incoming-meta muted">${new Date(e.timestamp).toLocaleString()}</div>
+      const replyOpen = incomingReplyOpenId === e.id;
+      // A Status/Story update's own waId is the shared "status@broadcast"
+      // id — not a real chat anyone can open or reply into. authorWaId
+      // (resolved in page-bridge.js) is who actually posted it; Open/Reply
+      // both target that instead, and are disabled if it couldn't be
+      // resolved (an unsaved/never-seen contact WPP has no ContactStore
+      // entry for yet).
+      const targetWaId = e.isStatus ? e.authorWaId : e.waId;
+      const kindBadge = e.isStatus ? 'status' : e.isGroup ? 'group' : 'contact';
+      return `<li class="incoming-row">
+        <div class="item-row">
+          <div class="item-text">
+            <b>${escapeHtml(e.chatName)}</b>
+            <span class="badge badge-${kindBadge}">${kindBadge}</span>
+            <span class="incoming-type-badge">${incomingTypeLabel(e.messageType)}</span>
+            ${e.fromMe ? '<span class="incoming-mine-badge">You</span>' : ''}
+            <br/>
+            ${preview}
+            <div class="incoming-meta muted">${new Date(e.timestamp).toLocaleString()}</div>
+          </div>
+          <div class="item-actions">
+            ${
+              isMedia && e.messageId
+                ? `<button class="icon-btn small-icon-btn" data-act="viewIncomingMedia" data-msg-id="${escapeHtml(e.messageId)}" type="button" data-tooltip="Download and view this attachment">
+                    <svg viewBox="0 0 24 24" width="14" height="14"><path fill="currentColor" d="M19 19H5V5h7V3H5c-1.1 0-2 .9-2 2v14c0 1.1.9 2 2 2h14c1.1 0 2-.9 2-2v-7h-2v7zM14 3v2h3.59l-9.83 9.83 1.41 1.41L19 6.41V10h2V3h-7z"/></svg>
+                  </button>`
+                : ''
+            }
+            <button class="icon-btn small-icon-btn" data-act="openIncomingChat" data-wa-id="${escapeHtml(targetWaId || '')}" type="button" ${targetWaId ? '' : 'disabled'} data-tooltip="${targetWaId ? (e.isStatus ? "Open this person's chat (their live Status isn't directly openable from here)" : 'Open this chat in WhatsApp Web') : "Couldn't identify who posted this — nothing to open"}">
+              <svg viewBox="0 0 24 24" width="14" height="14"><path fill="currentColor" d="M20 2H4a2 2 0 0 0-2 2v18l4-4h14a2 2 0 0 0 2-2V4a2 2 0 0 0-2-2z"/></svg>
+            </button>
+            <button class="icon-btn small-icon-btn${replyOpen ? ' open' : ''}" data-act="toggleIncomingReply" data-entry-id="${escapeHtml(e.id)}" type="button" ${targetWaId ? '' : 'disabled'} data-tooltip="${targetWaId ? 'Reply in this chat' : "Couldn't identify who posted this — nothing to reply to"}">${REPLY_ICON_SVG}</button>
+          </div>
         </div>
-        <div class="item-actions">
-          ${
-            isMedia && e.messageId
-              ? `<button class="icon-btn small-icon-btn" data-act="viewIncomingMedia" data-msg-id="${escapeHtml(e.messageId)}" type="button" data-tooltip="Download and view this attachment">
-                  <svg viewBox="0 0 24 24" width="14" height="14"><path fill="currentColor" d="M19 19H5V5h7V3H5c-1.1 0-2 .9-2 2v14c0 1.1.9 2 2 2h14c1.1 0 2-.9 2-2v-7h-2v7zM14 3v2h3.59l-9.83 9.83 1.41 1.41L19 6.41V10h2V3h-7z"/></svg>
-                </button>`
-              : ''
-          }
-        </div>
+        ${replyOpen ? incomingReplyPanelHtml() : ''}
       </li>`;
     })
     .join('');
@@ -5407,6 +5472,151 @@ function renderIncomingTab() {
       chrome.tabs.create({ url: res.dataUrl });
     });
   });
+  ul.querySelectorAll('[data-act="openIncomingChat"]').forEach((btn) => {
+    btn.addEventListener('click', async () => {
+      const waId = btn.dataset.waId;
+      if (!waId) return;
+      btn.disabled = true;
+      const res = await call('openChatById', { waId });
+      btn.disabled = false;
+      if (!res.ok) showToast(res.error || 'Could not open that chat.', 'error');
+    });
+  });
+  ul.querySelectorAll('[data-act="toggleIncomingReply"]').forEach((btn) => {
+    btn.addEventListener('click', () => {
+      const id = btn.dataset.entryId;
+      const wasOpen = incomingReplyOpenId === id;
+      resetIncomingReplyDraft(); // also clears incomingReplyOpenId — read wasOpen first
+      if (!wasOpen) incomingReplyOpenId = id;
+      renderIncomingTab();
+      if (incomingReplyOpenId === id) document.getElementById('incomingReplyText').focus();
+    });
+  });
+  wireIncomingReplyPanel(visible);
+}
+
+function wireIncomingReplyPanel(visible) {
+  const entry = incomingReplyOpenId && visible.find((e) => e.id === incomingReplyOpenId);
+  if (!entry) return;
+  const textarea = document.getElementById('incomingReplyText');
+  if (!textarea) return;
+  textarea.addEventListener('input', () => {
+    incomingReplyDraft.text = textarea.value;
+  });
+  textarea.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) {
+      e.preventDefault();
+      sendIncomingReply(entry);
+    }
+  });
+  document.getElementById('incomingReplyFontBtn').addEventListener('click', () => {
+    incomingReplyFontPanelOpen = !incomingReplyFontPanelOpen;
+    renderIncomingReplyFontControl();
+  });
+  renderIncomingReplyFontControl();
+  document.getElementById('incomingReplyAttachBtn').addEventListener('click', () => {
+    document.getElementById('incomingReplyFile').click();
+  });
+  document.getElementById('incomingReplyFile').addEventListener('change', async (e) => {
+    const file = e.target.files && e.target.files[0];
+    e.target.value = '';
+    if (!file) return;
+    if (file.size > 15 * 1024 * 1024) {
+      showToast(`"${file.name}" is larger than 15MB — WhatsApp Web may reject it.`, 'warning');
+    }
+    const dataUrl = await readFileAsDataUrl(file);
+    incomingReplyDraft.media = { dataUrl, filename: file.name, mimeType: file.type };
+    renderIncomingTab();
+  });
+  const removeAttachmentBtn = document.getElementById('incomingReplyRemoveAttachmentBtn');
+  if (removeAttachmentBtn) {
+    removeAttachmentBtn.addEventListener('click', () => {
+      incomingReplyDraft.media = null;
+      renderIncomingTab();
+    });
+  }
+  document.getElementById('incomingReplySendBtn').addEventListener('click', () => sendIncomingReply(entry));
+}
+
+function renderIncomingReplyFontControl() {
+  const toggleBtn = document.getElementById('incomingReplyFontBtn');
+  const container = document.getElementById('incomingReplyFontControl');
+  if (!toggleBtn || !container) return;
+  toggleBtn.classList.toggle('open', incomingReplyFontPanelOpen);
+  if (!incomingReplyFontPanelOpen) {
+    container.innerHTML = '';
+    return;
+  }
+  container.innerHTML = `<div class="hf-panel font-style-panel">
+    <p class="hf-panel-hint">Applies to the selected text, or the whole box if nothing's selected.</p>
+    <div class="font-style-list">
+      ${FONT_STYLES.map(
+        (s) => `<button type="button" class="font-style-option" data-style="${s.id}">
+        <span class="font-style-preview">${escapeHtml(s.apply(s.label))}</span>
+        <span class="font-style-name muted">${s.label}</span>
+      </button>`
+      ).join('')}
+    </div>
+  </div>`;
+  container.querySelectorAll('.font-style-option').forEach((btn) => {
+    btn.addEventListener('click', () => {
+      const style = FONT_STYLES.find((s) => s.id === btn.dataset.style);
+      const ta = document.getElementById('incomingReplyText');
+      if (style && ta) {
+        const start = ta.selectionStart;
+        const end = ta.selectionEnd;
+        const hasSelection = end > start;
+        const target = hasSelection ? ta.value.slice(start, end) : ta.value;
+        const styled = style.apply(target);
+        if (hasSelection) {
+          ta.value = ta.value.slice(0, start) + styled + ta.value.slice(end);
+          ta.focus();
+          ta.setSelectionRange(start, start + styled.length);
+        } else {
+          ta.value = styled;
+          ta.focus();
+          ta.setSelectionRange(styled.length, styled.length);
+        }
+        incomingReplyDraft.text = ta.value;
+      }
+      incomingReplyFontPanelOpen = false;
+      renderIncomingReplyFontControl();
+    });
+  });
+}
+
+async function sendIncomingReply(entry) {
+  const textarea = document.getElementById('incomingReplyText');
+  const text = textarea ? textarea.value.trim() : incomingReplyDraft.text.trim();
+  const media = incomingReplyDraft.media;
+  if (!text && !media) {
+    showToast('Write a reply or attach something first.', 'error');
+    return;
+  }
+  if (!STATE.settings.consentAccepted) {
+    showToast('Accept the consent checkbox on the Settings tab first — sending is gated behind it, even for a quick reply.', 'error');
+    return;
+  }
+  const items = [];
+  if (text) items.push({ kind: 'text', text });
+  if (media) items.push({ kind: 'media', media, caption: '' });
+  const sendBtn = document.getElementById('incomingReplySendBtn');
+  if (sendBtn) sendBtn.disabled = true;
+  // entry.waId is "status@broadcast" for a Status/Story update — not a
+  // real openable/sendable chat. authorWaId (whoever actually posted it)
+  // is the real target there; the reply button is disabled entirely when
+  // that couldn't be resolved (see renderIncomingTab), so this is always
+  // populated by the time a send actually fires.
+  const targetWaId = entry.isStatus ? entry.authorWaId : entry.waId;
+  const res = await call('sendNowToChat', { waId: targetWaId, name: entry.chatName, items, sendSeparator: true });
+  if (sendBtn) sendBtn.disabled = false;
+  if (!res.ok) {
+    showToast(res.error || 'Could not send.', 'error');
+    return;
+  }
+  showToast(`Sending to ${res.chatName || entry.chatName}…`, 'success');
+  resetIncomingReplyDraft();
+  renderIncomingTab();
 }
 
 // ============ SETTINGS ============
@@ -5931,7 +6141,12 @@ chrome.storage.onChanged.addListener((changes, area) => {
   if (keys.length === 1 && SELF_APPLIED_STORAGE_KEYS.has(keys[0])) return;
   if (keys.length === 1 && keys[0] === 'incomingActivityLog') {
     STATE.incomingActivityLog = changes.incomingActivityLog.newValue || [];
-    renderIncomingTab();
+    // Skip the re-render while a reply box is open — renderIncomingTab()
+    // rebuilds the whole list's innerHTML, which would wipe out mid-typed
+    // reply text/focus every time unrelated traffic arrives from any chat.
+    // The data itself isn't lost (STATE is still updated above); the view
+    // just catches up the instant the reply closes/sends.
+    if (!incomingReplyOpenId) renderIncomingTab();
     return;
   }
   refresh();

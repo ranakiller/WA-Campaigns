@@ -323,8 +323,14 @@ async function appendIncomingActivity(payload) {
     waId: payload.waId,
     chatName: payload.chatName || payload.waId,
     isGroup: !!payload.isGroup,
+    // Status/Story updates (waId === 'status@broadcast') aren't a real
+    // openable chat — authorWaId is who actually posted it, for the
+    // Incoming tab's Open/Reply buttons to target instead.
+    isStatus: !!payload.isStatus,
+    authorWaId: payload.authorWaId || null,
     fromMe: !!payload.fromMe,
     messageType: payload.messageType || 'chat',
+    hasMedia: !!payload.hasMedia,
     text: String(payload.text || '').slice(0, 300), // capped — a pathologically long message shouldn't bloat storage
     messageId: payload.messageId || null,
     timestamp: payload.timestamp || Date.now(),

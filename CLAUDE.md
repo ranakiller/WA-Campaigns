@@ -170,6 +170,33 @@ Because this key can write several times a second in an active chat, `popup.js`'
 other storage key triggers — don't add more chatty per-message storage keys without the same guard, or
 the whole popup gets sluggish while that tab isn't even open.
 
+Each card also has an inline **reply** box (`incomingReplyOpenId`/`incomingReplyDraft` in `popup.js`,
+only one open at a time) that reuses the compose form's own `.textarea-wrap`/`.textarea-toolbar` markup
+but stripped to just Aa/attach/send — sends via the same `sendNowToChat` action the quick-send box uses
+(`{waId, name, items}` → `runCampaign` with an explicit target), not through `runChatExport` or anything
+Incoming-specific. Since that same `chrome.storage.onChanged` handler above would otherwise blow away a
+mid-typed reply every time unrelated traffic arrives from any other chat (`renderIncomingTab()` rebuilds
+the whole list's `innerHTML`), it skips calling `renderIncomingTab()` entirely while `incomingReplyOpenId`
+is set — `STATE` still updates underneath, the view just catches up the moment the reply sends or closes.
+
+**Known fixed bug**: `installExternalRelayHook`/`installIncomingMessageHook` in `page-bridge.js` used to read
+a media message's text as `msg.body || msg.caption`. `.body` on a media message isn't user-facing text —
+for WhatsApp Status/Story updates specifically, it turned out to hold raw base64-looking internal data,
+which showed up verbatim as the "message text" in the Incoming feed. Fixed to only trust `.body` for an
+actual `chat`-type (plain text) message, and `.caption` (only) for anything with a `mimetype` — same rule
+`getChatExportData` already used, just not applied here. Also fixed: a Status update's `chatName` used to
+show the literal shared broadcast id ("status@broadcast"), telling you nothing about who posted it — now
+resolved via `msg.author` (same field/lookup `getChatExportData` uses for a group message's real sender)
+and stored as `isStatus`/`authorWaId` on the activity entry, which the Incoming tab's Open/Reply buttons
+target instead of the unusable broadcast id. And: `getMessageMedia` in `page-bridge.js` used to open a
+blank new tab for some attachments (again, mostly Status media) — `WPP.chat.downloadMedia()`'s Blob can
+come back with an empty `.type`, and since a data: URL's mimetype is baked in at `FileReader.readAsDataURL`
+time, an empty Blob type became an empty/wrong mimetype baked into the URL, which the browser then can't
+render. Fixed by guessing a mimetype from the message's own type and re-wrapping the Blob with it *before*
+reading, plus an explicit error (instead of a silent blank result) when the download comes back with zero
+bytes — which happens on some Status attachments and needs live debugging (Errors panel) to chase further
+if it recurs, same as the `WPP.onReady` bug below.
+
 **Known fixed bug**: `waitForWppReady()` in `page-bridge.js` used to call `window.WPP.onReady(callback)` to
 wait for WhatsApp Web to finish loading. Confirmed via a real crash (Edge's extension Errors panel) that
 `WPP.onReady` is not reliably a function on every wa-js build/WhatsApp Web version pairing — calling it

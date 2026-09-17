@@ -240,7 +240,22 @@ store review, for the same ToS reasons noted above).
   top ("Live hook active · installed…") reflects whether the underlying
   WhatsApp-page hook actually installed on this tab, independent of
   whether any message has arrived yet — an empty feed and a silently-broken
-  hook otherwise look identical.
+  hook otherwise look identical. Each card also has a **Reply** button
+  (top-right of its action row) that opens a small inline compose box —
+  text, a fancy-text (Aa) style, and a single attachment, then Send or
+  Ctrl+Enter — for replying straight from the feed without switching to
+  the Messages tab or WhatsApp Web itself. Only one card's reply box is
+  open at a time; while one is open, new incoming traffic keeps updating
+  the underlying data but pauses the feed's visible refresh so it doesn't
+  wipe out whatever you're mid-typing, catching the view back up the
+  moment you send or close it. Every card also has an **Open chat** button
+  (chat-bubble icon) that brings WhatsApp Web to the front already on that
+  conversation. A WhatsApp Status/Story update shows up here too (chat
+  "status@broadcast") — its card shows who actually posted it (a **status**
+  badge instead of group/contact) and its own Open/Reply target that
+  person's own chat, since a Status update itself isn't an openable
+  conversation and wa-js doesn't expose a way to jump straight into viewing
+  someone's live Status from here.
 - **Settings tab** — the consent checkbox, jitter (± minutes around a fixed
   scheduled time), default delay ranges, a light/dark/system appearance
   toggle matching WhatsApp Web's own theme, and an optional message
