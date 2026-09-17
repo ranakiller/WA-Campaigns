@@ -50,6 +50,14 @@
      sharply carved as a small button's. */
   --neu-inset-l: rgba(255, 255, 255, 0.7);
   --neu-inset-d: rgba(163, 177, 198, 0.4);
+  /* Tells Chromium which native-widget theme (disabled-state affordances,
+     scrollbars, selection chrome) to paint underneath/around our own custom
+     CSS. Without this the browser defaults to assuming a light page no
+     matter what colors we actually paint, so in dark mode it was drawing
+     light-native chrome around things like a disabled <input>/<select> —
+     a mismatched hatched/dashed border seam around the dark neumorphic box
+     it doesn't match. */
+  color-scheme: light;
 }
 
 @media (prefers-color-scheme: dark) {
@@ -93,6 +101,7 @@
     --neu-dark-weak: rgba(0, 0, 0, 0.5);
     --neu-inset-l: rgba(255, 255, 255, 0.04);
     --neu-inset-d: rgba(0, 0, 0, 0.55);
+    color-scheme: dark;
   }
 }
 
@@ -132,6 +141,7 @@
   --neu-dark-weak: rgba(0, 0, 0, 0.5);
   --neu-inset-l: rgba(255, 255, 255, 0.04);
   --neu-inset-d: rgba(0, 0, 0, 0.55);
+  color-scheme: dark;
 }
 
 * { box-sizing: border-box; }
@@ -618,7 +628,7 @@ button.ghost.small-inline svg { width: 12px; height: 12px; }
    accent-soft highlight .small-icon-btn already gets on hover; a small dot
    shows the current mode (custom/off) without needing the panel open. */
 #msgHfToggleBtn, #msgAutoReplyToggleBtn { position: relative; }
-#msgHfToggleBtn.open, #msgAutoReplyToggleBtn.open, #campaignNewToggleBtn.open { background: var(--accent-soft); }
+#msgHfToggleBtn.open, #msgAutoReplyToggleBtn.open, #campaignNewToggleBtn.open, #msgFontStyleBtn.open { background: var(--accent-soft); }
 .hf-dot {
   position: absolute;
   top: 2px;
@@ -680,6 +690,29 @@ button.ghost.small-inline svg { width: 12px; height: 12px; }
 .composing-item-body .hf-mode-badge { display: inline-block; margin: 4px 0; }
 .composing-item-body .hf-panel { margin-top: 6px; }
 
+/* ---------- fancy text style panel (compose toolbar) ---------- */
+.font-style-panel .hf-panel-hint { margin-bottom: 8px; }
+.font-style-list { display: flex; flex-direction: column; gap: 2px; max-height: 220px; overflow-y: auto; scrollbar-width: none; }
+.font-style-list::-webkit-scrollbar { display: none; }
+.font-style-option {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  width: 100%;
+  padding: 8px 9px;
+  border: none;
+  background: none;
+  color: var(--text-primary);
+  font-family: inherit;
+  text-align: left;
+  cursor: pointer;
+  border-radius: 6px;
+}
+.font-style-option:hover { background: var(--accent-soft); }
+.font-style-option .font-style-preview { font-size: 13px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.font-style-option .font-style-name { flex-shrink: 0; font-size: 10.5px; }
+
 /* ---------- auto-reply panel (compose form) ---------- */
 .ar-panel { display: flex; flex-direction: column; gap: 8px; }
 .ar-enable-row {
@@ -693,9 +726,18 @@ button.ghost.small-inline svg { width: 12px; height: 12px; }
 }
 .ar-enable-row input[type="checkbox"] { margin: 2px 0 0; width: 14px; height: 14px; accent-color: var(--accent); cursor: pointer; flex-shrink: 0; }
 .ar-triggers { display: flex; flex-direction: column; gap: 6px; }
-.ar-trigger-row { display: flex; align-items: center; gap: 6px; }
+.ar-trigger-row { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+/* flex-shrink:0 alone doesn't stop a <select> from claiming way more than
+   its own content needs — a bare <select> in a flex row has no width
+   constraint of its own to shrink FROM, so it can render far wider than
+   "Phrase"/"Regex" actually require (varies by OS/browser select-widget
+   rendering), eating the row's space and pushing .ar-trigger-value and the
+   remove button out past the card. An explicit width fixes that outright;
+   flex-wrap above on the row is a second line of defense so nothing can
+   ever visually overflow the card even at an unusually narrow width. */
 .ar-trigger-row select {
-  flex-shrink: 0;
+  flex: 0 0 auto;
+  width: 80px;
   font-size: 11px;
   padding: 5px 4px;
   border: 1px solid var(--border);
@@ -723,7 +765,7 @@ button.ghost.small-inline svg { width: 12px; height: 12px; }
   cursor: pointer;
   flex-shrink: 0;
 }
-.ar-case-label input[type="checkbox"] { margin: 0; width: 12px; height: 12px; accent-color: var(--accent); cursor: pointer; }
+.ar-case-label input[type="checkbox"] { margin: 0; width: 14px; height: 14px; accent-color: var(--accent); cursor: pointer; }
 .ar-trigger-remove { flex-shrink: 0; color: var(--danger-fg); }
 .ar-cooldown-row {
   display: flex;
@@ -1084,13 +1126,18 @@ input[type="checkbox"]:checked {
   background: var(--accent);
   box-shadow: 2px 2px 5px var(--neu-dark), -2px -2px 5px var(--neu-light);
 }
+/* Percentages here (not fixed px like before) so the checkmark scales with
+   whatever size a given checkbox is overridden to — e.g. .ar-case-label's
+   smaller one. Fixed-px positioning was tuned only for the 16x16 default
+   and visibly misaligned/undersized on anything smaller (the "Aa" case-
+   sensitive checkbox looked like a warped blob instead of a checkmark). */
 input[type="checkbox"]:checked::after {
   content: '';
   position: absolute;
-  left: 5px;
-  top: 2px;
-  width: 4px;
-  height: 8px;
+  left: 31%;
+  top: 12%;
+  width: 25%;
+  height: 50%;
   border: solid var(--accent-contrast);
   border-width: 0 2px 2px 0;
   transform: rotate(45deg);
@@ -1109,9 +1156,9 @@ input[type="checkbox"]:indeterminate {
 input[type="checkbox"]:indeterminate::after {
   content: '';
   position: absolute;
-  left: 3px;
-  top: 6.5px;
-  width: 10px;
+  left: 19%;
+  top: 41%;
+  width: 62%;
   height: 2px;
   border-radius: 1px;
   background: var(--accent-contrast);
@@ -1285,6 +1332,16 @@ select {
 .qs-option .qs-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .qs-option .qs-number { font-size: 10.5px; color: var(--text-secondary); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-variant-numeric: tabular-nums; }
 .qs-option:hover .qs-number, .qs-option.kb-active .qs-number { color: var(--accent); }
+/* The real WhatsApp chat id (e.g. "1234567890@c.us" / "...@g.us") — a
+   third, dimmer line under name/number, visible and selectable as plain
+   text even though the row itself is clickable; the .qs-copy-id-btn next
+   to it is the actual one-click "copy" affordance. user-select is
+   explicit because the row it sits in has cursor:pointer (a click-to-pick
+   affordance), which in some browsers otherwise discourages drag-selecting
+   text inside it. */
+.qs-option .qs-waid { font-size: 9.5px; color: var(--text-secondary); opacity: 0.75; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-family: 'SFMono-Regular', Consolas, Menlo, monospace; user-select: text; }
+.qs-option:hover .qs-waid, .qs-option.kb-active .qs-waid { color: var(--accent); opacity: 1; }
+.qs-option .qs-copy-id-btn { width: 24px; height: 24px; flex-shrink: 0; }
 .qs-option .qs-type {
   flex-shrink: 0;
   font-size: 9.5px;
@@ -1552,6 +1609,11 @@ button.ghost.danger:hover svg { animation: famShake 0.45s ease !important; }
   margin: 6px 0 16px;
 }
 .form-actions button { margin: 0; }
+/* #listName moved down here (next to Save list) from its old spot above
+   the checklist — needs flex:1 + margin:0 to sit inline with the buttons
+   instead of defaulting to the generic input's width:100%, which would
+   still force it onto its own full-width line above them. */
+#listName { flex: 1; min-width: 90px; margin: 0; }
 
 /* ---------- kind toggle (Messages/Lists tabs) ---------- */
 .kind-toggle { display: flex; gap: 6px; margin: 5px 0 12px; }
@@ -1653,6 +1715,10 @@ button.ghost.danger:hover svg { animation: famShake 0.45s ease !important; }
 .contact-row-followup.today { color: var(--warn-fg); }
 .contact-row-followup.future { color: var(--text-secondary); }
 .contact-row-ph { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 10.5px; color: var(--text-secondary); }
+/* The real WhatsApp chat id, e.g. "1234567890@c.us" — a dimmer line under
+   the phone number, visible/selectable on its own; the row's own copy
+   button (.qs-copy-id-btn, reused here) is the one-click alternative. */
+.contact-row-waid { display: block; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 9px; color: var(--text-secondary); opacity: 0.7; user-select: text; }
 .smart-list-badge {
   font-size: 9px;
   font-weight: 700;
@@ -1669,6 +1735,9 @@ button.ghost.danger:hover svg { animation: famShake 0.45s ease !important; }
    cap instead of growing past the popup's fixed height. */
 .contact-detail-dialog { max-width: 340px; max-height: 560px; overflow-y: auto; }
 .cd-ph { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 11px; color: var(--text-secondary); margin: 2px 0 4px; }
+.cd-waid-row { display: flex; align-items: center; gap: 6px; margin: 0 0 8px; }
+.cd-waid { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 10px; color: var(--text-secondary); opacity: 0.75; user-select: text; overflow-wrap: anywhere; }
+.cd-waid-row .qs-copy-id-btn { width: 24px; height: 24px; flex-shrink: 0; }
 .cd-stepper { display: flex; align-items: center; margin: 10px 0 2px; }
 .cd-stepper .cd-step {
   flex: 1;
@@ -1799,6 +1868,23 @@ button.small.danger:hover svg { animation: famShake 0.45s ease !important; }
 .badge-contact { background: var(--bg-hover); color: var(--text-secondary); }
 .badge-community { background: rgba(139, 92, 246, 0.14); color: #8b5cf6; }
 .badge-unsaved { background: var(--warn-bg); color: var(--warn-fg); }
+
+/* ---------- incoming activity feed ---------- */
+.incoming-row .item-text { line-height: 1.5; }
+.incoming-type-badge {
+  display: inline-block;
+  font-size: 9.5px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+  color: var(--text-secondary);
+  background: var(--cap-bg);
+  padding: 2px 6px;
+  border-radius: 999px;
+  margin-left: 4px;
+}
+.incoming-mine-badge { display: inline-block; font-size: 9.5px; font-weight: 700; color: var(--accent); background: var(--accent-soft); padding: 2px 6px; border-radius: 999px; margin-left: 4px; }
+.incoming-meta { font-size: 10px; margin-top: 2px; }
 
 /* ---------- hints / consent ---------- */
 .hint { font-size: 11.5px; line-height: 1.5; color: var(--text-secondary); background: var(--bg-hover); border: 1px solid transparent; padding: 9px 11px; border-radius: var(--radius-sm); }
@@ -1960,17 +2046,43 @@ button.settings-save-btn { width: 100%; margin: 4px 0 10px; justify-content: cen
   gap: 6px;
   margin: 4px 0 8px;
 }
-.select-all-row .small {
-  border: 1px solid var(--border-strong);
-  background: var(--bg-panel);
-  color: var(--text-primary);
-  border-radius: 6px;
-  padding: 5px 9px;
-  cursor: pointer;
-  font-size: 11px;
+/* A bare checkbox + "(0)" floating loose next to the search field and the
+   raised round icon buttons reads as a mismatched weight — this gives the
+   checkbox its own carved "field" (the same inset look the search box
+   uses) instead of sitting bare, so it reads as a real control, not a
+   leftover bit. */
+.select-all-check-row {
+  gap: 6px;
+  font-weight: 600;
+  font-size: 12px;
+  flex-shrink: 0;
+  margin: 0;
+  height: 34px;
+  box-sizing: border-box;
+  padding: 0 10px;
+  border-radius: var(--radius-sm);
+  background: var(--cap-bg);
+  box-shadow: inset 3px 3px 6px var(--neu-inset-d), inset -3px -3px 6px var(--neu-inset-l);
 }
-.select-all-row .small:hover { background: var(--bg-hover); }
-.select-all-row .muted { margin-left: auto; font-size: 11px; }
+.select-all-check-row .muted { font-size: 11px; font-weight: 400; }
+/* Search fills whatever room is left between the checkbox and the button
+   cluster — everyone in this one row (checkbox, search, export/clear/
+   extract) instead of the search box getting its own line above it. Every
+   control in this row shares the same explicit 34px height (search's own
+   natural size) instead of each defaulting to its own — the checkbox pill
+   and the 30px icon buttons used to sit visibly shorter/squatter next to
+   it, which read as mismatched. */
+/* .select-all-row > input, not just .select-all-row-search — a plain class
+   selector here loses to the base input[type="text"] rule's higher
+   specificity (an attribute selector outweighs a class), so its
+   margin:5px 0 12px (asymmetric — more on the bottom than the top) was
+   still winning underneath, and centered against its zero-margin siblings
+   that's exactly what reads as "sitting a bit higher than everything
+   else." Matches .manual-add > input's own child-combinator pattern above,
+   which is why that row's search box already aligned correctly. */
+.select-all-row > input.select-all-row-search { flex: 1; min-width: 60px; margin: 0; height: 34px; box-sizing: border-box; }
+.select-all-row .icon-btn.small-icon-btn { width: 34px; height: 34px; }
+.select-all-row-extract { margin-left: auto; }
 
 .checklist {
   max-height: 140px;
@@ -1989,6 +2101,20 @@ button.settings-save-btn { width: 100%; margin: 4px 0 10px; justify-content: cen
 .checklist::-webkit-scrollbar { display: none; }
 .checklist label { display: flex; align-items: center; gap: 6px; font-weight: 400; font-size: 12.5px; padding: 5px 0; color: var(--text-primary); }
 .checklist label input { margin: 0; }
+/* Flat (non-sticky) rows — the Lists tab's fetched-chats picker
+   (#listBuilderChecklist). Must NOT reuse .list-check-row below: that class
+   is position:sticky, built for a different pattern (a list's own name row
+   staying pinned above its own expandable member rows, elsewhere in this
+   same .checklist container) — reusing it here made every flat row in this
+   plain list try to stick to the container's top as it scrolled by, which
+   is what looked like a row "stopping" with the previous one still peeking
+   out from behind it, and the stray dark seam down the right edge (a stuck
+   row's own opaque background painting over whatever was still scrolling
+   underneath it). This container skips .checklist's own zero top-padding
+   (that's there specifically so the sticky row's padding supplies the gap
+   instead) since it has no sticky row to do that job here. */
+#listBuilderChecklist { padding-top: 6px; }
+.chat-pick-row { display: flex; align-items: center; gap: 4px; padding: 3px 0; }
 /* Sticky within .checklist's own scroll — the list's name/checkbox/expand
    row stays pinned at the top while just its expanded member rows scroll
    underneath, instead of the whole row scrolling away with them. An

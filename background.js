@@ -186,7 +186,9 @@ async function getState() {
     'activeRuns',
     'cloudSync',
     'contacts',
-    'nuskomateStatus'
+    'nuskomateStatus',
+    'incomingActivityLog',
+    'relayHookStatus'
   ]);
   const contacts = data.contacts || [];
   // Keeps every smart list's `members` current every time the popup asks
@@ -205,7 +207,9 @@ async function getState() {
     cloudSync: data.cloudSync || {},
     contacts,
     contactStatuses: CONTACT_STATUSES,
-    nuskomateStatus: data.nuskomateStatus || {}
+    nuskomateStatus: data.nuskomateStatus || {},
+    incomingActivityLog: data.incomingActivityLog || [],
+    relayHookStatus: data.relayHookStatus || {}
   };
 }
 
@@ -297,6 +301,37 @@ async function appendLog(entry) {
     300
   );
   await setState({ log: next });
+}
+
+// ---------- incoming activity (the "Incoming" tab's real-time feed) ----------
+// A record of every WPP chat.new_message event this extension has actually
+// seen — fromMe included — independent of what (if anything) consumes it
+// (auto-reply, the Nuskomate relay). Exists purely so the popup can answer
+// "is this extension really receiving live WhatsApp events from every chat,
+// including media" without having to trust that silently, since neither
+// auto-reply nor the Nuskomate relay leave any visible trace of what they
+// saw. Deliberately written straight to chrome.storage.local (not through
+// setState(), which would also mark it for cloud sync) — this is
+// high-frequency, device-local, diagnostic data only, same reasoning as
+// autoReplyCooldowns above.
+const INCOMING_ACTIVITY_MAX = 500;
+async function appendIncomingActivity(payload) {
+  const { incomingActivityLog } = await chrome.storage.local.get(['incomingActivityLog']);
+  const list = Array.isArray(incomingActivityLog) ? incomingActivityLog : [];
+  const entry = {
+    id: crypto.randomUUID(),
+    waId: payload.waId,
+    chatName: payload.chatName || payload.waId,
+    isGroup: !!payload.isGroup,
+    fromMe: !!payload.fromMe,
+    messageType: payload.messageType || 'chat',
+    text: String(payload.text || '').slice(0, 300), // capped — a pathologically long message shouldn't bloat storage
+    messageId: payload.messageId || null,
+    timestamp: payload.timestamp || Date.now(),
+    receivedAt: Date.now()
+  };
+  const next = [entry, ...list].slice(0, INCOMING_ACTIVITY_MAX);
+  await chrome.storage.local.set({ incomingActivityLog: next });
 }
 
 function uid() {
@@ -985,6 +1020,100 @@ async function runDeleteForEveryone(runId, entries) {
     });
   }
   await finishActiveRun(runId);
+}
+
+// ---------- chat export (JSON + media, to the browser's Downloads folder) ----------
+// Exports the currently-open WhatsApp chat as a "chat.json" (one clean
+// record per message) plus every attachment, mirroring the well-known
+// WhatsJSON extension's output shape so a resulting export folder stays
+// familiar/portable. Deliberately NOT using the File System Access API the
+// way WhatsJSON does (showDirectoryPicker(), triggered by a button it
+// injects directly into WhatsApp's own chat menu) — that API requires a
+// real user gesture in the page itself, and a click on this extension's
+// popup, relayed over chrome.runtime messaging, doesn't carry that gesture
+// through. chrome.downloads sidesteps that (no gesture needed, callable
+// from here same as any other action) at the cost of always landing under
+// the browser's own Downloads folder, as "WA-Export/<chat>/...", rather
+// than a folder picked fresh each time.
+const EXPORT_MIME_EXT = { jpeg: 'jpg', 'svg+xml': 'svg', plain: 'txt', mpeg: 'mp3', 'x-matroska': 'mkv', quicktime: 'mov' };
+function extForMime(mimetype) {
+  const sub = ((mimetype || '').split('/')[1] || 'bin').split(';')[0];
+  return EXPORT_MIME_EXT[sub] || sub;
+}
+// Strips characters illegal in a Windows path segment — applied per
+// segment (the chat's own folder name, each file name) and never to the
+// "/" that chrome.downloads reads as a folder separator in `filename`.
+function sanitizeExportSegment(str) {
+  return String(str || '').replace(/[\\/:*?"<>|]/g, '_').trim().slice(0, 120) || 'chat';
+}
+// msgId/mimetype/origFilename only exist on a record so this function (and
+// the media-download step above it) can act on it — never meant to end up
+// in the written chat.json.
+function stripExportHelperFields(m) {
+  const { msgId, mimetype, origFilename, ...rest } = m;
+  return rest;
+}
+
+async function runChatExport(runId, tabId) {
+  try {
+    const dataRes = await sendToTab(tabId, { action: 'getChatExportData' }, 100000);
+    if (!dataRes || !dataRes.ok) throw new Error((dataRes && dataRes.error) || 'Could not read this chat.');
+    const { chat, messages } = dataRes;
+    const chatLabel = chat.name || chat.number;
+    const folder = sanitizeExportSegment(chat.number + (chat.name && chat.name !== chat.number ? ` - ${chat.name}` : ''));
+    await startActiveRun(runId, `Export chat: ${chatLabel}`, messages.length || 1);
+
+    let files = 0;
+    const finalMessages = [];
+    for (const m of messages) {
+      // The Reset button (same one a send uses) deletes this run's
+      // activeRuns entry — checked once per message so a long export can
+      // actually be stopped mid-way, same spirit as waitToProceedOrStop
+      // above, just without a master-switch/pause check this isn't sending
+      // anything, so neither applies here.
+      const { activeRuns } = await getRunControlState();
+      if (!activeRuns[runId] || activeRuns[runId].done) return;
+
+      if (m.msgId) {
+        try {
+          const mediaRes = await sendToTab(tabId, { action: 'getMessageMedia', messageId: m.msgId }, 65000);
+          if (mediaRes && mediaRes.ok && mediaRes.dataUrl) {
+            const base = m.origFilename ? sanitizeExportSegment(m.origFilename) : `${m.type}.${extForMime(m.mimetype)}`;
+            const filename = `${String(m.no).padStart(4, '0')}_${base}`;
+            await chrome.downloads.download({ url: mediaRes.dataUrl, filename: `WA-Export/${folder}/${filename}`, saveAs: false, conflictAction: 'uniquify' });
+            files++;
+            finalMessages.push({ ...stripExportHelperFields(m), file: filename });
+            await bumpActiveRun(runId, 'sent');
+          } else {
+            finalMessages.push({ ...stripExportHelperFields(m), file: null });
+            await bumpActiveRun(runId, 'failed');
+          }
+        } catch (err) {
+          finalMessages.push({ ...stripExportHelperFields(m), file: null });
+          await bumpActiveRun(runId, 'failed');
+        }
+      } else {
+        finalMessages.push(m);
+        await bumpActiveRun(runId, 'sent');
+      }
+    }
+
+    const payload = {
+      chat: { number: chat.number, name: chat.name, group: !!chat.group, exported: new Date().toISOString(), messages: finalMessages.length, files },
+      messages: finalMessages
+    };
+    const json = JSON.stringify(payload, null, 1);
+    const jsonDataUrl = `data:application/json;base64,${btoa(unescape(encodeURIComponent(json)))}`;
+    await chrome.downloads.download({ url: jsonDataUrl, filename: `WA-Export/${folder}/chat.json`, saveAs: false, conflictAction: 'uniquify' });
+
+    await finishActiveRun(runId);
+    chrome.runtime
+      .sendMessage({ action: 'toast', message: `Exported "${chatLabel}" — ${finalMessages.length} messages, ${files} files → Downloads/WA-Export/${folder}/`, type: 'success' })
+      .catch(() => {});
+  } catch (err) {
+    await finishActiveRun(runId);
+    chrome.runtime.sendMessage({ action: 'toast', message: `Export failed: ${String((err && err.message) || err)}`, type: 'error' }).catch(() => {});
+  }
 }
 
 // ---------- alarm scheduling ----------
@@ -1845,6 +1974,25 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
           break;
         }
 
+        // Header "Export chat" button — exports whatever chat is currently
+        // open in the WA tab (messages -> chat.json, media -> files),
+        // reusing the activeRuns progress mechanism so the button can show a
+        // live percentage ring the same way "send to current chat" does.
+        // See runChatExport's own comment for why this lands in the
+        // browser's Downloads folder rather than a picked one.
+        case 'exportActiveChat': {
+          const tab = await ensureWaTab();
+          const ready = await pingContentScript(tab.id);
+          if (!ready) {
+            sendResponse({ ok: false, error: 'WhatsApp Web tab is not ready (make sure you are logged in and the page finished loading).' });
+            break;
+          }
+          const runId = `export-${uid()}`;
+          runChatExport(runId, tab.id); // fire and forget; progress via activeRuns, a toast on completion
+          sendResponse({ ok: true, runId });
+          break;
+        }
+
         case 'togglePauseRun': {
           const { activeRuns } = await getState();
           const run = activeRuns[msg.runId];
@@ -1957,23 +2105,75 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
 
         // From content.js's wa-ext-relay listener (see page-bridge.js's
         // installExternalRelayHook) — same-extension messaging, not
-        // external, so this stays in the regular switch. Just forwards to
-        // whichever external extension (Nuskomate) currently holds the
-        // long-lived port opened below; a no-op if nothing's connected.
+        // external, so this stays in the regular switch. Forwards to
+        // Nuskomate as a one-shot external message (not a persistent port —
+        // see the comment above NUSKOMATE_EXTENSION_ID for why that changed).
+        // Fire-and-forget: a callback is passed only to record delivery
+        // status, nothing here waits on Nuskomate actually finishing its
+        // pipeline for this message.
         case 'externalRelayMessage': {
-          if (nuskomatePort) {
-            try {
-              nuskomatePort.postMessage({ type: 'new-message', ...msg.payload });
-              setNuskomateStatus({ lastMessageAt: Date.now() });
-            } catch (_) {
-              // port went stale between the check and the send — next
-              // relayed message will find nuskomatePort already cleared
-              // by onDisconnect below.
-            }
+          // Recorded here regardless of Nuskomate/anything else consuming
+          // it below — this is the one place every incoming (and outgoing,
+          // fromMe included) WhatsApp event this extension has actually
+          // seen passes through, so it's the right spot to feed the
+          // Incoming tab's real-time activity feed.
+          appendIncomingActivity(msg.payload).catch(() => {});
+          try {
+            chrome.runtime.sendMessage(NUSKOMATE_EXTENSION_ID, { type: 'new-message', ...msg.payload }, () => {
+              const err = chrome.runtime.lastError;
+              setNuskomateStatus({
+                lastMessageAt: Date.now(),
+                lastMessageOk: !err,
+                lastMessageError: err ? err.message : null,
+              });
+            });
+          } catch (_) {
+            // Nuskomate not installed/enabled at all — sendMessage can throw
+            // synchronously for that case, unlike a failed connect().
+            setNuskomateStatus({ lastMessageAt: Date.now(), lastMessageOk: false, lastMessageError: 'Nuskomate not reachable' });
           }
           sendResponse({ ok: true });
           break;
         }
+        // page-bridge.js's installExternalRelayHook actually finished
+        // installing (see its own comment) — written straight to storage,
+        // not through appendIncomingActivity, since this is a single
+        // current-status fact ("installed as of when"), not an event log.
+        // Re-fires on every WA tab (re)load, so this timestamp always
+        // reflects the current page instance, not a stale earlier one.
+        case 'relayHookReady': {
+          await chrome.storage.local.set({ relayHookStatus: { installedAt: msg.at || Date.now() } });
+          sendResponse({ ok: true });
+          break;
+        }
+
+        case 'clearIncomingActivity': {
+          await chrome.storage.local.set({ incomingActivityLog: [] });
+          sendResponse({ ok: true });
+          break;
+        }
+
+        // Incoming tab's on-demand "view attachment" button — the activity
+        // feed only ever stores a media message's metadata (type, caption),
+        // never the bytes (downloading every image from every chat live
+        // would be a real cost for something most of these entries will
+        // never need); this fetches one specific attachment only when asked.
+        case 'fetchMessageMedia': {
+          const tab = await ensureWaTab();
+          const ready = await pingContentScript(tab.id);
+          if (!ready) {
+            sendResponse({ ok: false, error: 'WhatsApp Web tab is not ready (make sure you are logged in and the page finished loading).' });
+            break;
+          }
+          const res = await sendToTab(tab.id, { action: 'getMessageMedia', messageId: msg.messageId }, 65000);
+          if (!res || !res.ok) {
+            sendResponse({ ok: false, error: (res && res.error) || 'Could not download that media.' });
+            break;
+          }
+          sendResponse({ ok: true, dataUrl: res.dataUrl, mimetype: res.mimetype, filename: res.filename });
+          break;
+        }
+
         default:
           sendResponse({ ok: false, error: 'Unknown action' });
       }
@@ -1997,33 +2197,28 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
 const NUSKOMATE_EXTENSION_ID = 'mcikbecdcddegpbonhndegmpjgbangdl';
 
 // Persisted connection/activity status — surfaced in getState() so the popup
-// can show whether Nuskomate is actually connected and using this, instead
-// of that being invisible outside the console. Persisted (not just the live
-// nuskomatePort variable below) because a service worker restart drops the
-// port silently; "connected as of a few seconds ago" is still meaningful
-// signal for "is this bridge actually working" even right after a restart.
+// can show whether Nuskomate is actually reachable and using this, instead
+// of that being invisible outside the console.
 async function setNuskomateStatus(patch) {
   const { nuskomateStatus } = await chrome.storage.local.get(['nuskomateStatus']);
   await chrome.storage.local.set({ nuskomateStatus: { ...(nuskomateStatus || {}), ...patch } });
 }
 
-// The one currently-connected event port, if any — chrome.runtime ports
-// don't survive a service worker suspend/wake, so this is expected to go
-// null and get re-established by Nuskomate reconnecting; nothing here needs
-// to persist it across restarts.
-let nuskomatePort = null;
-chrome.runtime.onConnectExternal.addListener((port) => {
-  if (port.sender?.id !== NUSKOMATE_EXTENSION_ID || port.name !== 'nuskomate-events') {
-    port.disconnect();
-    return;
+// No persistent port to manage anymore (see the comment above
+// NUSKOMATE_EXTENSION_ID) — instead, a lightweight one-shot reachability
+// probe fires once each time THIS service worker starts (which happens
+// often enough on its own — popup opens, alarms, incoming WhatsApp activity
+// — to keep the status reasonably current without any dedicated polling).
+(function pingNuskomateOnce() {
+  try {
+    chrome.runtime.sendMessage(NUSKOMATE_EXTENSION_ID, { type: 'ping' }, () => {
+      const err = chrome.runtime.lastError;
+      setNuskomateStatus({ lastPingAt: Date.now(), reachable: !err, lastPingError: err ? err.message : null });
+    });
+  } catch (_) {
+    setNuskomateStatus({ lastPingAt: Date.now(), reachable: false, lastPingError: 'Nuskomate not reachable' });
   }
-  nuskomatePort = port;
-  setNuskomateStatus({ connected: true, connectedAt: Date.now() });
-  port.onDisconnect.addListener(() => {
-    if (nuskomatePort === port) nuskomatePort = null;
-    setNuskomateStatus({ connected: false, disconnectedAt: Date.now() });
-  });
-});
+})();
 
 chrome.runtime.onMessageExternal.addListener((msg, sender, sendResponse) => {
   if (sender.id !== NUSKOMATE_EXTENSION_ID) return; // unhandled — Chrome treats this the same as no listener at all
@@ -2054,7 +2249,7 @@ chrome.runtime.onMessageExternal.addListener((msg, sender, sendResponse) => {
         case 'sendText':
         case 'sendMedia':
         case 'mentionInChat': {
-          const { settings } = await getState();
+          const { settings, fetchedChats } = await getState();
           if (!settings.masterEnabled) {
             sendResponse({ ok: false, error: 'Extension is switched off — turn it back on in the header first.' });
             break;
@@ -2065,28 +2260,53 @@ chrome.runtime.onMessageExternal.addListener((msg, sender, sendResponse) => {
             sendResponse({ ok: false, error: 'WhatsApp Web tab is not ready (make sure you are logged in and the page finished loading).' });
             break;
           }
+          // Logged the same way any other send is (appendLog, below) — so a
+          // message Nuskomate sent through this extension shows up in the
+          // Log tab, is searchable ("Nuskomate: <chat>"), and — since a
+          // successful entry carries waId/msgId just like an internal send
+          // does — gets the same "Delete for everyone" button, with no
+          // Log-tab UI changes needed at all to support it.
+          const chatName = (fetchedChats.find((c) => c.waId === msg.waId) || {}).name || msg.waId;
+          const preview = msg.action === 'sendMedia' ? msg.caption || '[media]' : msg.text || '';
+          const campaignId = `nuskomate-${uid()}`;
+          const campaignName = `Nuskomate: ${chatName}`;
           let res;
-          if (msg.action === 'sendText') {
-            res = await sendToTab(tab.id, { action: 'sendMessage', waId: msg.waId, text: msg.text }, 30000);
-          } else if (msg.action === 'sendMedia') {
-            // mimetype wasn't part of the requested external shape (just
-            // waId/dataUrl/filename/caption) — a data URL always carries its
-            // own MIME type as a "data:<mimetype>;base64,..." prefix, so
-            // that's the fallback when the caller doesn't pass one.
-            const mimeMatch = typeof msg.dataUrl === 'string' && msg.dataUrl.match(/^data:([^;,]+)/);
-            const mimeType = msg.mimetype || (mimeMatch && mimeMatch[1]) || '';
-            res = await sendToTab(
-              tab.id,
-              { action: 'sendMedia', waId: msg.waId, media: { dataUrl: msg.dataUrl, filename: msg.filename, mimeType }, caption: msg.caption },
-              45000
-            );
-          } else {
-            res = await sendToTab(tab.id, { action: 'mentionInChat', waId: msg.waId, text: msg.text, mentionWaId: msg.mentionWaId }, 30000);
+          try {
+            if (msg.action === 'sendText') {
+              res = await sendToTab(tab.id, { action: 'sendMessage', waId: msg.waId, text: msg.text }, 30000);
+            } else if (msg.action === 'sendMedia') {
+              // mimetype wasn't part of the requested external shape (just
+              // waId/dataUrl/filename/caption) — a data URL always carries
+              // its own MIME type as a "data:<mimetype>;base64,..." prefix,
+              // so that's the fallback when the caller doesn't pass one.
+              const mimeMatch = typeof msg.dataUrl === 'string' && msg.dataUrl.match(/^data:([^;,]+)/);
+              const mimeType = msg.mimetype || (mimeMatch && mimeMatch[1]) || '';
+              res = await sendToTab(
+                tab.id,
+                { action: 'sendMedia', waId: msg.waId, media: { dataUrl: msg.dataUrl, filename: msg.filename, mimeType }, caption: msg.caption },
+                45000
+              );
+            } else {
+              res = await sendToTab(tab.id, { action: 'mentionInChat', waId: msg.waId, text: msg.text, mentionWaId: msg.mentionWaId }, 30000);
+            }
+          } catch (err) {
+            res = { ok: false, error: String((err && err.message) || err) };
           }
           if (!res || !res.ok) {
-            sendResponse({ ok: false, error: (res && res.error) || 'Unknown send failure.' });
+            const error = (res && res.error) || 'Unknown send failure.';
+            await appendLog({ campaignId, campaignName, chatName, status: 'error', detail: error });
+            sendResponse({ ok: false, error });
             break;
           }
+          await appendLog({
+            campaignId,
+            campaignName,
+            chatName,
+            status: 'success',
+            detail: `Sent via Nuskomate${msg.action === 'mentionInChat' ? ' (mention)' : ''}: "${String(preview).slice(0, 60)}"`,
+            waId: res.waId || msg.waId,
+            msgId: res.msgId || null
+          });
           sendResponse({ ok: true, msgId: res.msgId, waId: res.waId });
           break;
         }

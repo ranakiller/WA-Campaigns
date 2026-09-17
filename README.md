@@ -71,7 +71,17 @@ store review, for the same ToS reasons noted above).
   without separators depending on how it's sent. A "Use file names as
   captions" button fills in each attached file's own name (extension
   stripped) as its caption, for any media item whose caption is still empty
-  (won't overwrite one you've already typed). Each saved message also has a
+  (won't overwrite one you've already typed). The **Aa** button on the
+  compose textarea's own toolbar opens a **fancy text style** picker —
+  Bold, Italic, Bold Italic, Script, Fraktur, Double-struck, Monospace,
+  Fullwidth, Circled, Strikethrough, Underline — each one rewrites the
+  currently selected text (or the whole box, if nothing's selected) into a
+  different set of Unicode characters that look that way anywhere, WhatsApp
+  included. This is cosmetic character substitution, not real formatting —
+  unlike WhatsApp's own `*bold*`/`_italic_`/`~strikethrough~`/`` ```monospace``` ``
+  markdown syntax (still typed by hand, this doesn't add buttons for that),
+  a styled character can't be un-styled by re-typing it as plain text; copy
+  the original elsewhere first if you might want it back. Each saved message also has a
   **Send** icon that opens a panel with two modes, **Send now** and
   **Schedule** — everything about who a message goes to and when lives
   right there on the message itself, there's no separate campaign to build.
@@ -128,7 +138,16 @@ store review, for the same ToS reasons noted above).
     entries also carry a "not saved" badge in the results.
   Fetched chats **persist** until you explicitly clear them (**Clear
   fetched**) — closing the popup doesn't lose a scan you haven't saved into
-  a list yet. Search the fetched chats, use Select all/Deselect all to work
+  a list yet. Every fetched chat row shows its real **WhatsApp chat ID**
+  (e.g. `1234567890@c.us` for a contact, `123456789-987654321@g.us` for a
+  group) with its own copy button — a group has no phone number at all, so
+  this is the only way to get its unique id out of this extension, e.g. to
+  hand to an external tool like Nuskomate (its `sendText`/`sendMedia`/
+  `openChat` all need exactly this id, not a display name). The same id +
+  copy button shows up anywhere else a chat is picked or listed — the
+  quick-send/manual-add live search dropdown (Messages, Lists, Contacts
+  tabs), and each row/detail view on the **Contacts** tab. Search the
+  fetched chats, use Select all/Deselect all to work
   through them quickly, and save your picks as a **named list** — e.g.
   "Family groups", "Work team", "Customers". You can also add an individual
   contact by phone number, or **import from a CSV**. There's no way to look
@@ -203,6 +222,25 @@ store review, for the same ToS reasons noted above).
   technically accept a batch of message ids, but it turns out that's not a
   single combined command, just an internal loop with no pacing of its own,
   so batching made deletes *less* reliable, not faster, and isn't used here.
+- **Incoming tab** — a real-time feed of every message this extension's
+  live WhatsApp hook has actually seen arrive, across every chat, whether
+  or not anything (auto-reply, the Nuskomate relay) does something with it.
+  This exists to *prove* the extension is really receiving live events —
+  text, images, video, voice notes, documents, stickers — from every chat,
+  not just to show what it sent. Search by chat name/text, filter by
+  message type, and toggle whether your own sent messages (fromMe) show up
+  too — they're included by default, since seeing them is part of
+  confirming the pipe carries everything, not just what's addressed to you.
+  Media is **not** downloaded automatically (that would mean fetching every
+  photo from every chat live, which nothing needs by default) — each media
+  entry gets its own **View** button to pull that one attachment on demand
+  and open it in a new tab. Entries are capped at the most recent 500 and
+  never leave this device (not part of cloud sync); **Clear** wipes the
+  local record only, nothing on WhatsApp itself. A small status dot at the
+  top ("Live hook active · installed…") reflects whether the underlying
+  WhatsApp-page hook actually installed on this tab, independent of
+  whether any message has arrived yet — an empty feed and a silently-broken
+  hook otherwise look identical.
 - **Settings tab** — the consent checkbox, jitter (± minutes around a fixed
   scheduled time), default delay ranges, a light/dark/system appearance
   toggle matching WhatsApp Web's own theme, and an optional message
@@ -211,9 +249,11 @@ store review, for the same ToS reasons noted above).
   in the caption — each separated from that item's own content by a blank
   line. Leave either empty to skip it. An **External API (Nuskomate)** card
   shows a live green/red/gray dot for whether the allow-listed Nuskomate
-  extension (see "How it works technically" below) is actually connected
-  right now, plus a relative timestamp for its most recent activity — purely
-  informational, this extension never initiates anything toward Nuskomate.
+  extension (see "How it works technically" below) was actually reachable
+  the last time this extension pushed it a message or pinged it, plus a
+  relative timestamp for its most recent activity — purely informational,
+  this extension only initiates the once-per-startup reachability ping
+  toward Nuskomate, nothing else.
 - **WhatsApp Status** (under the header title) — a glowing dot, checked
   fresh every time the popup opens rather than cached: green means a send
   would actually go through right now, red means it wouldn't (no
@@ -222,6 +262,17 @@ store review, for the same ToS reasons noted above).
   content script is orphaned until that tab itself is reloaded). This is the
   same readiness check a real send performs, just surfaced up front instead
   of only discovered after clicking Send and getting an error.
+- **Export chat** (header, download-arrow icon) — exports whichever chat is
+  currently open in the WhatsApp Web tab: every message as one clean record
+  in a `chat.json` (sender, name, timestamp, type, text/caption), plus every
+  photo/video/document/voice-note saved alongside it as its own file — all
+  under `Downloads/WA-Export/<phone number> - <name>/`. Read-only — this
+  never sends or deletes anything, it only reads history WhatsApp Web
+  already has loaded. The button itself turns into a small percentage ring
+  while it runs (same as a "send to current chat" button), click it again
+  to stop early; a toast reports the final message/file count when it's
+  done. A long chat's first load can take a little while — WhatsApp Web has
+  to page in its entire history before this can even start.
 - **Master on/off switch** (top-right, next to the appearance toggle) — an
   instant kill switch. Turning it off blocks any new send from starting and
   stops whatever's currently running, checked before every single item (not
@@ -306,7 +357,14 @@ internal data/functions instead of the rendered page.
   `WPP.isReady` and answers requests like "list all chats" or "send this
   text/file to this chat id" by calling `WPP.chat.list()` /
   `WPP.chat.sendTextMessage()` / `WPP.chat.sendFileMessage()` directly — no
-  DOM involved.
+  DOM involved. **Export chat** uses the same technique for the currently
+  open chat's full message history (`WPP.chat.getMessages(chatId, { count:
+  -1 })`) and its attachments (`WPP.chat.downloadMedia()`, already used for
+  the external API's `getMessageMedia`); `background.js` then saves the
+  result via `chrome.downloads.download()` rather than the OS-level folder
+  picker some similar tools use, since that picker needs a real user
+  gesture inside the WhatsApp Web page itself, which a click relayed over
+  from this extension's popup doesn't carry.
 - **`content.js`** runs in the extension's isolated content-script world (it
   can't see `window.WPP` directly — isolated and MAIN worlds don't share JS
   objects). It's a thin relay: forwards requests from `background.js` to
@@ -340,16 +398,29 @@ internal data/functions instead of the rendered page.
   exactly one sister extension (Nuskomate, by its fixed extension id) to
   read incoming WhatsApp messages and send through this extension's own
   WhatsApp connection, instead of building its own. Handled entirely in
-  `background.js` (`onConnectExternal`/`onMessageExternal`), reusing the same
+  `background.js` via one-shot `chrome.runtime.sendMessage`/
+  `onMessageExternal` calls in both directions, reusing the same
   `ensureWaTab`/`pingContentScript`/`sendToTab` plumbing every internal
   action already uses — none of this extension's own scheduling, campaigns,
-  contacts, or auto-reply behavior is affected either way. The Settings
-  tab's **External API (Nuskomate)** card is a read-only status light for
-  this connection (see above); if Nuskomate isn't connecting, check that
-  it's actually installed/enabled and, when testing a local Nuskomate build,
-  that its loaded `dist/` folder is up to date (`node build.js` in its own
-  repo) — an unbuilt/stale `dist/` simply won't contain whatever bridging
-  code its current source has.
+  contacts, or auto-reply behavior is affected either way. This used to be a
+  long-lived `chrome.runtime.connect()` port for the push direction (new
+  WhatsApp message → Nuskomate), but a Port doesn't reliably survive either
+  side's MV3 service worker being suspended after ~30s idle — that produced
+  a connect/disconnect cycle roughly every 30 seconds in practice, with a
+  real risk of a message arriving in the brief gap being silently dropped.
+  A one-shot message doesn't have that problem: Chrome wakes a suspended
+  service worker to deliver it either way. The Settings tab's **External API
+  (Nuskomate)** card is a read-only status light reflecting the most recent
+  push or the once-per-startup reachability ping (see above); if it shows
+  "not reachable," check that Nuskomate is actually installed/enabled and
+  that whatever copy of it Chrome has loaded includes this bridge code
+  (`modules/whatsapp-automation.js`'s `onMessageExternal` listener) — reload
+  the Nuskomate extension after any change to its source. Every message
+  Nuskomate actually sends (`sendText`/`sendMedia`/`mentionInChat`) is logged
+  to the **Log tab** exactly like any other send, labeled `Nuskomate: <chat>`
+  — searching "Nuskomate" there shows only these. A successful one gets the
+  same **Delete for everyone** button as any other logged send, since it's
+  logged with the same `waId`/`msgId` shape.
 
 ## Requirements
 

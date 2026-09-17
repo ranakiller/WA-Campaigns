@@ -32,20 +32,29 @@ function chatIdFromMsgId(msgId) {
   return parts.length >= 2 ? parts[1] : null;
 }
 
+// Polls WPP.isReady directly on an interval rather than relying on
+// WPP.onReady(callback) — confirmed via a real crash report (Edge's
+// extension Errors panel) that WPP.onReady is not always a function on the
+// currently-vendored wa-js build/WhatsApp Web version pairing: calling it
+// threw "window.WPP.onReady is not a function" as an uncaught rejection
+// immediately, every time, silently killing hook installation before it
+// ever got to the isReady check. This never showed up via the "ping"
+// action's own status check because that one only runs after WhatsApp Web
+// has already finished loading — by then WPP.isReady is already true, so
+// it returns on the very first line below without ever touching
+// .onReady() — but the message hooks (auto-reply, live relay) install at
+// page load, when isReady still legitimately is false, so they were the
+// ones actually reaching (and crashing on) that call. Polling isReady
+// directly has no dependency on onReady existing at all.
 async function waitForWppReady(timeoutMs = 30000) {
   if (window.WPP && window.WPP.isReady) return true;
-  return new Promise((resolve) => {
-    if (!window.WPP) {
-      // vendor/wppconnect-wa.js failed to load/define WPP at all.
-      resolve(false);
-      return;
-    }
-    const timer = setTimeout(() => resolve(false), timeoutMs);
-    window.WPP.onReady(() => {
-      clearTimeout(timer);
-      resolve(true);
-    });
-  });
+  if (!window.WPP) return false; // vendor/wppconnect-wa.js failed to load/define WPP at all
+  const start = Date.now();
+  while (Date.now() - start < timeoutMs) {
+    await new Promise((r) => setTimeout(r, 250));
+    if (window.WPP.isReady) return true;
+  }
+  return !!window.WPP.isReady;
 }
 
 // WhatsApp Web's own internal code (not this extension, not even wa-js —
@@ -417,6 +426,75 @@ async function handleRequest(action, payload) {
       }
       return { members };
     }
+    // Chat export (Messages tab, "Export current chat" header button) —
+    // returns the full message history (oldest first) for whichever chat is
+    // open, as clean records ready to become chat.json, plus enough per-item
+    // info (msgId/mimetype/origFilename) for background.js to download each
+    // attachment on its own via the existing getMessageMedia action and save
+    // it through chrome.downloads. Kept as metadata-only here rather than
+    // inlining every attachment's data URL in one giant response — a chat
+    // with hundreds of images would otherwise have to hold all of them in
+    // memory (and cross the content.js relay) at once instead of one at a
+    // time, and this shape also gives the caller a natural per-item point to
+    // report live progress from.
+    case 'getChatExportData': {
+      const chat = window.WPP.chat.getActiveChat();
+      if (!chat || !chat.id) throw new Error('No chat is currently open in WhatsApp Web — open one first.');
+      // Same phoneNumber-first reasoning as getGroupMembers' lid handling —
+      // a modern "@lid" chat hides the real number behind chat.contact.
+      const phone = (chat.contact && chat.contact.phoneNumber && chat.contact.phoneNumber.user) || chat.id.user;
+      const title = chat.formattedTitle || chat.name || '';
+      let raw;
+      try {
+        raw = await window.WPP.chat.getMessages(chat.id._serialized, { count: -1 });
+      } catch (e) {
+        throw new Error(`Could not load this chat's message history (${(e && e.message) || e}).`);
+      }
+      raw = raw.slice().sort((a, b) => a.t - b.t);
+      const me = (window.WPP.conn.getMyUserId && window.WPP.conn.getMyUserId()) ? window.WPP.conn.getMyUserId().user : 'me';
+      // Group messages carry the sender as an "@lid"-or-"@c.us" wid in
+      // .author — resolved the same way getGroupMembers resolves a
+      // participant's real number, best-effort (local-only, no network
+      // lookup — see that case's own comment on why a lid can legitimately
+      // fail to resolve).
+      function resolveSenderNumber(wid) {
+        try {
+          const c = window.WPP.whatsapp.ContactStore.get(wid);
+          return (c && c.phoneNumber && c.phoneNumber.user) || (wid && wid.user);
+        } catch (e) {
+          return wid && wid.user;
+        }
+      }
+      const messages = [];
+      let no = 0;
+      for (const m of raw) {
+        // Real content only — text, a caption, or media; skips system
+        // events (group name changes, etc.) and anything already deleted.
+        if (!(m.mimetype || m.caption || (m.type === 'chat' && m.body))) continue;
+        no++;
+        const mine = !!(m.id && m.id.fromMe !== undefined ? m.id.fromMe : m.fromMe);
+        const rec = {
+          no,
+          time: new Date(m.t * 1000).toLocaleString('sv-SE'),
+          timestamp: m.t,
+          number: mine ? me : m.author ? resolveSenderNumber(m.author) : phone,
+          name: mine ? 'Me' : m.notifyName || chat.formattedTitle || phone,
+          me: mine,
+          type: m.mimetype ? m.type : 'text',
+          message: (m.mimetype ? m.caption : m.body) || ''
+        };
+        // These three ride along only so background.js can fetch/name the
+        // attachment itself — stripped back out before the final chat.json
+        // is written.
+        if (m.mimetype) {
+          rec.msgId = m.id && m.id._serialized;
+          rec.mimetype = m.mimetype;
+          rec.origFilename = m.filename || null;
+        }
+        messages.push(rec);
+      }
+      return { chat: { number: phone, name: title || phone, group: !!chat.isGroup }, messages };
+    }
     case 'getActiveChat': {
       const chat = window.WPP.chat.getActiveChat();
       if (!chat || !chat.id) {
@@ -528,6 +606,24 @@ async function handleRequest(action, payload) {
   }
 }
 
+// waitForWppReady() gives up after its own default 30s window — fine for a
+// one-shot "ping" check, but NOT fine here: on a heavy account (hundreds of
+// chats/groups), WPP can genuinely take longer than that to finish syncing,
+// and if either hook below hits that timeout it previously gave up FOREVER
+// — silently disabling auto-reply and the live relay for the rest of that
+// tab's life, with no error surfaced anywhere and no way to recover short
+// of reloading the tab again and hoping it's faster next time. Retrying
+// instead of giving up fixes that: WPP.onReady() fires immediately if WPP
+// is already ready by the time it's (re-)registered, so this just means
+// "keep checking every 5s" rather than "wait 30s exactly once".
+async function waitForWppReadyForever() {
+  while (true) {
+    const ready = await waitForWppReady();
+    if (ready) return;
+    await new Promise((r) => setTimeout(r, 5000));
+  }
+}
+
 // ---------- incoming-message hook (auto-reply) ----------
 // A one-way push, not a request/response round trip — background.js has no
 // way to poll for new messages, so this forwards WPP's own event the
@@ -540,9 +636,10 @@ async function handleRequest(action, payload) {
 let incomingMessageHookInstalled = false;
 async function installIncomingMessageHook() {
   if (incomingMessageHookInstalled) return;
-  const ready = await waitForWppReady();
-  if (!ready || incomingMessageHookInstalled) return;
+  await waitForWppReadyForever();
+  if (incomingMessageHookInstalled) return;
   incomingMessageHookInstalled = true;
+  console.log('[WA Scheduler] auto-reply hook installed — listening for incoming messages.');
   window.WPP.on('chat.new_message', (msg) => {
     try {
       if (!msg || (msg.id && msg.id.fromMe)) return;
@@ -572,9 +669,17 @@ installIncomingMessageHook();
 let externalRelayHookInstalled = false;
 async function installExternalRelayHook() {
   if (externalRelayHookInstalled) return;
-  const ready = await waitForWppReady();
-  if (!ready || externalRelayHookInstalled) return;
+  await waitForWppReadyForever();
+  if (externalRelayHookInstalled) return;
   externalRelayHookInstalled = true;
+  console.log('[WA Scheduler] live activity relay installed — every incoming/outgoing message will now be relayed to the Incoming tab.');
+  // One-way "I'm actually installed and listening" breadcrumb — reuses the
+  // same wa-ext-notify channel installIncomingMessageHook already uses, so
+  // content.js only needs one more `type` branch, not a whole new event.
+  // Lets the popup's Incoming tab show a real installed/not-yet status
+  // instead of the only signal being "have I happened to see a message
+  // yet" (which can't tell "broken" apart from "just no traffic yet").
+  document.dispatchEvent(new CustomEvent('wa-ext-notify', { detail: { type: 'relayHookReady', at: Date.now() } }));
   window.WPP.on('chat.new_message', (msg) => {
     try {
       if (!msg || !msg.id) return;

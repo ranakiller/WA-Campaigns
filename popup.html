@@ -34,6 +34,9 @@
       <button id="privacyBlurBtn" class="icon-btn" data-tooltip="Blur chat names, photos &amp; messages (screen-sharing) — right-click for settings" aria-label="Blur chat content for screen-sharing. Right-click for settings">
         <svg viewBox="0 0 24 24" width="18" height="18"><path fill="currentColor" d="M12 4.5C7 4.5 2.73 7.61 1 12c1.73 4.39 6 7.5 11 7.5s9.27-3.11 11-7.5C21.27 7.61 17 4.5 12 4.5Zm0 12.5a5 5 0 1 1 0-10 5 5 0 0 1 0 10Zm0-8a3 3 0 1 0 0 6 3 3 0 0 0 0-6Z"/></svg>
       </button>
+      <button id="exportChatBtn" class="icon-btn" data-tooltip="Export the currently open chat (messages + media) to your Downloads folder" aria-label="Export the currently open WhatsApp chat">
+        <svg viewBox="0 0 24 24" width="18" height="18"><path fill="currentColor" d="M12 3a1 1 0 0 1 1 1v9.59l3.3-3.3a1 1 0 1 1 1.4 1.42l-5 5a1 1 0 0 1-1.4 0l-5-5a1 1 0 1 1 1.4-1.42l3.3 3.3V4a1 1 0 0 1 1-1ZM5 19h14a1 1 0 0 1 0 2H5a1 1 0 0 1 0-2Z"/></svg>
+      </button>
       <button id="masterToggleBtn" class="icon-btn" data-tooltip="Turn the extension on/off" aria-label="Turn the extension on/off">
         <svg viewBox="0 0 24 24" width="18" height="18"><path fill="currentColor" d="M13 3h-2v10h2V3Zm4.83 2.17-1.42 1.42A6.92 6.92 0 0 1 19 12a7 7 0 1 1-11.83-5.41L5.75 5.17A9 9 0 1 0 18.25 5.17Z"/></svg>
       </button>
@@ -111,6 +114,12 @@
         </div>
       </div>
       <div id="contactDetailNumber" class="cd-ph"></div>
+      <div class="cd-waid-row">
+        <span id="contactDetailWaId" class="cd-waid" data-tooltip="WhatsApp chat ID"></span>
+        <button id="contactDetailCopyWaIdBtn" class="icon-btn small-icon-btn qs-copy-id-btn" type="button" data-tooltip="Copy WhatsApp ID">
+          <svg viewBox="0 0 24 24" width="14" height="14"><path fill="currentColor" d="M16 1H4a2 2 0 0 0-2 2v14h2V3h12V1Zm3 4H8a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h11a2 2 0 0 0 2-2V7a2 2 0 0 0-2-2Zm0 16H8V7h11v14Z"/></svg>
+        </button>
+      </div>
       <div id="contactStatusStepper" class="cd-stepper"></div>
       <div class="field-label">Tags</div>
       <div class="cd-tag-editor">
@@ -181,6 +190,9 @@
     <button class="tab-btn" data-tab="log" data-tooltip="Log">
       <span class="neu-cap"><svg class="icon-history" viewBox="0 0 24 24" fill="currentColor"><path class="icon-history-ring" d="M13 3a9 9 0 0 0-9 9H1l3.89 3.89.07.14L9 12H6a7 7 0 1 1 2.05 4.95l-1.42 1.42A9 9 0 1 0 13 3z"/><path class="icon-history-hour" d="M12 13 12 10.2" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" fill="none"/><path class="icon-history-minute" d="M12 13 12 7.8" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" fill="none"/></svg></span>
     </button>
+    <button class="tab-btn" data-tab="incoming" data-tooltip="Incoming (real-time WhatsApp activity)">
+      <span class="neu-cap"><svg viewBox="0 0 24 24" fill="none"><path d="M2 12h4l2-7 4 14 2-9 2 2h6" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg></span>
+    </button>
     <button class="tab-btn" data-tab="settings" data-tooltip="Settings">
       <span class="neu-cap"><svg class="icon-gear" viewBox="0 0 24 24" fill="currentColor"><path d="M19.14 12.94c.04-.3.06-.61.06-.94 0-.32-.02-.64-.07-.94l2.03-1.58a.5.5 0 0 0 .12-.61l-1.92-3.32a.5.5 0 0 0-.58-.22l-2.39.96c-.5-.38-1.03-.7-1.62-.94l-.36-2.54a.5.5 0 0 0-.5-.42h-3.84a.5.5 0 0 0-.5.42l-.36 2.54c-.59.24-1.13.57-1.62.94l-2.39-.96a.5.5 0 0 0-.58.22L2.74 8.87a.5.5 0 0 0 .12.61l2.03 1.58c-.05.3-.09.63-.09.94s.02.64.07.94l-2.03 1.58a.5.5 0 0 0-.12.61l1.92 3.32c.14.24.4.32.64.22l2.39-.96c.5.38 1.03.7 1.62.94l.36 2.54c.05.28.27.42.5.42h3.84c.24 0 .46-.14.5-.42l.36-2.54c.59-.24 1.13-.56 1.62-.94l2.39.96c.24.1.5.02.64-.22l1.92-3.32a.5.5 0 0 0-.12-.61l-2.01-1.58zM12 15.5A3.5 3.5 0 1 1 12 8.5a3.5 3.5 0 0 1 0 7z"/></svg></span>
     </button>
@@ -221,6 +233,7 @@
       <label for="msgText">Add a text thread</label>
       <div id="msgHeaderFooterControl"></div>
       <div id="msgAutoReplyControl"></div>
+      <div id="msgFontStyleControl"></div>
       <div class="textarea-wrap">
         <textarea id="msgText" placeholder="Write a text thread, then tap + (or Ctrl+Enter)..." rows="6"></textarea>
         <div class="textarea-toolbar">
@@ -235,6 +248,9 @@
           <button id="msgAutoReplyToggleBtn" class="icon-btn small-icon-btn" type="button" data-tooltip="Auto-reply with this message when someone asks for it">
             <svg viewBox="0 0 24 24" width="15" height="15"><path fill="currentColor" d="M7 2v11h3v9l7-12h-4l4-8z"/></svg>
             <span class="hf-dot" id="msgAutoReplyDot" style="display:none"></span>
+          </button>
+          <button id="msgFontStyleBtn" class="icon-btn small-icon-btn" type="button" data-tooltip="Fancy text styles (Unicode font changer)">
+            <svg viewBox="0 0 24 24" width="15" height="15"><text x="0" y="16" font-size="15" font-family="Georgia, 'Times New Roman', serif" font-weight="700" fill="currentColor">Aa</text></svg>
           </button>
           <button id="attachToggleBtn" class="icon-btn small-icon-btn" type="button" data-tooltip="Attach image or document as its own attachment">
             <svg viewBox="0 0 24 24" width="15" height="15"><path fill="currentColor" d="M16.5 6.5v9a4 4 0 0 1-8 0v-9a2.5 2.5 0 0 1 5 0v8a1 1 0 0 1-2 0v-8H10v8a2.5 2.5 0 0 0 5 0v-9a4 4 0 0 0-8 0v9.5a5.5 5.5 0 0 0 11 0V6.5Z"/></svg>
@@ -341,27 +357,26 @@
         <button type="button" class="kind-btn active" data-kind="static">Pick manually</button>
         <button type="button" class="kind-btn" data-kind="smart">Smart segment</button>
       </div>
-      <input id="listName" type="text" placeholder="List name, e.g. Family groups" />
 
       <div id="listManualBuilder">
       <div class="row-with-action">
         <span class="muted">Fetched chats</span>
-        <button id="exportFetchedBtn" class="icon-btn small-icon-btn" type="button" data-tooltip="Export fetched chats to CSV">
+      </div>
+      <div class="select-all-row">
+        <label class="checkbox-row select-all-check-row" data-tooltip="Check to select all, uncheck to deselect all">
+          <input id="selectAllCheck" type="checkbox" />
+          <span id="selectedCount" class="muted"></span>
+        </label>
+        <input id="listSearchInput" type="text" placeholder="Search fetched chats..." class="select-all-row-search" />
+        <button id="exportFetchedBtn" class="icon-btn small-icon-btn select-all-row-extract" type="button" data-tooltip="Export fetched chats to CSV">
           <svg viewBox="0 0 24 24" width="14" height="14"><path fill="currentColor" d="M5 3a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2V5a2 2 0 0 0-2-2H5Zm0 2h5v4H5V5Zm7 0h7v4h-7V5ZM5 11h5v3H5v-3Zm7 0h7v3h-7v-3ZM5 16h5v3H5v-3Zm7 0h7v3h-7v-3Z"/></svg>
+        </button>
+        <button id="extractGroupContactsBtn" class="icon-btn small-icon-btn" type="button" data-tooltip="Extract contacts from selected groups">
+          <svg viewBox="0 0 24 24" width="14" height="14"><path fill="currentColor" d="M16 11c1.66 0 2.99-1.34 2.99-3S17.66 5 16 5c-1.66 0-3 1.34-3 3s1.34 3 3 3zm-8 0c1.66 0 2.99-1.34 2.99-3S9.66 5 8 5C6.34 5 5 6.34 5 8s1.34 3 3 3zm0 2c-2.33 0-7 1.17-7 3.5V19h14v-2.5c0-2.33-4.67-3.5-7-3.5zm8 0c-.29 0-.62.02-.97.05 1.16.84 1.97 1.97 1.97 3.45V19h6v-2.5c0-2.33-4.67-3.5-7-3.5z"/></svg>
         </button>
         <button id="clearFetchedBtn" class="icon-btn small-icon-btn danger" type="button" data-tooltip="Clear fetched chats">
           <svg viewBox="0 0 24 24" width="14" height="14"><path fill="currentColor" d="M6 19a2 2 0 0 0 2 2h8a2 2 0 0 0 2-2V7H6v12ZM19 4h-3.5l-1-1h-5l-1 1H5v2h14V4Z"/></svg>
         </button>
-      </div>
-      <input id="listSearchInput" type="text" placeholder="Search fetched chats..." />
-      <div class="select-all-row">
-        <button id="selectAllBtn" class="small" type="button">Select all</button>
-        <button id="deselectAllBtn" class="small" type="button">Deselect all</button>
-        <button id="extractGroupContactsBtn" class="small" type="button" data-tooltip="Select groups to extract their contact details">
-          <svg viewBox="0 0 24 24" width="12" height="12"><path fill="currentColor" d="M5 3a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2V5a2 2 0 0 0-2-2H5Zm0 2h5v4H5V5Zm7 0h7v4h-7V5ZM5 11h5v3H5v-3Zm7 0h7v3h-7v-3ZM5 16h5v3H5v-3Zm7 0h7v3h-7v-3Z"/></svg>
-          <span class="btn-label">Extract contacts</span>
-        </button>
-        <span id="selectedCount" class="muted"></span>
       </div>
       <div id="listBuilderChecklist" class="checklist"></div>
       </div>
@@ -380,6 +395,7 @@
       </div>
 
       <div class="form-actions">
+        <input id="listName" type="text" placeholder="List name, e.g. Family groups" />
         <button id="saveListBtn" class="primary"><svg viewBox="0 0 24 24" width="15" height="15"><path fill="currentColor" d="M9 16.2 4.8 12l-1.4 1.4L9 19 21 7l-1.4-1.4z"/></svg><span class="btn-label">Save list</span></button>
         <button id="cancelEditListBtn" class="ghost" style="display:none"><svg viewBox="0 0 24 24" width="15" height="15"><path fill="currentColor" d="M19 6.4 17.6 5 12 10.6 6.4 5 5 6.4l5.6 5.6L5 17.6 6.4 19l5.6-5.6 5.6 5.6 1.4-1.4-5.6-5.6z"/></svg><span class="btn-label">Cancel edit</span></button>
       </div>
@@ -453,6 +469,44 @@
       <ul id="logList" class="item-list"></ul>
     </section>
 
+    <!-- INCOMING — a real-time record of every WPP chat.new_message event
+         this extension has actually seen (background.js's
+         appendIncomingActivity), independent of whether auto-reply or the
+         Nuskomate relay does anything with it. Exists to answer "is this
+         really receiving live WhatsApp events (incl. media) from every
+         chat" without having to trust that silently. -->
+    <section id="tab-incoming" class="tab-panel">
+      <p class="hint">Every message this extension's live WhatsApp hook has actually seen, across every chat — proof it's working, not just a log of what it sent. Media isn't downloaded automatically (that would mean fetching every photo from every chat); tap <b>View</b> on a media entry to pull that one attachment on demand.</p>
+      <div class="sync-status-row">
+        <span id="relayHookStatusDot" class="wa-status-dot"></span>
+        <span id="relayHookStatusText" class="muted"></span>
+      </div>
+      <div class="log-filter-row">
+        <div class="search-with-clear">
+          <input id="incomingSearchInput" type="text" placeholder="Search chat name or message text..." />
+          <button id="incomingSearchClearBtn" class="search-clear-btn" type="button" data-tooltip="Clear search">✕</button>
+        </div>
+        <select id="incomingTypeFilter">
+          <option value="all">All types</option>
+          <option value="chat">Text</option>
+          <option value="image">Images</option>
+          <option value="video">Video</option>
+          <option value="ptt">Voice notes</option>
+          <option value="audio">Audio</option>
+          <option value="document">Documents</option>
+          <option value="sticker">Stickers</option>
+        </select>
+        <button id="clearIncomingBtn" class="icon-btn small-icon-btn danger" type="button" data-tooltip="Clear this feed">
+          <svg viewBox="0 0 24 24" width="14" height="14"><path fill="currentColor" d="M17.65 6.35A7.958 7.958 0 0 0 12 4c-4.42 0-7.99 3.58-7.99 8s3.57 8 7.99 8c3.73 0 6.84-2.55 7.73-6h-2.08c-.82 2.33-3.04 4-5.65 4-3.31 0-6-2.69-6-6s2.69-6 6-6c1.66 0 3.14.69 4.22 1.78L13 11h7V4l-2.35 2.35z"/></svg>
+        </button>
+      </div>
+      <label class="checkbox-row">
+        <input id="incomingShowMineCheck" type="checkbox" checked />
+        Include messages sent from this account too (not just received)
+      </label>
+      <ul id="incomingActivityList" class="item-list"></ul>
+    </section>
+
     <!-- SETTINGS -->
     <section id="tab-settings" class="tab-panel">
       <div class="panel-card activation-card" id="activationCard">
@@ -481,10 +535,10 @@
 
       <div class="panel-card">
       <h3>External API (Nuskomate)</h3>
-      <p class="hint">A separate, allow-listed extension (Nuskomate) can read incoming WhatsApp messages and send through this extension's WhatsApp connection. This just shows whether it's actually connected and using it.</p>
+      <p class="hint">A separate, allow-listed extension (Nuskomate) can read incoming WhatsApp messages and send through this extension's WhatsApp connection. This just shows whether it's actually reachable and using it.</p>
       <div class="sync-status-row">
         <span id="nuskomateStatusDot" class="wa-status-dot off"></span>
-        <span id="nuskomateStatusText" class="muted">Never connected</span>
+        <span id="nuskomateStatusText" class="muted">Never confirmed reachable</span>
       </div>
       </div>
 

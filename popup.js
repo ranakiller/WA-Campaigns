@@ -126,7 +126,7 @@ chrome.runtime.onMessage.addListener((msg) => {
   }
 });
 
-let STATE = { fetchedChats: [], lists: [], messages: [], log: [], settings: {}, activeRuns: {}, contacts: [], contactStatuses: [], nuskomateStatus: {} };
+let STATE = { fetchedChats: [], lists: [], messages: [], log: [], settings: {}, activeRuns: {}, contacts: [], contactStatuses: [], nuskomateStatus: {}, incomingActivityLog: [], relayHookStatus: {} };
 // Mirrors background.js's own CONTACT_STATUSES — used as a fallback before
 // the first getState() response lands (STATE.contactStatuses after that).
 const CONTACT_STATUSES = ['Lead', 'Contacted', 'Customer', 'Cold'];
@@ -327,6 +327,11 @@ function defaultAutoReply() {
 }
 let composingAutoReply = defaultAutoReply();
 let messageAutoReplyPanelOpen = false;
+// Whether the compose toolbar's fancy-text-style picker (see FONT_STYLES
+// below) is currently expanded — a one-shot tool, not a persisted mode, so
+// unlike messageHfPanelOpen/messageAutoReplyPanelOpen nothing is "saved"
+// while it's open; it just closes itself right after a style is applied.
+let fontStylePanelOpen = false;
 // Which single composing item (by reference) currently has its own HF
 // panel expanded, or null. Only one open at a time, same pattern as
 // editingThreadItem.
@@ -614,6 +619,7 @@ async function refresh() {
   }
   renderMasterToggle();
   renderUiModeButton();
+  renderExportChatButton();
   renderPrivacyBlurToggle();
   renderPrivacyBlurModal();
   renderPrivacyShortcut();
@@ -625,6 +631,7 @@ async function refresh() {
   renderLists();
   renderContactsTab();
   renderLog();
+  renderIncomingTab();
   renderSettings();
   renderKeysTabVisibility();
 }
@@ -635,6 +642,22 @@ function escapeHtml(str) {
     .replace(/</g, '&lt;')
     .replace(/>/g, '&gt;')
     .replace(/"/g, '&quot;');
+}
+
+// Shared by every "copy this waId" button (search dropdown rows, Contacts
+// tab, Lists tab checklist) — the real WhatsApp chat id (e.g.
+// "1234567890@c.us" or "123456789-987654321@g.us"), not the display name or
+// phone number shown next to it. This is the identifier external tools
+// (Nuskomate's own sendText/sendMedia/openChat, etc. — see README's
+// External API section) actually need, and nothing in this popup showed it
+// anywhere before now.
+async function copyToClipboard(text, label) {
+  try {
+    await navigator.clipboard.writeText(text);
+    showToast(label ? `Copied: ${label}` : 'Copied.', 'success');
+  } catch (_) {
+    showToast('Could not copy — select it and copy manually.', 'error');
+  }
 }
 
 // Primary/ghost buttons now carry an icon alongside their label (see
@@ -892,6 +915,54 @@ document.getElementById('changeShortcutBtn').addEventListener('click', () => {
   chrome.tabs.create({ url: 'chrome://extensions/shortcuts' });
 });
 
+// ---------- export current chat (header button) ----------
+// Same "turn the button itself into a percentage ring" pattern as a
+// per-message "send to current chat" button (activeChatBtnHtml/
+// activeChatRunFor above) — reused here via a fixed run key instead of a
+// per-message one, since only one export can run at a time and it isn't
+// tied to any saved message. See background.js's runChatExport for what
+// actually happens and why it lands in the Downloads folder.
+const EXPORT_CHAT_RUN_KEY = '__chatExport__';
+const EXPORT_CHAT_ICON_SVG =
+  '<svg viewBox="0 0 24 24" width="18" height="18"><path fill="currentColor" d="M12 3a1 1 0 0 1 1 1v9.59l3.3-3.3a1 1 0 1 1 1.4 1.42l-5 5a1 1 0 0 1-1.4 0l-5-5a1 1 0 1 1 1.4-1.42l3.3 3.3V4a1 1 0 0 1 1-1ZM5 19h14a1 1 0 0 1 0 2H5a1 1 0 0 1 0-2Z"/></svg>';
+function renderExportChatButton() {
+  const btn = document.getElementById('exportChatBtn');
+  if (!btn) return;
+  const run = activeChatRunFor(EXPORT_CHAT_RUN_KEY);
+  if (!run) {
+    btn.classList.remove('sending-ring');
+    btn.innerHTML = EXPORT_CHAT_ICON_SVG;
+    btn.dataset.tooltip = 'Export the currently open chat (messages + media) to your Downloads folder';
+    return;
+  }
+  const pct = activeChatRunPct(run);
+  btn.classList.add('sending-ring');
+  btn.style.setProperty('--pct', pct);
+  btn.innerHTML = `<span class="sending-ring-pct">${run.starting ? '' : pct + '%'}</span>`;
+  btn.dataset.tooltip = `Exporting… ${pct}% — click to stop`;
+}
+document.getElementById('exportChatBtn').addEventListener('click', async () => {
+  const run = activeChatRunFor(EXPORT_CHAT_RUN_KEY);
+  if (run) {
+    if (await showConfirmDialog('Stop this export?', { confirmText: 'Stop', danger: true })) {
+      await call('resetRun', { runId: run.id });
+      activeChatRunIds.delete(EXPORT_CHAT_RUN_KEY);
+      saveActiveChatRunIds();
+      refresh();
+    }
+    return;
+  }
+  const res = await call('exportActiveChat');
+  if (!res.ok) {
+    showToast(res.error || 'Could not start the export.', 'error');
+    return;
+  }
+  activeChatRunIds.set(EXPORT_CHAT_RUN_KEY, { runId: res.runId, assignedAt: Date.now() });
+  saveActiveChatRunIds();
+  showToast('Exporting the open chat… this can take a while for a long history.', 'info');
+  refresh();
+});
+
 // ---------- tabs ----------
 // .just-selected is a one-shot trigger for the icon "key" pop/motion CSS
 // (see popup.css's .tab-btn.just-selected rules) — added on click, removed
@@ -1007,6 +1078,40 @@ function startEditingSchedule(schedule) {
   // something in there — otherwise a custom delay/label would be silently
   // hidden behind the collapsed section on every re-open.
   scheduleAdvancedOpen = !schedule.useDefaultDelay || !!(schedule.label && schedule.label.trim());
+}
+
+// Duplicate-schedule guard: same message + same targets (lists/member
+// filter/items) + same timing is almost certainly a mis-click re-saving the
+// same schedule, not a deliberate second one — but anything actually
+// different (even just a different time) is a legitimate second schedule
+// and must still be allowed. Compares by value, not by the schedule's own
+// id, so a freshly-built draft (no id yet) can be checked before saving.
+function arraysEqualAsSets(a, b) {
+  const as = (a || []).slice().sort();
+  const bs = (b || []).slice().sort();
+  return as.length === bs.length && as.every((v, i) => v === bs[i]);
+}
+function memberFilterEqual(a, b) {
+  const aObj = a || {};
+  const bObj = b || {};
+  const keys = new Set([...Object.keys(aObj), ...Object.keys(bObj)]);
+  return [...keys].every((k) => arraysEqualAsSets(aObj[k], bObj[k]));
+}
+function scheduleDuplicatesExisting(candidate, existing) {
+  if (!arraysEqualAsSets(candidate.listIds, existing.listIds)) return false;
+  if (!memberFilterEqual(candidate.memberFilter, existing.memberFilter)) return false;
+  if (!arraysEqualAsSets(candidate.itemIndexes, existing.itemIndexes)) return false;
+  if (candidate.scheduleType !== existing.scheduleType) return false;
+  if (candidate.scheduleType === 'times') return arraysEqualAsSets(candidate.times, existing.times);
+  if (candidate.scheduleType === 'interval') {
+    return (
+      (candidate.intervalMinutes || null) === (existing.intervalMinutes || null) &&
+      (candidate.windowStart || null) === (existing.windowStart || null) &&
+      (candidate.windowEnd || null) === (existing.windowEnd || null)
+    );
+  }
+  if (candidate.scheduleType === 'once') return arraysEqualAsSets(candidate.datetimes, existing.datetimes);
+  return false;
 }
 
 // Same field names as a schedule object (scheduleType/times/intervalMinutes/
@@ -1464,26 +1569,43 @@ function createChatPickerWidget(ids) {
     // The number rides along mainly so two different contacts saved under
     // the same name (or a same-named group and community) are actually
     // tellable apart in the list, not just so it's there to read.
+    // The waId (the real WhatsApp chat id — "1234567890@c.us" or a
+    // "...@g.us" group id) is shown and individually copyable here too, not
+    // just the name/number — it's the one thing nothing else in this popup
+    // surfaced anywhere, and it's exactly what an external tool like
+    // Nuskomate needs to target this exact chat (see copyToClipboard's own
+    // comment). The row itself is a <div>, not a <button>, specifically so
+    // this copy button can live inside it — a button can't nest inside
+    // another button.
     dropdown.innerHTML = matches
       .slice(0, 20)
       .map(
         (c, i) =>
-          `<button type="button" class="qs-option${i === 0 ? ' kb-active' : ''}" data-wa-id="${escapeHtml(c.waId)}">
+          `<div class="qs-option${i === 0 ? ' kb-active' : ''}" data-wa-id="${escapeHtml(c.waId)}" tabindex="-1">
             <span class="qs-name-col">
               <span class="qs-name">${escapeHtml(c.name || c.waId)}</span>
               ${c.number ? `<span class="qs-number">+${escapeHtml(c.number)}</span>` : ''}
+              <span class="qs-waid" data-tooltip="WhatsApp chat ID">${escapeHtml(c.waId)}</span>
             </span>
             <span class="qs-type">${chatTypeLabel(c.type)}</span>
-          </button>`
+            <button type="button" class="icon-btn small-icon-btn qs-copy-id-btn" data-wa-id="${escapeHtml(c.waId)}" data-tooltip="Copy WhatsApp ID">${COPY_ICON_SVG}</button>
+          </div>`
       )
       .join('');
-    dropdown.querySelectorAll('.qs-option').forEach((btn) => {
-      btn.addEventListener('click', () => {
-        const chat = (liveChatSearchCache || []).find((c) => c.waId === btn.dataset.waId);
+    dropdown.querySelectorAll('.qs-option').forEach((row) => {
+      row.addEventListener('click', (e) => {
+        if (e.target.closest('.qs-copy-id-btn')) return; // handled separately, below — doesn't pick the row
+        const chat = (liveChatSearchCache || []).find((c) => c.waId === row.dataset.waId);
         if (!chat) return;
         selectedTarget = { waId: chat.waId, name: chat.name || chat.waId };
         document.getElementById(numberInput).value = selectedTarget.name;
         closeSearch();
+      });
+    });
+    dropdown.querySelectorAll('.qs-copy-id-btn').forEach((btn) => {
+      btn.addEventListener('click', (e) => {
+        e.stopPropagation();
+        copyToClipboard(btn.dataset.waId, 'WhatsApp ID');
       });
     });
   }
@@ -1910,6 +2032,134 @@ document.getElementById('msgHfToggleBtn').addEventListener('click', () => {
   renderMessageHfControl();
 });
 
+// ---------- fancy Unicode text styles (compose toolbar) ----------
+// Purely cosmetic character substitution, not real formatting — WhatsApp
+// (and everywhere else) just renders these as plain text made of different
+// Unicode characters, so it works in a caption or a group name too, not
+// just a text thread. Ranges below are chosen so each style is a
+// contiguous Unicode block with NO missing letters, wherever one exists
+// (picking the bold/bold-italic/bold-script/bold-fraktur variant over its
+// plain counterpart is what avoids the well-known "holes" in the
+// Mathematical Alphanumeric block — a handful of plain italic/script/
+// fraktur letters were already assigned elsewhere in Unicode before that
+// block existed, so the block itself skips duplicating them). The two
+// blocks used here that DO still have holes (italic — just lowercase h —
+// and double-struck uppercase) are patched via an explicit exceptions map
+// instead of relying on arithmetic for those specific letters.
+function styleRange(str, upperBase, lowerBase, digitBase, exceptions) {
+  const ex = exceptions || {};
+  return Array.from(str)
+    .map((ch) => {
+      if (ex[ch] !== undefined) return ex[ch];
+      const code = ch.codePointAt(0);
+      if (code >= 65 && code <= 90 && upperBase != null) return String.fromCodePoint(upperBase + (code - 65));
+      if (code >= 97 && code <= 122 && lowerBase != null) return String.fromCodePoint(lowerBase + (code - 97));
+      if (code >= 48 && code <= 57 && digitBase != null) return String.fromCodePoint(digitBase + (code - 48));
+      return ch;
+    })
+    .join('');
+}
+function styleCombining(str, mark) {
+  return Array.from(str)
+    .map((ch) => (ch === '\n' ? ch : ch + mark))
+    .join('');
+}
+const FONT_STYLES = [
+  { id: 'bold', label: 'Bold', apply: (s) => styleRange(s, 0x1d400, 0x1d41a, 0x1d7ce) },
+  { id: 'italic', label: 'Italic', apply: (s) => styleRange(s, 0x1d434, 0x1d44e, null, { h: 'ℎ' }) },
+  { id: 'boldItalic', label: 'Bold Italic', apply: (s) => styleRange(s, 0x1d468, 0x1d482, null) },
+  { id: 'script', label: 'Script', apply: (s) => styleRange(s, 0x1d4d0, 0x1d4ea, null) },
+  { id: 'fraktur', label: 'Fraktur', apply: (s) => styleRange(s, 0x1d56c, 0x1d586, null) },
+  {
+    id: 'doubleStruck',
+    label: 'Double-struck',
+    apply: (s) =>
+      styleRange(s, 0x1d538, 0x1d552, 0x1d7d8, {
+        C: 'ℂ',
+        H: 'ℍ',
+        N: 'ℕ',
+        P: 'ℙ',
+        Q: 'ℚ',
+        R: 'ℝ',
+        Z: 'ℤ'
+      })
+  },
+  { id: 'monospace', label: 'Monospace', apply: (s) => styleRange(s, 0x1d670, 0x1d68a, 0x1d7f6) },
+  { id: 'fullwidth', label: 'Fullwidth', apply: (s) => styleRange(s, 0xff21, 0xff41, 0xff10) },
+  {
+    id: 'circled',
+    label: 'Circled',
+    apply: (s) =>
+      styleRange(s, 0x24b6, 0x24d0, null, {
+        0: '⓪',
+        1: '①',
+        2: '②',
+        3: '③',
+        4: '④',
+        5: '⑤',
+        6: '⑥',
+        7: '⑦',
+        8: '⑧',
+        9: '⑨'
+      })
+  },
+  { id: 'strikethrough', label: 'Strikethrough', apply: (s) => styleCombining(s, '̶') },
+  { id: 'underline', label: 'Underline', apply: (s) => styleCombining(s, '̲') }
+];
+
+function applyFontStyleToTextarea(style) {
+  const ta = document.getElementById('msgText');
+  const start = ta.selectionStart;
+  const end = ta.selectionEnd;
+  const hasSelection = end > start;
+  const target = hasSelection ? ta.value.slice(start, end) : ta.value;
+  const styled = style.apply(target);
+  if (hasSelection) {
+    ta.value = ta.value.slice(0, start) + styled + ta.value.slice(end);
+    ta.focus();
+    ta.setSelectionRange(start, start + styled.length);
+  } else {
+    ta.value = styled;
+    ta.focus();
+    ta.setSelectionRange(styled.length, styled.length);
+  }
+  ta.dispatchEvent(new Event('input', { bubbles: true })); // saveDraft() listens for this
+}
+
+function renderFontStyleControl() {
+  const toggleBtn = document.getElementById('msgFontStyleBtn');
+  const container = document.getElementById('msgFontStyleControl');
+  if (!toggleBtn || !container) return;
+  toggleBtn.classList.toggle('open', fontStylePanelOpen);
+  if (!fontStylePanelOpen) {
+    container.innerHTML = '';
+    return;
+  }
+  container.innerHTML = `<div class="hf-panel font-style-panel">
+    <p class="hf-panel-hint">Applies to the selected text, or the whole box if nothing's selected.</p>
+    <div class="font-style-list">
+      ${FONT_STYLES.map(
+        (s) => `<button type="button" class="font-style-option" data-style="${s.id}">
+        <span class="font-style-preview">${escapeHtml(s.apply(s.label))}</span>
+        <span class="font-style-name muted">${s.label}</span>
+      </button>`
+      ).join('')}
+    </div>
+  </div>`;
+  container.querySelectorAll('.font-style-option').forEach((btn) => {
+    btn.addEventListener('click', () => {
+      const style = FONT_STYLES.find((s) => s.id === btn.dataset.style);
+      if (style) applyFontStyleToTextarea(style);
+      fontStylePanelOpen = false;
+      renderFontStyleControl();
+    });
+  });
+}
+document.getElementById('msgFontStyleBtn').addEventListener('click', () => {
+  fontStylePanelOpen = !fontStylePanelOpen;
+  renderFontStyleControl();
+});
+
 // ---------- auto-reply panel (compose form) ----------
 function autoReplyTriggerRowHtml(t, idx) {
   const isRegex = t.type === 'regex';
@@ -1934,7 +2184,8 @@ function autoReplyPanelHtml(ar) {
         <span>Auto-reply with this message when a trigger below matches an incoming chat/group message</span>
       </label>
       <p class="hf-panel-hint">Sends instantly, no delay — only while a WhatsApp Web tab is open. Never triggers on your own messages.</p>
-      <div class="ar-triggers">${rows || '<p class="hf-panel-hint">No triggers yet — add one below.</p>'}</div>
+      <p class="hf-panel-hint ar-howto-hint">Each row below is one trigger word or short phrase — type it directly into the box (it saves as you type, no separate Save button). An incoming chat/group message containing it fires this reply. Add more rows for more trigger words; an empty row is just ignored.</p>
+      <div class="ar-triggers">${rows || '<p class="hf-panel-hint">No triggers yet — tap "Add trigger" below to add one.</p>'}</div>
       <button type="button" class="ghost small-inline ar-add-trigger-btn"><svg viewBox="0 0 24 24" width="12" height="12"><path fill="currentColor" d="M19 13h-6v6h-2v-6H5v-2h6V5h2v6h6z"/></svg><span class="btn-label">Add trigger</span></button>
       <div class="ar-cooldown-row">
         <label><input type="checkbox" class="ar-cooldown-enabled-checkbox"${ar.cooldownEnabled ? ' checked' : ''} /> Limit repeats: once every</label>
@@ -2043,6 +2294,7 @@ document.getElementById('msgAutoReplyToggleBtn').addEventListener('click', () =>
 function renderComposingItems() {
   renderMessageHfControl();
   renderMessageAutoReplyControl();
+  renderFontStyleControl();
   const box = document.getElementById('composingItems');
   // Nothing to show or manage yet — hide the whole section rather than a
   // box with a placeholder hint inside it; the textarea's own placeholder
@@ -2301,6 +2553,7 @@ function resetMessageForm() {
   messageHfPanelOpen = false;
   composingAutoReply = defaultAutoReply();
   messageAutoReplyPanelOpen = false;
+  fontStylePanelOpen = false;
   document.getElementById('msgLabel').value = '';
   document.getElementById('msgLabelRow').style.display = 'none';
   document.getElementById('msgText').value = '';
@@ -2740,6 +2993,7 @@ function renderMessages() {
       messageHfPanelOpen = false;
       composingAutoReply = m.autoReply || defaultAutoReply();
       messageAutoReplyPanelOpen = false;
+      fontStylePanelOpen = false;
       document.getElementById('msgLabel').value = m.name;
       document.getElementById('msgLabelRow').style.display = '';
       const items = m.items || [];
@@ -2783,7 +3037,18 @@ function renderMessages() {
 // Once a send is running, this panel switches to showing its live progress
 // (the storage.onChanged listener triggers refresh()/renderMessages() on
 // every count update, so no polling is needed here).
-function buildSendPanel(message) {
+function buildSendPanel(message, opts = {}) {
+  // scheduleOnly: the Campaigns tab's own mount of this same panel — that
+  // tab exists purely to schedule sends, so it skips the Now/Schedule mode
+  // toggle and the "Now" action block entirely and jumps straight to the
+  // schedule editor (the Messages tab's mount still gets both).
+  const scheduleOnly = !!opts.scheduleOnly;
+  // onDone: fires after a schedule is actually saved, or the panel is
+  // cancelled/closed — lets the Campaigns tab collapse its own "editing
+  // this message" state back to the picker, which this generic panel has
+  // no notion of on its own (the Messages tab passes nothing here; closing
+  // its panel only ever needs setOpenSendPanel(null), already handled below).
+  const onDone = typeof opts.onDone === 'function' ? opts.onDone : null;
   const panel = document.createElement('div');
   panel.className = 'send-panel';
 
@@ -2821,6 +3086,7 @@ function buildSendPanel(message) {
     return panel;
   }
 
+  if (scheduleOnly) sendPanelMode = 'schedule';
   const items = message.items || [];
   const schedules = message.schedules || [];
   const unchecked = uncheckedSetFor(message.id);
@@ -2944,7 +3210,10 @@ function buildSendPanel(message) {
         .join('')}
     </div>
     ${scheduleListHtml}
-    <div class="kind-toggle send-panel-mode-toggle">
+    ${
+      scheduleOnly
+        ? ''
+        : `<div class="kind-toggle send-panel-mode-toggle">
       <button type="button" class="kind-btn send-mode-btn ${sendPanelMode === 'send' ? 'active' : ''}" data-mode="send">Now</button>
       <button type="button" class="kind-btn send-mode-btn ${sendPanelMode === 'schedule' ? 'active' : ''}" data-mode="schedule">Schedule</button>
     </div>
@@ -2955,8 +3224,9 @@ function buildSendPanel(message) {
       </label>
       <button class="primary" type="button" data-act="confirmSend">${SEND_ICON_SVG}<span class="btn-label">Send now</span></button>
       <button class="ghost small-inline" type="button" data-act="cancelSend">${CLOSE_ICON_SVG}<span class="btn-label">Cancel</span></button>
-    </div>
-    <div class="schedule-editor" style="display:${sendPanelMode === 'schedule' ? '' : 'none'}">
+    </div>`
+    }
+    <div class="schedule-editor" style="display:${scheduleOnly || sendPanelMode === 'schedule' ? '' : 'none'}">
       <label>When</label>
       <div class="kind-toggle schedule-type-toggle">
         <button type="button" class="kind-btn ${scheduleType === 'times' ? 'active' : ''}" data-schedule-type="times">Daily time(s)</button>
@@ -3039,6 +3309,7 @@ function buildSendPanel(message) {
     saveMessageRunIds();
     resetScheduleEditor();
     setOpenSendPanel(null);
+    if (onDone) onDone();
     sendPanelRerender();
   }
   const cancelBtn = panel.querySelector('[data-act="cancelSend"]');
@@ -3330,12 +3601,20 @@ function buildSendPanel(message) {
         }
         schedule.datetimes = scheduleDatetimes.slice();
       }
+      const duplicate = (message.schedules || []).find(
+        (s) => s.id !== editingScheduleId && scheduleDuplicatesExisting(schedule, s)
+      );
+      if (duplicate) {
+        showToast('This message already has an identical schedule (same targets and timing) — change something like the time or the target list, or edit the existing one instead.', 'error');
+        return;
+      }
       const res = await call('saveSchedule', { messageId: message.id, schedule });
       if (!res.ok) {
         showToast(res.error || 'Could not save schedule.', 'error');
         return;
       }
       resetScheduleEditor();
+      if (onDone) onDone();
       // refresh(), not renderMessages() — the schedule was just written to
       // storage, and STATE here is still the pre-save copy. Every other
       // schedule mutation (toggle/run/delete, below) already does this;
@@ -3524,7 +3803,10 @@ function buildSendPanel(message) {
 // uses, just pointed at whichever message is picked here; a campaign
 // created/edited from this tab is the same object you'd see in that
 // message's own Send panel, not a copy.
-let campaignPickerOpen = false;
+// Defaults open — this tab's whole purpose is picking a message to
+// schedule, so making that visible only after a "+" click just hides the
+// one thing there is to do here.
+let campaignPickerOpen = true;
 
 function renderCampaignsTab() {
   const select = document.getElementById('campaignMessageSelect');
@@ -3547,7 +3829,23 @@ function renderCampaignsTab() {
   editorContainer.innerHTML = '';
   if (message) {
     sendPanelRerender = renderCampaignsTab; // this mount belongs to the Campaigns tab, not Messages
-    editorContainer.appendChild(buildSendPanel(message));
+    editorContainer.appendChild(
+      buildSendPanel(message, {
+        scheduleOnly: true,
+        onDone: () => {
+          // Saved or cancelled — collapse back to the picker instead of
+          // staying pinned open on whatever message was just being edited.
+          // campaignPickerOpen was flipped to false the moment a message got
+          // picked (see the campaignMessageSelect "change" handler below) so
+          // the picker would hide while the editor took over its spot; that
+          // never got flipped back, so closing the editor landed on the old
+          // fully-collapsed card instead of the picker being visible again.
+          campaignEditorMessageId = null;
+          campaignPickerOpen = true;
+          document.getElementById('campaignMessageSelect').value = '';
+        }
+      })
+    );
   }
 
   renderCampaignsList(sortedMessages);
@@ -4004,6 +4302,25 @@ document.getElementById('listSearchInput').addEventListener('input', (e) => {
   listSearchQuery = e.target.value.trim().toLowerCase();
   renderListBuilder();
 });
+// Enter toggles the first filtered chat's checkbox (checks it if it was
+// unchecked, unchecks it if it was already checked — same as clicking it
+// yourself) and clears the search box, ready for the next name to type.
+// Same "search, Enter, it's picked" shortcut the live chat-search dropdown
+// elsewhere already gives (see handleListKeyNav), just adapted for a plain
+// checklist instead of a floating dropdown (there's no separate "option"
+// to click here, so this drives the same checkbox + change event a manual
+// click would).
+document.getElementById('listSearchInput').addEventListener('keydown', (e) => {
+  if (e.key !== 'Enter') return;
+  e.preventDefault();
+  const firstCheck = document.querySelector('#listBuilderChecklist .list-builder-check');
+  if (!firstCheck) return;
+  firstCheck.checked = !firstCheck.checked;
+  firstCheck.dispatchEvent(new Event('change'));
+  listSearchQuery = '';
+  e.target.value = '';
+  renderListBuilder();
+});
 
 function filteredChatSource() {
   const all = Array.from(chatSource.values());
@@ -4013,12 +4330,13 @@ function filteredChatSource() {
   return filtered.sort((a, b) => a.name.localeCompare(b.name));
 }
 
-document.getElementById('selectAllBtn').addEventListener('click', () => {
-  for (const c of filteredChatSource()) selectedWaIds.add(c.waId);
-  renderListBuilder();
-});
-document.getElementById('deselectAllBtn').addEventListener('click', () => {
-  for (const c of filteredChatSource()) selectedWaIds.delete(c.waId);
+document.getElementById('selectAllCheck').addEventListener('change', (e) => {
+  const visible = filteredChatSource();
+  if (e.target.checked) {
+    for (const c of visible) selectedWaIds.add(c.waId);
+  } else {
+    for (const c of visible) selectedWaIds.delete(c.waId);
+  }
   renderListBuilder();
 });
 
@@ -4031,9 +4349,14 @@ document.getElementById('extractGroupContactsBtn').addEventListener('click', asy
     return;
   }
   const btn = document.getElementById('extractGroupContactsBtn');
+  // Icon-only now (no .btn-label span) — setBtnLabel's fallback would wipe
+  // out the svg via textContent, so progress goes on the tooltip instead.
+  const idleTooltip = btn.dataset.tooltip;
   btn.disabled = true;
-  await downloadBulkGroupMembersCsv(groups, (done, total) => setBtnLabel(btn, `Extracting ${done}/${total}…`));
-  setBtnLabel(btn, 'Extract contacts');
+  await downloadBulkGroupMembersCsv(groups, (done, total) => {
+    btn.dataset.tooltip = `Extracting ${done}/${total}…`;
+  });
+  btn.dataset.tooltip = idleTooltip;
   btn.disabled = false;
 });
 
@@ -4054,17 +4377,36 @@ function renderListBuilder() {
           c.type === 'group'
             ? `<button class="icon-btn small-icon-btn" data-act="exportMembers" data-wa-id="${escapeHtml(c.waId)}" data-name="${escapeHtml(c.name)}" type="button" data-tooltip="Export this group's members to CSV">${EXPORT_ICON_SVG}</button>`
             : '';
-        return `<div class="list-check-row">
+        // Same "next to, not inside, the label" placement as exportBtn, for
+        // the same reason — copies the real WhatsApp chat id (a group has
+        // no phone number at all, so this is the only unique identifier
+        // visible for it anywhere in this popup).
+        const copyIdBtn = `<button class="icon-btn small-icon-btn qs-copy-id-btn" data-act="copyWaId" data-wa-id="${escapeHtml(c.waId)}" type="button" data-tooltip="Copy WhatsApp ID: ${escapeHtml(c.waId)}">${COPY_ICON_SVG}</button>`;
+        return `<div class="chat-pick-row">
           <label class="list-check-label"><input type="checkbox" class="list-builder-check" value="${escapeHtml(c.waId)}" ${selectedWaIds.has(c.waId) ? 'checked' : ''}/> ${escapeHtml(c.name)}${numberSuffix} <span class="badge badge-${c.type}">${c.type}</span>${unsavedBadge}</label>
+          ${copyIdBtn}
           ${exportBtn}
         </div>`;
       })
       .join('') || '<span class="hint">Scan or add a contact above first.</span>';
+  function updateSelectAllCheckState() {
+    const selectAllCheck = document.getElementById('selectAllCheck');
+    const selectedInView = visible.filter((c) => selectedWaIds.has(c.waId)).length;
+    selectAllCheck.checked = visible.length > 0 && selectedInView === visible.length;
+    selectAllCheck.indeterminate = selectedInView > 0 && selectedInView < visible.length;
+    document.getElementById('selectedCount').textContent = `(${selectedWaIds.size})`;
+  }
   box.querySelectorAll('.list-builder-check').forEach((cb) => {
     cb.addEventListener('change', () => {
       if (cb.checked) selectedWaIds.add(cb.value);
       else selectedWaIds.delete(cb.value);
-      document.getElementById('selectedCount').textContent = `${selectedWaIds.size} selected`;
+      updateSelectAllCheckState();
+    });
+  });
+  box.querySelectorAll('[data-act="copyWaId"]').forEach((btn) => {
+    btn.addEventListener('click', (e) => {
+      e.preventDefault();
+      copyToClipboard(btn.dataset.waId, 'WhatsApp ID');
     });
   });
   box.querySelectorAll('[data-act="exportMembers"]').forEach((btn) => {
@@ -4076,7 +4418,7 @@ function renderListBuilder() {
       b.disabled = false;
     });
   });
-  document.getElementById('selectedCount').textContent = `${selectedWaIds.size} selected`;
+  updateSelectAllCheckState();
 }
 
 // ---------- smart lists (a filter over the contacts database instead of a
@@ -4453,7 +4795,7 @@ function renderContactsList() {
     } else if (contactStatusFilter !== 'all' && c.status !== contactStatusFilter) {
       return false;
     }
-    if (q && !`${c.name} ${c.number || ''}`.toLowerCase().includes(q)) return false;
+    if (q && !`${c.name} ${c.number || ''} ${c.waId || ''}`.toLowerCase().includes(q)) return false;
     return true;
   });
   ul.innerHTML = '';
@@ -4465,6 +4807,7 @@ function renderContactsList() {
       <div class="item-text">
         <b>${escapeHtml(c.name)}</b><br/>
         <span class="contact-row-ph">${escapeHtml(c.number || '')}</span>
+        <span class="contact-row-waid" data-tooltip="WhatsApp chat ID">${escapeHtml(c.waId || '')}</span>
         <div class="contact-row-meta">
           <span class="status-pill" data-status="${escapeHtml(c.status)}">${escapeHtml(c.status)}</span>
           ${tagsHtml}
@@ -4472,10 +4815,12 @@ function renderContactsList() {
       </div>
       <div class="item-actions">
         ${fu ? `<span class="contact-row-followup ${fu.cls}">${fu.text}</span>` : ''}
+        <button class="icon-btn small-icon-btn qs-copy-id-btn" data-act="copyWaId" type="button" data-tooltip="Copy WhatsApp ID">${COPY_ICON_SVG}</button>
         <button class="icon-btn small-icon-btn" data-act="open" type="button" data-tooltip="Open">${EDIT_ICON_SVG}</button>
       </div>
     </div>`;
     li.querySelector('[data-act="open"]').addEventListener('click', () => openContactDetail(c.id));
+    li.querySelector('[data-act="copyWaId"]').addEventListener('click', () => copyToClipboard(c.waId, 'WhatsApp ID'));
     ul.appendChild(li);
   }
 }
@@ -4484,6 +4829,16 @@ document.getElementById('contactSearchInput').addEventListener('input', (e) => {
   contactSearchQuery = e.target.value;
   document.getElementById('contactSearchClearBtn').classList.toggle('visible', contactSearchQuery.length > 0);
   renderContactsList();
+});
+// Same "search then Enter picks the first result" shortcut as the chat
+// checklist/live-search dropdowns — this tab has no bulk-select UI, so
+// "picked" here means opening that contact's own detail panel instead.
+document.getElementById('contactSearchInput').addEventListener('keydown', (e) => {
+  if (e.key !== 'Enter') return;
+  const openBtn = document.querySelector('#contactsListEl li [data-act="open"]');
+  if (!openBtn) return;
+  e.preventDefault();
+  openBtn.click();
 });
 document.getElementById('contactSearchClearBtn').addEventListener('click', () => {
   contactSearchQuery = '';
@@ -4570,6 +4925,7 @@ function renderContactDetailModal() {
   }
   document.getElementById('contactDetailName').textContent = c.name;
   document.getElementById('contactDetailNumber').textContent = c.number || '';
+  document.getElementById('contactDetailWaId').textContent = c.waId || '';
 
   const statuses = STATE.contactStatuses && STATE.contactStatuses.length ? STATE.contactStatuses : CONTACT_STATUSES;
   const curIdx = statuses.indexOf(c.status);
@@ -4667,6 +5023,11 @@ document.getElementById('contactDetailSendBtn').addEventListener('click', () => 
   showToast(`Ready to send to ${c.name} — type your message and hit send.`, 'info');
 });
 
+document.getElementById('contactDetailCopyWaIdBtn').addEventListener('click', () => {
+  const c = findContact(openContactId);
+  if (!c) return;
+  copyToClipboard(c.waId, 'WhatsApp ID');
+});
 document.getElementById('contactDetailOpenChatBtn').addEventListener('click', async () => {
   const c = findContact(openContactId);
   if (!c) return;
@@ -4883,6 +5244,171 @@ document.getElementById('bulkDeleteForEveryoneBtn').addEventListener('click', as
   refresh();
 });
 
+// ============ INCOMING (real-time WhatsApp activity feed) ============
+// A read-only view over STATE.incomingActivityLog (background.js's
+// appendIncomingActivity) — every chat.new_message event this extension's
+// live WPP hook has actually seen, whether or not auto-reply or the
+// Nuskomate relay did anything with it. Purely diagnostic: answers "is this
+// really receiving live events, including media, from every chat" without
+// having to trust that silently.
+const INCOMING_TYPE_LABELS = {
+  chat: 'Text',
+  image: 'Image',
+  video: 'Video',
+  ptt: 'Voice note',
+  audio: 'Audio',
+  document: 'Document',
+  sticker: 'Sticker',
+  vcard: 'Contact card',
+  multi_vcard: 'Contact cards',
+  location: 'Location',
+  groups_v4_invite: 'Group invite'
+};
+const INCOMING_MEDIA_TYPES = new Set(['image', 'video', 'ptt', 'audio', 'document', 'sticker']);
+function incomingTypeLabel(type) {
+  return INCOMING_TYPE_LABELS[type] || type || 'Other';
+}
+
+let incomingSearchQuery = '';
+let incomingTypeFilterValue = 'all';
+let incomingShowMine = true;
+
+function updateIncomingSearchClearBtn() {
+  document.getElementById('incomingSearchClearBtn').classList.toggle('visible', incomingSearchQuery.length > 0);
+}
+
+chrome.storage.local.get(['incomingSearchQuery', 'incomingTypeFilter', 'incomingShowMine'], (data) => {
+  if (data.incomingSearchQuery) {
+    incomingSearchQuery = data.incomingSearchQuery;
+    document.getElementById('incomingSearchInput').value = incomingSearchQuery;
+  }
+  if (data.incomingTypeFilter) {
+    incomingTypeFilterValue = data.incomingTypeFilter;
+    document.getElementById('incomingTypeFilter').value = incomingTypeFilterValue;
+  }
+  if (data.incomingShowMine !== undefined) {
+    incomingShowMine = data.incomingShowMine;
+    document.getElementById('incomingShowMineCheck').checked = incomingShowMine;
+  }
+  updateIncomingSearchClearBtn();
+  renderIncomingTab();
+});
+document.getElementById('incomingSearchInput').addEventListener('input', (e) => {
+  incomingSearchQuery = e.target.value;
+  chrome.storage.local.set({ incomingSearchQuery });
+  updateIncomingSearchClearBtn();
+  renderIncomingTab();
+});
+document.getElementById('incomingSearchClearBtn').addEventListener('click', () => {
+  incomingSearchQuery = '';
+  document.getElementById('incomingSearchInput').value = '';
+  chrome.storage.local.set({ incomingSearchQuery });
+  updateIncomingSearchClearBtn();
+  renderIncomingTab();
+});
+document.getElementById('incomingTypeFilter').addEventListener('change', (e) => {
+  incomingTypeFilterValue = e.target.value;
+  chrome.storage.local.set({ incomingTypeFilter: incomingTypeFilterValue });
+  renderIncomingTab();
+});
+document.getElementById('incomingShowMineCheck').addEventListener('change', (e) => {
+  incomingShowMine = e.target.checked;
+  chrome.storage.local.set({ incomingShowMine });
+  renderIncomingTab();
+});
+document.getElementById('clearIncomingBtn').addEventListener('click', async () => {
+  const ok = await showConfirmDialog(
+    'Clear the incoming activity feed? This only clears this local record — nothing on WhatsApp itself.',
+    { confirmText: 'Clear', danger: true }
+  );
+  if (!ok) return;
+  await call('clearIncomingActivity');
+  refresh();
+});
+
+// A real "is the underlying WPP hook actually installed" signal (see
+// page-bridge.js's installExternalRelayHook/relayHookReady), not just
+// inferred from having happened to see a message yet — that distinction
+// matters because "no traffic" and "broken" otherwise look identical from
+// an empty feed.
+function renderRelayHookStatus() {
+  const dot = document.getElementById('relayHookStatusDot');
+  const text = document.getElementById('relayHookStatusText');
+  if (!dot || !text) return;
+  const st = STATE.relayHookStatus || {};
+  if (st.installedAt) {
+    dot.className = 'wa-status-dot ready';
+    text.textContent = `Live hook active · installed ${relativeTime(st.installedAt)}`;
+  } else {
+    dot.className = 'wa-status-dot off';
+    text.textContent = 'Not confirmed active yet — open/reload a web.whatsapp.com tab';
+  }
+}
+
+function renderIncomingTab() {
+  renderRelayHookStatus();
+  const ul = document.getElementById('incomingActivityList');
+  if (!ul) return;
+  const list = STATE.incomingActivityLog || [];
+  const q = incomingSearchQuery.trim().toLowerCase();
+  const visible = list.filter((e) => {
+    if (!incomingShowMine && e.fromMe) return false;
+    if (incomingTypeFilterValue !== 'all' && e.messageType !== incomingTypeFilterValue) return false;
+    if (q && !`${e.chatName} ${e.text}`.toLowerCase().includes(q)) return false;
+    return true;
+  });
+  if (visible.length === 0) {
+    ul.innerHTML = `<li class="hint">${
+      list.length === 0
+        ? 'Nothing seen yet — open a WhatsApp Web tab and this fills in live as messages arrive, across every chat.'
+        : 'Nothing matches this search/filter.'
+    }</li>`;
+    return;
+  }
+  ul.innerHTML = visible
+    .map((e) => {
+      const isMedia = INCOMING_MEDIA_TYPES.has(e.messageType);
+      const preview = e.text
+        ? escapeHtml(e.text)
+        : isMedia
+          ? `<span class="muted">[${incomingTypeLabel(e.messageType).toLowerCase()}, no caption]</span>`
+          : '<span class="muted">[no text]</span>';
+      return `<li class="item-row incoming-row">
+        <div class="item-text">
+          <b>${escapeHtml(e.chatName)}</b>
+          <span class="badge badge-${e.isGroup ? 'group' : 'contact'}">${e.isGroup ? 'group' : 'contact'}</span>
+          <span class="incoming-type-badge">${incomingTypeLabel(e.messageType)}</span>
+          ${e.fromMe ? '<span class="incoming-mine-badge">You</span>' : ''}
+          <br/>
+          ${preview}
+          <div class="incoming-meta muted">${new Date(e.timestamp).toLocaleString()}</div>
+        </div>
+        <div class="item-actions">
+          ${
+            isMedia && e.messageId
+              ? `<button class="icon-btn small-icon-btn" data-act="viewIncomingMedia" data-msg-id="${escapeHtml(e.messageId)}" type="button" data-tooltip="Download and view this attachment">
+                  <svg viewBox="0 0 24 24" width="14" height="14"><path fill="currentColor" d="M19 19H5V5h7V3H5c-1.1 0-2 .9-2 2v14c0 1.1.9 2 2 2h14c1.1 0 2-.9 2-2v-7h-2v7zM14 3v2h3.59l-9.83 9.83 1.41 1.41L19 6.41V10h2V3h-7z"/></svg>
+                </button>`
+              : ''
+          }
+        </div>
+      </li>`;
+    })
+    .join('');
+  ul.querySelectorAll('[data-act="viewIncomingMedia"]').forEach((btn) => {
+    btn.addEventListener('click', async () => {
+      btn.disabled = true;
+      const res = await call('fetchMessageMedia', { messageId: btn.dataset.msgId });
+      btn.disabled = false;
+      if (!res.ok) {
+        showToast(res.error || 'Could not fetch that attachment.', 'error');
+        return;
+      }
+      chrome.tabs.create({ url: res.dataUrl });
+    });
+  });
+}
+
 // ============ SETTINGS ============
 function renderSettings() {
   renderActivationCard();
@@ -5006,27 +5532,35 @@ function renderActivationCard() {
   text.dataset.tooltip = cs.lastError || (cs.lastAt ? `Cloud copy last changed ${new Date(cs.lastAt).toLocaleString()}` : '');
 }
 
-// Nuskomate's connection to this extension (see background.js's
-// onConnectExternal/onMessageExternal) — purely informational, this popup
-// never talks to Nuskomate itself. `connected` reflects the live port right
-// now; lastMessageAt/lastRequestAt keep showing recent activity even right
-// after a service worker restart silently dropped that port (see
-// setNuskomateStatus's own comment in background.js).
+// Nuskomate's reachability via this extension's external API (see
+// background.js's NUSKOMATE_EXTENSION_ID section) — purely informational,
+// this popup never talks to Nuskomate itself beyond the reachability ping.
+// There's no persistent connection anymore (one-shot chrome.runtime.sendMessage
+// in both directions — a long-lived port didn't survive MV3's ~30s service
+// worker idle timeout on either side, which produced a connect/disconnect
+// cycle roughly every 30 seconds with a real risk of a message getting lost
+// in the gap). So "reachable" here just means the most recent thing this
+// extension tried — a pushed message, or the once-per-startup ping —
+// actually got a response instead of erroring.
 function renderNuskomateStatus() {
   const dot = document.getElementById('nuskomateStatusDot');
   const text = document.getElementById('nuskomateStatusText');
   if (!dot || !text) return;
   const st = STATE.nuskomateStatus || {};
-  const lastActivity = Math.max(st.lastMessageAt || 0, st.lastRequestAt || 0);
-  if (st.connected) {
-    dot.className = 'wa-status-dot ready';
-    text.textContent = lastActivity ? `Connected · last activity ${relativeTime(lastActivity)}` : `Connected · ${relativeTime(st.connectedAt)}`;
-  } else if (st.disconnectedAt || lastActivity) {
-    dot.className = 'wa-status-dot not-ready';
-    text.textContent = `Not connected · last seen ${relativeTime(Math.max(st.disconnectedAt || 0, lastActivity))}`;
-  } else {
+  const lastActivity = Math.max(st.lastMessageAt || 0, st.lastRequestAt || 0, st.lastPingAt || 0);
+  const lastKnownOk = (st.lastMessageAt || 0) >= (st.lastPingAt || 0) ? st.lastMessageOk : st.reachable;
+  if (!lastActivity) {
     dot.className = 'wa-status-dot off';
-    text.textContent = 'Never connected';
+    text.textContent = 'Never confirmed reachable';
+    text.dataset.tooltip = '';
+  } else if (lastKnownOk !== false) {
+    dot.className = 'wa-status-dot ready';
+    text.textContent = `Reachable · last activity ${relativeTime(lastActivity)}`;
+    text.dataset.tooltip = '';
+  } else {
+    dot.className = 'wa-status-dot not-ready';
+    text.textContent = `Not reachable · last tried ${relativeTime(lastActivity)}`;
+    text.dataset.tooltip = st.lastMessageError || st.lastPingError || '';
   }
 }
 
@@ -5248,14 +5782,7 @@ function renderKeys() {
         }
       </div>
     </div>`;
-    li.querySelector('[data-act="copy"]').addEventListener('click', async () => {
-      try {
-        await navigator.clipboard.writeText(k.key);
-        showToast('Key copied.', 'success');
-      } catch (_) {
-        showToast('Could not copy — select it and copy manually.', 'error');
-      }
-    });
+    li.querySelector('[data-act="copy"]').addEventListener('click', () => copyToClipboard(k.key, 'key'));
     const editBtn = li.querySelector('[data-act="edit"]');
     if (editBtn) editBtn.addEventListener('click', () => loadKeyForEdit(k));
     const resetBtn = li.querySelector('[data-act="reset"]');
@@ -5394,10 +5921,19 @@ document.getElementById('saveSettingsBtn').addEventListener('click', async () =>
 // what made checking chats in a long list feel like it kept jumping back to
 // the top on every click.
 const SELF_APPLIED_STORAGE_KEYS = new Set(['messageDraft', 'listSelections']);
+// incomingActivityLog can write several times a second in a busy group
+// chat — a full refresh() (re-rendering every tab's whole DOM) on each one
+// would make the rest of the popup feel laggy for no benefit while that tab
+// isn't even open. Just patch STATE and re-render the one tab that cares.
 chrome.storage.onChanged.addListener((changes, area) => {
   if (area !== 'local') return;
   const keys = Object.keys(changes);
   if (keys.length === 1 && SELF_APPLIED_STORAGE_KEYS.has(keys[0])) return;
+  if (keys.length === 1 && keys[0] === 'incomingActivityLog') {
+    STATE.incomingActivityLog = changes.incomingActivityLog.newValue || [];
+    renderIncomingTab();
+    return;
+  }
   refresh();
 });
 
@@ -5534,6 +6070,7 @@ async function checkWaStatusLive() {
 
 restoreDraft();
 renderMessageHfControl();
+renderFontStyleControl();
 refresh();
 // Each popup open: re-validate the cached key (catches one revoked while
 // the browser was closed) and check for changes other devices pushed. Both

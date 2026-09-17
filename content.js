@@ -30,6 +30,11 @@ document.addEventListener('wa-ext-notify', (event) => {
     chrome.runtime
       .sendMessage({ action: 'incomingMessage', chatId: detail.chatId, text: detail.text, isGroup: detail.isGroup, msgId: detail.msgId })
       .catch(() => {});
+  } else if (detail.type === 'relayHookReady') {
+    // page-bridge.js's installExternalRelayHook actually finished installing
+    // — see its own comment for why this exists (a real "installed" signal,
+    // not just inferring it from having happened to see a message yet).
+    chrome.runtime.sendMessage({ action: 'relayHookReady', at: detail.at }).catch(() => {});
   }
 });
 
@@ -188,6 +193,11 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
       } else if (msg.action === 'findContactByNumber') {
         const contact = await bridgeRequest('findContactByNumber', { number: msg.number }, 15000);
         sendResponse({ ok: true, contact });
+      } else if (msg.action === 'getChatExportData') {
+        // Generous timeout — a long chat's full history can genuinely take
+        // a while to load, same reasoning as getGroupAdminInfo's own cap.
+        const result = await bridgeRequest('getChatExportData', {}, 90000);
+        sendResponse({ ok: true, ...result });
       } else if (msg.action === 'getActiveChat') {
         const chat = await bridgeRequest('getActiveChat', {}, 10000);
         sendResponse({ ok: true, chat });
