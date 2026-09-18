@@ -2252,6 +2252,36 @@ chrome.runtime.onMessageExternal.addListener((msg, sender, sendResponse) => {
           sendResponse({ ok: true });
           break;
         }
+        // Full chat list (groups/contacts/communities + every open 1:1,
+        // including non-saved numbers) for Nuskomate's own "Feeding Chat"
+        // picker — Nuskomate does its own name filtering client-side, this
+        // just hands back everything, same generic-I/O split as the rest of
+        // this surface. Mirrors popup.js's own fetchLiveChatMap(): scope
+        // 'all' (groups/contacts/communities) plus scope 'chats' (every open
+        // 1:1, so a chat with someone not in the address book still shows
+        // up), merged by waId.
+        case 'getChats': {
+          const tab = await ensureWaTab();
+          const ready = await pingContentScript(tab.id);
+          if (!ready) {
+            sendResponse({ ok: false, error: 'WhatsApp Web tab is not ready (make sure you are logged in and the page finished loading).' });
+            break;
+          }
+          const [allRes, chatsRes] = await Promise.all([
+            sendToTab(tab.id, { action: 'listChats', scope: 'all' }, 25000),
+            sendToTab(tab.id, { action: 'listChats', scope: 'chats', contactFilter: 'all' }, 25000)
+          ]);
+          if ((!allRes || !allRes.ok) && (!chatsRes || !chatsRes.ok)) {
+            sendResponse({ ok: false, error: (allRes && allRes.error) || (chatsRes && chatsRes.error) || 'Could not reach WhatsApp Web.' });
+            break;
+          }
+          const map = new Map();
+          for (const c of [...((allRes && allRes.chats) || []), ...((chatsRes && chatsRes.chats) || [])]) {
+            if (c.waId) map.set(c.waId, { waId: c.waId, name: c.name, isGroup: c.type === 'group' });
+          }
+          sendResponse({ ok: true, chats: [...map.values()] });
+          break;
+        }
         case 'sendText':
         case 'sendMedia':
         case 'mentionInChat': {

@@ -127,9 +127,15 @@ full endpoint list and KV layout).
 `chrome.runtime.onMessageExternal` only (no `onConnectExternal`/persistent port anymore — see below),
 allow-listed to one sister extension ("Nuskomate", id in `NUSKOMATE_EXTENSION_ID`) via
 `externally_connectable` in `manifest.json`. Exposes a generic
-openChat/sendText/sendMedia/mentionInChat/getMessageMedia request/response surface reusing the same
-`ensureWaTab`/`pingContentScript`/`sendToTab` plumbing as the internal UI — deliberately generic, no
-awareness of what the external caller does with it. The push direction (new WhatsApp message → Nuskomate,
+openChat/sendText/sendMedia/mentionInChat/getMessageMedia/getChats request/response surface reusing the
+same `ensureWaTab`/`pingContentScript`/`sendToTab` plumbing as the internal UI — deliberately generic, no
+awareness of what the external caller does with it. `getChats` takes no payload and returns every
+group/contact/community plus every open 1:1 (including numbers not in the address book) as
+`{waId, name, isGroup}[]` — it's the same two-scope `listChats` call (`scope:'all'` +
+`scope:'chats', contactFilter:'all'`, merged by waId) popup.js's own `fetchLiveChatMap()` already makes for
+the Lists tab's live re-scan, just exposed externally and reshaped to Nuskomate's field names; Nuskomate
+does its own name-search filtering client-side against the result rather than this file taking a query
+param. The push direction (new WhatsApp message → Nuskomate,
 from `externalRelayMessage`) is a one-shot `chrome.runtime.sendMessage(NUSKOMATE_EXTENSION_ID, {type:
 'new-message', ...})`, NOT a long-lived port — a port was tried first but doesn't reliably survive either
 side's MV3 service worker being suspended after ~30s idle, which produced a connect/disconnect cycle
