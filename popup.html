@@ -534,11 +534,13 @@
       </div>
 
       <div class="panel-card">
-      <h3>External API (Nuskomate)</h3>
-      <p class="hint">A separate, allow-listed extension (Nuskomate) can read incoming WhatsApp messages and send through this extension's WhatsApp connection. This just shows whether it's actually reachable and using it.</p>
-      <div class="sync-status-row">
-        <span id="nuskomateStatusDot" class="wa-status-dot off"></span>
-        <span id="nuskomateStatusText" class="muted">Never confirmed reachable</span>
+      <h3>External API</h3>
+      <p class="hint">Other extensions on this list can read incoming WhatsApp messages and send through this extension's WhatsApp connection. Anything not listed is refused. To allow a new one, paste its extension ID (from its card in edge://extensions or chrome://extensions).</p>
+      <div id="externalClientsList"></div>
+      <div class="form-actions" style="margin-top:8px;">
+        <input type="text" id="externalClientName" placeholder="Name (e.g. CRM Bridge)" maxlength="40" style="flex:1; min-width:90px; margin:0;" />
+        <input type="text" id="externalClientId" placeholder="Extension ID (32 letters)" maxlength="32" spellcheck="false" autocomplete="off" style="flex:2; min-width:120px; margin:0;" />
+        <button id="externalClientAddBtn" class="primary" type="button">Add</button>
       </div>
       </div>
 

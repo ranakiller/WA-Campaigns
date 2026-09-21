@@ -125,8 +125,13 @@ full endpoint list and KV layout).
 ### External API surface (`background.js`, bottom section)
 
 `chrome.runtime.onMessageExternal` only (no `onConnectExternal`/persistent port anymore — see below),
-allow-listed to one sister extension ("Nuskomate", id in `NUSKOMATE_EXTENSION_ID`) via
-`externally_connectable` in `manifest.json`. Exposes a generic
+gated by a **user-editable allow-list** (`chrome.storage.local.externalClients`, `{id, name}[]`, edited in
+Settings → External API, local-only/never synced; seeded from `DEFAULT_EXTERNAL_CLIENTS` = Nuskomate + CRM
+Bridge until first edited). `manifest.json`'s `externally_connectable.ids` is deliberately `["*"]` because
+Chrome fixes that list at install time and can't be changed at runtime — the real gate is the sender-id
+check at the top of the `onMessageExternal` listener (an unlisted id gets an error reply telling it to be
+added), so **never remove that check**. Every listed extension gets every live-message push and can call
+every action below (plus a bare `ping`); a send's Log entry is labeled with the caller's name. Exposes a generic
 openChat/sendText/sendMedia/mentionInChat/getMessageMedia/getChats request/response surface reusing the
 same `ensureWaTab`/`pingContentScript`/`sendToTab` plumbing as the internal UI — deliberately generic, no
 awareness of what the external caller does with it. `getChats` takes no payload and returns every
@@ -135,19 +140,20 @@ group/contact/community plus every open 1:1 (including numbers not in the addres
 `scope:'chats', contactFilter:'all'`, merged by waId) popup.js's own `fetchLiveChatMap()` already makes for
 the Lists tab's live re-scan, just exposed externally and reshaped to Nuskomate's field names; Nuskomate
 does its own name-search filtering client-side against the result rather than this file taking a query
-param. The push direction (new WhatsApp message → Nuskomate,
-from `externalRelayMessage`) is a one-shot `chrome.runtime.sendMessage(NUSKOMATE_EXTENSION_ID, {type:
+param. The push direction (new WhatsApp message → each listed extension,
+from `externalRelayMessage`) is a one-shot `chrome.runtime.sendMessage(client.id, {type:
 'new-message', ...})`, NOT a long-lived port — a port was tried first but doesn't reliably survive either
 side's MV3 service worker being suspended after ~30s idle, which produced a connect/disconnect cycle
 roughly every 30 seconds in practice with a real risk of a message landing in the gap and being silently
 dropped (the old code only relayed `if (nuskomatePort)`). A one-shot message doesn't have that failure
 mode: Chrome wakes a suspended service worker to deliver it regardless. Reachability is tracked in
-`chrome.storage.local.nuskomateStatus` (`setNuskomateStatus()`, updated whenever a push/ping/request
-happens, keyed by whether it actually got a response — `reachable`/`lastPingAt`/`lastMessageOk`/
-`lastMessageAt`/`lastRequestAt`) and surfaced in `getState()` — rendered as a status dot in the popup's
-Settings tab (`renderNuskomateStatus()` in `popup.js`), purely read-only/informational. A one-shot
-reachability ping (`{type:'ping'}`) fires once each time this service worker itself starts, since there's
-no persistent connection to check the state of at any other time.
+`chrome.storage.local.externalStatus` (per client id; `setExternalStatus()`, updated whenever a
+push/ping/request happens, keyed by whether it actually got a response — `reachable`/`lastPingAt`/
+`lastMessageOk`/`lastMessageAt`/`lastRequestAt`) and surfaced in `getState()` — rendered as one status row
+per extension in the popup's Settings tab (`renderExternalClients()` in `popup.js`, with Test/Remove buttons
+and an add-by-ID form). A one-shot reachability ping (`{type:'ping'}`, `pingExternalClient()`) fires for
+every listed extension each time this service worker itself starts (and on Test/Add), since there's no
+persistent connection to check the state of at any other time.
 
 Sibling repo `../nuskoMate` is the actual Nuskomate extension consuming this API
 (`modules/whatsapp-automation.js` holds its side — a single `chrome.runtime.onMessageExternal` listener,

@@ -262,9 +262,9 @@ store review, for the same ToS reasons noted above).
   header/footer. When set, the header and footer are added to *every*
   item/thread of every sent message — text items in the text, media items
   in the caption — each separated from that item's own content by a blank
-  line. Leave either empty to skip it. An **External API (Nuskomate)** card
-  shows a live green/red/gray dot for whether the allow-listed Nuskomate
-  extension (see "How it works technically" below) was actually reachable
+  line. Leave either empty to skip it. An **External API** card
+  lists each allow-listed extension (add/remove by extension ID) with a live green/red/gray dot for whether it
+  (see "How it works technically" below) was actually reachable
   the last time this extension pushed it a message or pinged it, plus a
   relative timestamp for its most recent activity — purely informational,
   this extension only initiates the once-per-startup reachability ping
@@ -409,8 +409,9 @@ internal data/functions instead of the rendered page.
   `activate`/`deactivate`/`syncNow`/`admin*` messages and reads
   `license`/`cloudSync`/`settings.syncEnabled` off `getState()` the same way
   it reads everything else.
-- **External API** — `manifest.json`'s `externally_connectable` allow-lists
-  exactly one sister extension (Nuskomate, by its fixed extension id) to
+- **External API** — an allow-list you edit in Settings → **External API**
+  (name + extension ID, seeded with Nuskomate and CRM Bridge) decides which
+  sister extensions may
   read incoming WhatsApp messages and send through this extension's own
   WhatsApp connection, instead of building its own. Handled entirely in
   `background.js` via one-shot `chrome.runtime.sendMessage`/
@@ -424,13 +425,14 @@ internal data/functions instead of the rendered page.
   a connect/disconnect cycle roughly every 30 seconds in practice, with a
   real risk of a message arriving in the brief gap being silently dropped.
   A one-shot message doesn't have that problem: Chrome wakes a suspended
-  service worker to deliver it either way. The Settings tab's **External API
-  (Nuskomate)** card is a read-only status light reflecting the most recent
-  push or the once-per-startup reachability ping (see above); if it shows
-  "not reachable," check that Nuskomate is actually installed/enabled and
-  that whatever copy of it Chrome has loaded includes this bridge code
-  (`modules/whatsapp-automation.js`'s `onMessageExternal` listener) — reload
-  the Nuskomate extension after any change to its source. Every message
+  service worker to deliver it either way. The Settings tab's **External API**
+  card lists each allowed extension with a status light reflecting the most
+  recent push or reachability ping (Test button re-pings on demand; Remove
+  revokes access; the form below adds a new one by ID — no code change or
+  reload needed). If one shows "not reachable," check that it's actually
+  installed/enabled and that whatever copy of it Chrome has loaded includes
+  its side of the bridge (an `onMessageExternal` listener) — reload that
+  extension after any change to its source. Every message
   Nuskomate actually sends (`sendText`/`sendMedia`/`mentionInChat`) is logged
   to the **Log tab** exactly like any other send, labeled `Nuskomate: <chat>`
   — searching "Nuskomate" there shows only these. A successful one gets the

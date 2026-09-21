@@ -126,7 +126,7 @@ chrome.runtime.onMessage.addListener((msg) => {
   }
 });
 
-let STATE = { fetchedChats: [], lists: [], messages: [], log: [], settings: {}, activeRuns: {}, contacts: [], contactStatuses: [], nuskomateStatus: {}, incomingActivityLog: [], relayHookStatus: {} };
+let STATE = { fetchedChats: [], lists: [], messages: [], log: [], settings: {}, activeRuns: {}, contacts: [], contactStatuses: [], externalClients: [], externalStatus: {}, incomingActivityLog: [], relayHookStatus: {} };
 // Mirrors background.js's own CONTACT_STATUSES — used as a fallback before
 // the first getState() response lands (STATE.contactStatuses after that).
 const CONTACT_STATUSES = ['Lead', 'Contacted', 'Customer', 'Cold'];
@@ -5622,7 +5622,7 @@ async function sendIncomingReply(entry) {
 // ============ SETTINGS ============
 function renderSettings() {
   renderActivationCard();
-  renderNuskomateStatus();
+  renderExternalClients();
   const s = STATE.settings;
   document.getElementById('jitterMinutes').value = s.jitterMinutes ?? 4;
   const [min, max] = s.defaultDelayBetweenMsMs || [20000, 45000];
@@ -5742,37 +5742,121 @@ function renderActivationCard() {
   text.dataset.tooltip = cs.lastError || (cs.lastAt ? `Cloud copy last changed ${new Date(cs.lastAt).toLocaleString()}` : '');
 }
 
-// Nuskomate's reachability via this extension's external API (see
-// background.js's NUSKOMATE_EXTENSION_ID section) — purely informational,
-// this popup never talks to Nuskomate itself beyond the reachability ping.
-// There's no persistent connection anymore (one-shot chrome.runtime.sendMessage
-// in both directions — a long-lived port didn't survive MV3's ~30s service
-// worker idle timeout on either side, which produced a connect/disconnect
-// cycle roughly every 30 seconds with a real risk of a message getting lost
-// in the gap). So "reachable" here just means the most recent thing this
-// extension tried — a pushed message, or the once-per-startup ping —
-// actually got a response instead of erroring.
-function renderNuskomateStatus() {
-  const dot = document.getElementById('nuskomateStatusDot');
-  const text = document.getElementById('nuskomateStatusText');
-  if (!dot || !text) return;
-  const st = STATE.nuskomateStatus || {};
+// The External API allow-list (see background.js's getExternalClients) and
+// each listed extension's reachability — the list is editable right here, so
+// a new extension can be allowed without touching code. Status is purely
+// informational: there's no persistent connection (one-shot
+// chrome.runtime.sendMessage in both directions — a long-lived port didn't
+// survive MV3's ~30s service worker idle timeout on either side), so
+// "reachable" just means the most recent thing this extension tried — a
+// pushed message, or a ping — actually got a response instead of erroring.
+function externalClientStatus(st) {
+  st = st || {};
   const lastActivity = Math.max(st.lastMessageAt || 0, st.lastRequestAt || 0, st.lastPingAt || 0);
   const lastKnownOk = (st.lastMessageAt || 0) >= (st.lastPingAt || 0) ? st.lastMessageOk : st.reachable;
-  if (!lastActivity) {
-    dot.className = 'wa-status-dot off';
-    text.textContent = 'Never confirmed reachable';
-    text.dataset.tooltip = '';
-  } else if (lastKnownOk !== false) {
-    dot.className = 'wa-status-dot ready';
-    text.textContent = `Reachable · last activity ${relativeTime(lastActivity)}`;
-    text.dataset.tooltip = '';
-  } else {
-    dot.className = 'wa-status-dot not-ready';
-    text.textContent = `Not reachable · last tried ${relativeTime(lastActivity)}`;
-    text.dataset.tooltip = st.lastMessageError || st.lastPingError || '';
+  if (!lastActivity) return { cls: 'off', text: 'Never confirmed reachable', tip: '' };
+  if (lastKnownOk !== false) return { cls: 'ready', text: `Reachable · last activity ${relativeTime(lastActivity)}`, tip: '' };
+  return { cls: 'not-ready', text: `Not reachable · last tried ${relativeTime(lastActivity)}`, tip: st.lastMessageError || st.lastPingError || '' };
+}
+
+async function saveExternalClients(clients) {
+  const res = await call('saveExternalClients', { clients });
+  if (!res || !res.ok) {
+    showToast((res && res.error) || 'Could not save the allowed extensions.', 'error');
+    return false;
+  }
+  refresh();
+  return true;
+}
+
+function renderExternalClients() {
+  const host = document.getElementById('externalClientsList');
+  if (!host) return;
+  host.innerHTML = '';
+  const clients = STATE.externalClients || [];
+  if (!clients.length) {
+    const empty = document.createElement('div');
+    empty.className = 'muted';
+    empty.textContent = 'No extensions allowed — everything is refused.';
+    host.appendChild(empty);
+    return;
+  }
+  for (const client of clients) {
+    const status = externalClientStatus((STATE.externalStatus || {})[client.id]);
+    const row = document.createElement('div');
+    row.className = 'sync-status-row';
+    row.style.cssText = 'align-items:flex-start; gap:8px; margin-bottom:8px;';
+
+    const dot = document.createElement('span');
+    dot.className = `wa-status-dot ${status.cls}`;
+    dot.style.marginTop = '5px';
+
+    const info = document.createElement('div');
+    info.style.cssText = 'flex:1; min-width:0;';
+    const name = document.createElement('div');
+    name.textContent = client.name;
+    name.style.fontWeight = '600';
+    const stat = document.createElement('div');
+    stat.className = 'muted';
+    stat.textContent = status.text;
+    if (status.tip) stat.dataset.tooltip = status.tip;
+    const idLine = document.createElement('div');
+    idLine.className = 'muted';
+    idLine.style.cssText = 'overflow:hidden; text-overflow:ellipsis; white-space:nowrap;';
+    idLine.textContent = client.id;
+    info.append(name, stat, idLine);
+
+    const testBtn = document.createElement('button');
+    testBtn.type = 'button';
+    testBtn.className = 'icon-btn small-icon-btn';
+    testBtn.dataset.tooltip = 'Test connection';
+    testBtn.setAttribute('aria-label', 'Test connection');
+    testBtn.innerHTML =
+      '<svg viewBox="0 0 24 24" width="14" height="14"><path fill="currentColor" d="M17.65 6.35A7.958 7.958 0 0 0 12 4c-4.42 0-7.99 3.58-7.99 8s3.57 8 7.99 8c3.73 0 6.84-2.55 7.73-6h-2.08c-.82 2.33-3.04 4-5.65 4-3.31 0-6-2.69-6-6s2.69-6 6-6c1.66 0 3.14.69 4.22 1.78L13 11h7V4l-2.35 2.35z"/></svg>';
+    testBtn.addEventListener('click', async () => {
+      testBtn.disabled = true;
+      await call('pingExternalClient', { id: client.id });
+      testBtn.disabled = false;
+      refresh();
+    });
+
+    const removeBtn = document.createElement('button');
+    removeBtn.type = 'button';
+    removeBtn.className = 'icon-btn small-icon-btn';
+    removeBtn.dataset.tooltip = 'Remove — this extension will be refused';
+    removeBtn.setAttribute('aria-label', 'Remove');
+    removeBtn.textContent = '×';
+    removeBtn.addEventListener('click', () => saveExternalClients(clients.filter((c) => c.id !== client.id)));
+
+    row.append(dot, info, testBtn, removeBtn);
+    host.appendChild(row);
   }
 }
+
+function addExternalClientFromInputs() {
+  const nameEl = document.getElementById('externalClientName');
+  const idEl = document.getElementById('externalClientId');
+  const id = idEl.value.trim().toLowerCase();
+  if (!id) {
+    idEl.focus();
+    return;
+  }
+  const name = nameEl.value.trim();
+  saveExternalClients([...(STATE.externalClients || []), { id, name }]).then((ok) => {
+    if (!ok) return;
+    nameEl.value = '';
+    idEl.value = '';
+  });
+}
+document.getElementById('externalClientAddBtn').addEventListener('click', addExternalClientFromInputs);
+['externalClientName', 'externalClientId'].forEach((elId) =>
+  document.getElementById(elId).addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') {
+      e.preventDefault();
+      addExternalClientFromInputs();
+    }
+  })
+);
 
 document.getElementById('syncEnabledCheck').addEventListener('change', async (e) => {
   await call('saveSettings', { settings: { syncEnabled: e.target.checked } });

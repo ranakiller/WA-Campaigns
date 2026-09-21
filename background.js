@@ -186,7 +186,7 @@ async function getState() {
     'activeRuns',
     'cloudSync',
     'contacts',
-    'nuskomateStatus',
+    'externalStatus',
     'incomingActivityLog',
     'relayHookStatus'
   ]);
@@ -207,7 +207,8 @@ async function getState() {
     cloudSync: data.cloudSync || {},
     contacts,
     contactStatuses: CONTACT_STATUSES,
-    nuskomateStatus: data.nuskomateStatus || {},
+    externalClients: await getExternalClients(),
+    externalStatus: data.externalStatus || {},
     incomingActivityLog: data.incomingActivityLog || [],
     relayHookStatus: data.relayHookStatus || {}
   };
@@ -1346,6 +1347,31 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
           break;
         }
 
+        // External API allow-list (Settings → External API) — see
+        // getExternalClients() for what this list gates.
+        case 'saveExternalClients': {
+          const seen = new Set();
+          const clients = [];
+          for (const c of msg.clients || []) {
+            const id = String((c && c.id) || '').trim().toLowerCase();
+            if (!EXTENSION_ID_RE.test(id)) {
+              sendResponse({ ok: false, error: `"${id || '(blank)'}" isn't a valid extension ID — it's 32 lowercase letters (a–p), shown on the extension's card in chrome://extensions or edge://extensions.` });
+              return;
+            }
+            if (seen.has(id)) continue;
+            seen.add(id);
+            clients.push({ id, name: String((c && c.name) || '').trim().slice(0, 40) || 'Extension' });
+          }
+          await chrome.storage.local.set({ externalClients: clients });
+          clients.forEach((c) => pingExternalClient(c.id));
+          sendResponse({ ok: true, clients });
+          break;
+        }
+        case 'pingExternalClient': {
+          sendResponse({ ok: true, reachable: await pingExternalClient(String(msg.id || '')) });
+          break;
+        }
+
         // ---- fetching chats ----
         case 'listOpenChats': {
           const tab = await findWaTab();
@@ -2124,19 +2150,23 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
           // seen passes through, so it's the right spot to feed the
           // Incoming tab's real-time activity feed.
           appendIncomingActivity(msg.payload).catch(() => {});
-          try {
-            chrome.runtime.sendMessage(NUSKOMATE_EXTENSION_ID, { type: 'new-message', ...msg.payload }, () => {
-              const err = chrome.runtime.lastError;
-              setNuskomateStatus({
-                lastMessageAt: Date.now(),
-                lastMessageOk: !err,
-                lastMessageError: err ? err.message : null,
+          // Every allow-listed extension (Settings → External API) gets the
+          // same push, each with its own delivery status.
+          for (const client of await getExternalClients()) {
+            try {
+              chrome.runtime.sendMessage(client.id, { type: 'new-message', ...msg.payload }, () => {
+                const err = chrome.runtime.lastError;
+                setExternalStatus(client.id, {
+                  lastMessageAt: Date.now(),
+                  lastMessageOk: !err,
+                  lastMessageError: err ? err.message : null,
+                });
               });
-            });
-          } catch (_) {
-            // Nuskomate not installed/enabled at all — sendMessage can throw
-            // synchronously for that case, unlike a failed connect().
-            setNuskomateStatus({ lastMessageAt: Date.now(), lastMessageOk: false, lastMessageError: 'Nuskomate not reachable' });
+            } catch (_) {
+              // Not installed/enabled at all — sendMessage can throw
+              // synchronously for that case, unlike a failed connect().
+              setExternalStatus(client.id, { lastMessageAt: Date.now(), lastMessageOk: false, lastMessageError: 'Not reachable' });
+            }
           }
           sendResponse({ ok: true });
           break;
@@ -2201,37 +2231,83 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
 // ensureWaTab/pingContentScript/sendToTab plumbing every internal action
 // above already uses.
 const NUSKOMATE_EXTENSION_ID = 'mcikbecdcddegpbonhndegmpjgbangdl';
+const CRM_BRIDGE_EXTENSION_ID = 'jnlakipnjkcpddhbaadmngbmkofcfcgo';
 
-// Persisted connection/activity status — surfaced in getState() so the popup
-// can show whether Nuskomate is actually reachable and using this, instead
-// of that being invisible outside the console.
-async function setNuskomateStatus(patch) {
-  const { nuskomateStatus } = await chrome.storage.local.get(['nuskomateStatus']);
-  await chrome.storage.local.set({ nuskomateStatus: { ...(nuskomateStatus || {}), ...patch } });
+// Which extensions may talk to this one is a user-editable list (Settings →
+// External API), stored locally only — never synced, since extension ids
+// differ per machine/install. manifest.json's externally_connectable is
+// deliberately open ("*") because Chrome fixes that list at install time;
+// THIS list is the actual gate, enforced in the onMessageExternal listener
+// below (an id not on it just gets an error reply) and used as the push
+// target list. Seeded with the two known sister extensions until the user
+// edits it for the first time.
+const DEFAULT_EXTERNAL_CLIENTS = [
+  { id: NUSKOMATE_EXTENSION_ID, name: 'Nuskomate' },
+  { id: CRM_BRIDGE_EXTENSION_ID, name: 'CRM Bridge' }
+];
+const EXTENSION_ID_RE = /^[a-p]{32}$/;
+
+async function getExternalClients() {
+  const { externalClients } = await chrome.storage.local.get(['externalClients']);
+  return Array.isArray(externalClients) ? externalClients : DEFAULT_EXTERNAL_CLIENTS;
 }
 
-// No persistent port to manage anymore (see the comment above
-// NUSKOMATE_EXTENSION_ID) — instead, a lightweight one-shot reachability
-// probe fires once each time THIS service worker starts (which happens
-// often enough on its own — popup opens, alarms, incoming WhatsApp activity
-// — to keep the status reasonably current without any dedicated polling).
-(function pingNuskomateOnce() {
-  try {
-    chrome.runtime.sendMessage(NUSKOMATE_EXTENSION_ID, { type: 'ping' }, () => {
-      const err = chrome.runtime.lastError;
-      setNuskomateStatus({ lastPingAt: Date.now(), reachable: !err, lastPingError: err ? err.message : null });
-    });
-  } catch (_) {
-    setNuskomateStatus({ lastPingAt: Date.now(), reachable: false, lastPingError: 'Nuskomate not reachable' });
-  }
-})();
+// Persisted per-client connection/activity status — surfaced in getState()
+// so the popup can show whether each extension is actually reachable and
+// using this, instead of that being invisible outside the console. Writes
+// are chained because several clients get a push (and record its result)
+// at the same instant, and each write is a read-modify-write of one key.
+let externalStatusChain = Promise.resolve();
+function setExternalStatus(id, patch) {
+  externalStatusChain = externalStatusChain
+    .then(async () => {
+      const { externalStatus } = await chrome.storage.local.get(['externalStatus']);
+      const all = externalStatus || {};
+      await chrome.storage.local.set({ externalStatus: { ...all, [id]: { ...(all[id] || {}), ...patch } } });
+    })
+    .catch(() => {});
+  return externalStatusChain;
+}
+
+// One-shot reachability probe (no persistent port to manage anymore — see
+// the comment above NUSKOMATE_EXTENSION_ID). Fires for every listed
+// extension once each time THIS service worker starts (often enough on its
+// own — popup opens, alarms, incoming WhatsApp activity — to keep status
+// reasonably current without dedicated polling), and on demand from the
+// popup's Test button.
+function pingExternalClient(id) {
+  return new Promise((resolve) => {
+    const done = (err) => {
+      setExternalStatus(id, { lastPingAt: Date.now(), reachable: !err, lastPingError: err ? err.message || String(err) : null });
+      resolve(!err);
+    };
+    try {
+      chrome.runtime.sendMessage(id, { type: 'ping' }, () => done(chrome.runtime.lastError));
+    } catch (e) {
+      done(e);
+    }
+  });
+}
+getExternalClients().then((clients) => clients.forEach((c) => pingExternalClient(c.id)));
 
 chrome.runtime.onMessageExternal.addListener((msg, sender, sendResponse) => {
-  if (sender.id !== NUSKOMATE_EXTENSION_ID) return; // unhandled — Chrome treats this the same as no listener at all
-  setNuskomateStatus({ lastRequestAt: Date.now(), lastRequestAction: msg.action });
   (async () => {
+    const client = (await getExternalClients()).find((c) => c.id === sender.id);
+    if (!client) {
+      sendResponse({
+        ok: false,
+        error: "This extension isn't on WA-Campaigns' allowed list — add its ID in WA-Campaigns → Settings → External API."
+      });
+      return;
+    }
+    const clientName = client.name;
+    setExternalStatus(client.id, { lastRequestAt: Date.now(), lastRequestAction: msg && msg.action });
     try {
       switch (msg.action) {
+        case 'ping': {
+          sendResponse({ ok: true });
+          break;
+        }
         case 'openChat': {
           const tab = await ensureWaTab();
           const ready = await pingContentScript(tab.id);
@@ -2305,7 +2381,7 @@ chrome.runtime.onMessageExternal.addListener((msg, sender, sendResponse) => {
           const chatName = (fetchedChats.find((c) => c.waId === msg.waId) || {}).name || msg.waId;
           const preview = msg.action === 'sendMedia' ? msg.caption || '[media]' : msg.text || '';
           const campaignId = `nuskomate-${uid()}`;
-          const campaignName = `Nuskomate: ${chatName}`;
+          const campaignName = `${clientName}: ${chatName}`;
           let res;
           try {
             if (msg.action === 'sendText') {
@@ -2339,7 +2415,7 @@ chrome.runtime.onMessageExternal.addListener((msg, sender, sendResponse) => {
             campaignName,
             chatName,
             status: 'success',
-            detail: `Sent via Nuskomate${msg.action === 'mentionInChat' ? ' (mention)' : ''}: "${String(preview).slice(0, 60)}"`,
+            detail: `Sent via ${clientName}${msg.action === 'mentionInChat' ? ' (mention)' : ''}: "${String(preview).slice(0, 60)}"`,
             waId: res.waId || msg.waId,
             msgId: res.msgId || null
           });
