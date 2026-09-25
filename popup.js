@@ -509,6 +509,22 @@ function triggerCsvDownload(filename, header, rows) {
   URL.revokeObjectURL(url);
 }
 
+// chrome.tabs.create({url: dataUrl}) blank-tabs for anything but a tiny
+// image — Chrome blocks/silently drops large data: URLs as a top-level
+// navigation target (PDFs especially). Converting to a blob: URL first
+// works around it; the blob is left unrevoked since the new tab needs it
+// and popup.js's own lifetime is short enough not to matter.
+function dataUrlToBlobUrl(dataUrl) {
+  const match = /^data:([^;,]*)(;base64)?,([\s\S]*)$/.exec(dataUrl);
+  if (!match) return null;
+  const [, mime, isBase64, data] = match;
+  const binary = isBase64 ? atob(data) : decodeURIComponent(data);
+  const bytes = new Uint8Array(binary.length);
+  for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
+  const blob = new Blob([bytes], { type: mime || 'application/octet-stream' });
+  return URL.createObjectURL(blob);
+}
+
 async function downloadCsv(filename, chats) {
   // Admin status is checked fresh for whichever groups are actually being
   // exported (not the whole fetched pool) — one WPP call per group, so this
@@ -3789,7 +3805,8 @@ function buildSendPanel(message, opts = {}) {
     btn.addEventListener('click', () => {
       const item = (message.items || [])[Number(btn.dataset.idx)];
       if (item && item.media && item.media.dataUrl) {
-        chrome.tabs.create({ url: item.media.dataUrl });
+        const blobUrl = dataUrlToBlobUrl(item.media.dataUrl);
+        chrome.tabs.create({ url: blobUrl || item.media.dataUrl });
       }
     });
   });
@@ -5065,6 +5082,14 @@ document.getElementById('clearLogBtn').addEventListener('click', async () => {
 // storage-driven refresh() elsewhere in the popup).
 let logSearchQuery = '';
 let logStatusFilter = 'all';
+// How many (filtered) log entries to actually render as DOM — separate from
+// LOG_MAX in background.js, which caps what's kept in storage. Rendering
+// everything stored (up to several thousand) in one shot is what hung the
+// popup; this resets to LOG_RENDER_PAGE every time the popup opens (a plain
+// module-level variable — a fresh popup is a fresh script execution) and
+// only grows via the "Load more" button, never persisted.
+const LOG_RENDER_PAGE = 300;
+let logRenderLimit = LOG_RENDER_PAGE;
 
 function updateLogSearchClearBtn() {
   document.getElementById('logSearchClearBtn').classList.toggle('visible', logSearchQuery.length > 0);
@@ -5187,7 +5212,13 @@ function renderLog() {
   if (filtered.length === 0) {
     ul.innerHTML = `<li class="item-text">${STATE.log.length === 0 ? 'No activity yet.' : 'No log entries match this search/filter.'}</li>`;
   }
-  for (const l of filtered) {
+  // Rendering the whole stored log (up to LOG_MAX in background.js) as DOM
+  // nodes in one shot is what actually hung the popup — the storage cap and
+  // the render cap are deliberately separate now. logRenderLimit resets to
+  // LOG_RENDER_PAGE on every popup open (it's a plain module-level variable,
+  // so a fresh popup execution starts over) and only grows via "Load more".
+  const pageEntries = filtered.slice(0, logRenderLimit);
+  for (const l of pageEntries) {
     const li = document.createElement('li');
     const canDeleteThis = l.status === 'success' && l.waId && l.msgId && !l.deletedForEveryone;
     li.innerHTML = `<div class="item-text">
@@ -5208,6 +5239,17 @@ function renderLog() {
         : ''
     }`;
     ul.appendChild(li);
+  }
+  if (filtered.length > pageEntries.length) {
+    const li = document.createElement('li');
+    li.className = 'hint';
+    const remaining = filtered.length - pageEntries.length;
+    li.innerHTML = `<button id="logLoadMoreBtn" class="small" type="button">Load ${Math.min(LOG_RENDER_PAGE, remaining)} more (${remaining} older)</button>`;
+    ul.appendChild(li);
+    document.getElementById('logLoadMoreBtn').addEventListener('click', () => {
+      logRenderLimit += LOG_RENDER_PAGE;
+      renderLog();
+    });
   }
   ul.querySelectorAll('[data-act="deleteForEveryone"]').forEach((btn) => {
     btn.addEventListener('click', async () => {
@@ -5272,6 +5314,12 @@ function incomingTypeLabel(type) {
 let incomingSearchQuery = '';
 let incomingTypeFilterValue = 'all';
 let incomingShowMine = true;
+// Same reasoning as LOG_RENDER_PAGE/logRenderLimit — separate from
+// INCOMING_ACTIVITY_MAX in background.js (what's kept in storage).
+// Rendering everything stored in one shot is what hung the popup; resets
+// to INCOMING_RENDER_PAGE on every popup open, only grows via "Load more".
+const INCOMING_RENDER_PAGE = 300;
+let incomingRenderLimit = INCOMING_RENDER_PAGE;
 
 // ---------- inline reply (reply to a chat straight from its Incoming card) ----------
 // Only one card's reply box open at a time, same convention as every other
@@ -5371,6 +5419,34 @@ document.getElementById('clearIncomingBtn').addEventListener('click', async () =
   refresh();
 });
 
+// Manual re-scan, independent of the automatic one that runs on every WA
+// tab load (background.js's catchUpIncomingActivity) — for a longer gap
+// than that one's 24h cap covers, or for deliberately pulling back in
+// anything this feed's own storage cap already trimmed off (still sitting
+// in WhatsApp's own synced history either way, "full history" just means no
+// time cutoff on the scan, not literally every message ever — see
+// page-bridge.js's catchUpMissedActivity for the actual per-chat bound).
+document.getElementById('incomingCatchUpBtn').addEventListener('click', async () => {
+  const btn = document.getElementById('incomingCatchUpBtn');
+  const hint = document.getElementById('incomingCatchUpHint');
+  const range = document.getElementById('incomingCatchUpRange').value;
+  btn.disabled = true;
+  hint.style.display = '';
+  hint.textContent =
+    range === 'full'
+      ? 'Scanning full chat history — this can take a couple of minutes…'
+      : `Scanning the last ${range}h…`;
+  const res = await call('manualCatchUpIncoming', { range });
+  btn.disabled = false;
+  if (!res.ok) {
+    hint.style.display = 'none';
+    showToast(res.error || 'Catch-up failed.', 'error');
+    return;
+  }
+  hint.style.display = 'none';
+  showToast(res.added > 0 ? `Caught up — added ${res.added} entr${res.added === 1 ? 'y' : 'ies'}.` : 'Caught up — nothing new found.', 'success');
+});
+
 // A real "is the underlying WPP hook actually installed" signal (see
 // page-bridge.js's installExternalRelayHook/relayHookReady), not just
 // inferred from having happened to see a message yet — that distinction
@@ -5398,7 +5474,15 @@ function renderIncomingTab() {
   const q = incomingSearchQuery.trim().toLowerCase();
   const visible = list.filter((e) => {
     if (!incomingShowMine && e.fromMe) return false;
-    if (incomingTypeFilterValue !== 'all' && e.messageType !== incomingTypeFilterValue) return false;
+    // "status" isn't a messageType value (a status update carries its own
+    // real type — image/video/chat/etc. — same as any other message) but a
+    // separate isStatus flag, so it needs its own branch rather than a
+    // messageType equality check.
+    if (incomingTypeFilterValue === 'status') {
+      if (!e.isStatus) return false;
+    } else if (incomingTypeFilterValue !== 'all' && e.messageType !== incomingTypeFilterValue) {
+      return false;
+    }
     if (q && !`${e.chatName} ${e.text}`.toLowerCase().includes(q)) return false;
     return true;
   });
@@ -5410,8 +5494,21 @@ function renderIncomingTab() {
     }</li>`;
     return;
   }
-  ul.innerHTML = visible
-    .map((e) => {
+  // Rendering everything in `visible` as DOM nodes in one shot is what
+  // actually hung the popup once the underlying storage cap was raised —
+  // the storage cap and the render cap are deliberately separate now (see
+  // incomingRenderLimit's own comment above).
+  const pageEntries = visible.slice(0, incomingRenderLimit);
+  const loadMoreHtml =
+    visible.length > pageEntries.length
+      ? `<li class="hint"><button id="incomingLoadMoreBtn" class="small" type="button">Load ${Math.min(
+          INCOMING_RENDER_PAGE,
+          visible.length - pageEntries.length
+        )} more (${visible.length - pageEntries.length} older)</button></li>`
+      : '';
+  ul.innerHTML =
+    pageEntries
+      .map((e) => {
       // hasMedia is the real signal (same one chat export uses — whether
       // WPP actually reports a mimetype on this message); messageType is
       // kept as a fallback only for older stored entries from before that
@@ -5444,8 +5541,8 @@ function renderIncomingTab() {
           </div>
           <div class="item-actions">
             ${
-              isMedia && e.messageId
-                ? `<button class="icon-btn small-icon-btn" data-act="viewIncomingMedia" data-msg-id="${escapeHtml(e.messageId)}" type="button" data-tooltip="Download and view this attachment">
+              isMedia
+                ? `<button class="icon-btn small-icon-btn" data-act="viewIncomingMedia" data-msg-id="${escapeHtml(e.messageId || '')}" type="button" ${e.messageId ? '' : 'disabled'} data-tooltip="${e.messageId ? 'Download and view this attachment' : "WhatsApp didn't give this message a usable id when it arrived (seen on some Status/Story updates) — nothing to fetch it by"}">
                     <svg viewBox="0 0 24 24" width="14" height="14"><path fill="currentColor" d="M19 19H5V5h7V3H5c-1.1 0-2 .9-2 2v14c0 1.1.9 2 2 2h14c1.1 0 2-.9 2-2v-7h-2v7zM14 3v2h3.59l-9.83 9.83 1.41 1.41L19 6.41V10h2V3h-7z"/></svg>
                   </button>`
                 : ''
@@ -5453,13 +5550,33 @@ function renderIncomingTab() {
             <button class="icon-btn small-icon-btn" data-act="openIncomingChat" data-wa-id="${escapeHtml(targetWaId || '')}" type="button" ${targetWaId ? '' : 'disabled'} data-tooltip="${targetWaId ? (e.isStatus ? "Open this person's chat (their live Status isn't directly openable from here)" : 'Open this chat in WhatsApp Web') : "Couldn't identify who posted this — nothing to open"}">
               <svg viewBox="0 0 24 24" width="14" height="14"><path fill="currentColor" d="M20 2H4a2 2 0 0 0-2 2v18l4-4h14a2 2 0 0 0 2-2V4a2 2 0 0 0-2-2z"/></svg>
             </button>
+            ${
+              targetWaId && e.messageId && !e.isStatus
+                ? `<button class="icon-btn small-icon-btn" data-act="gotoIncomingMessage" data-wa-id="${escapeHtml(targetWaId)}" data-msg-id="${escapeHtml(e.messageId)}" type="button" data-tooltip="Open this chat scrolled to this exact message">
+                    <svg viewBox="0 0 24 24" width="14" height="14"><path fill="currentColor" d="M12 2C8.13 2 5 5.13 5 9c0 5.25 7 13 7 13s7-7.75 7-13c0-3.87-3.13-7-7-7zm0 9.5c-1.38 0-2.5-1.12-2.5-2.5s1.12-2.5 2.5-2.5 2.5 1.12 2.5 2.5-1.12 2.5-2.5 2.5z"/></svg>
+                  </button>`
+                : `<button class="icon-btn small-icon-btn" type="button" disabled data-tooltip="${
+                    e.isStatus
+                      ? "Can't jump to an exact point in a Status — it isn't part of a normal chat's message history"
+                      : "Couldn't identify who posted this, or this message has no usable id — nothing to jump to"
+                  }">
+                    <svg viewBox="0 0 24 24" width="14" height="14"><path fill="currentColor" d="M12 2C8.13 2 5 5.13 5 9c0 5.25 7 13 7 13s7-7.75 7-13c0-3.87-3.13-7-7-7zm0 9.5c-1.38 0-2.5-1.12-2.5-2.5s1.12-2.5 2.5-2.5 2.5 1.12 2.5 2.5-1.12 2.5-2.5 2.5z"/></svg>
+                  </button>`
+            }
             <button class="icon-btn small-icon-btn${replyOpen ? ' open' : ''}" data-act="toggleIncomingReply" data-entry-id="${escapeHtml(e.id)}" type="button" ${targetWaId ? '' : 'disabled'} data-tooltip="${targetWaId ? 'Reply in this chat' : "Couldn't identify who posted this — nothing to reply to"}">${REPLY_ICON_SVG}</button>
           </div>
         </div>
         ${replyOpen ? incomingReplyPanelHtml() : ''}
       </li>`;
-    })
-    .join('');
+      })
+      .join('') + loadMoreHtml;
+  const loadMoreBtn = document.getElementById('incomingLoadMoreBtn');
+  if (loadMoreBtn) {
+    loadMoreBtn.addEventListener('click', () => {
+      incomingRenderLimit += INCOMING_RENDER_PAGE;
+      renderIncomingTab();
+    });
+  }
   ul.querySelectorAll('[data-act="viewIncomingMedia"]').forEach((btn) => {
     btn.addEventListener('click', async () => {
       btn.disabled = true;
@@ -5469,7 +5586,8 @@ function renderIncomingTab() {
         showToast(res.error || 'Could not fetch that attachment.', 'error');
         return;
       }
-      chrome.tabs.create({ url: res.dataUrl });
+      const blobUrl = dataUrlToBlobUrl(res.dataUrl);
+      chrome.tabs.create({ url: blobUrl || res.dataUrl });
     });
   });
   ul.querySelectorAll('[data-act="openIncomingChat"]').forEach((btn) => {
@@ -5482,6 +5600,17 @@ function renderIncomingTab() {
       if (!res.ok) showToast(res.error || 'Could not open that chat.', 'error');
     });
   });
+  ul.querySelectorAll('[data-act="gotoIncomingMessage"]').forEach((btn) => {
+    btn.addEventListener('click', async () => {
+      const waId = btn.dataset.waId;
+      const messageId = btn.dataset.msgId;
+      if (!waId || !messageId) return;
+      btn.disabled = true;
+      const res = await call('openChatAtMessage', { waId, messageId });
+      btn.disabled = false;
+      if (!res.ok) showToast(res.error || 'Could not jump to that message.', 'error');
+    });
+  });
   ul.querySelectorAll('[data-act="toggleIncomingReply"]').forEach((btn) => {
     btn.addEventListener('click', () => {
       const id = btn.dataset.entryId;
@@ -5492,7 +5621,7 @@ function renderIncomingTab() {
       if (incomingReplyOpenId === id) document.getElementById('incomingReplyText').focus();
     });
   });
-  wireIncomingReplyPanel(visible);
+  wireIncomingReplyPanel(pageEntries);
 }
 
 function wireIncomingReplyPanel(visible) {
@@ -5608,7 +5737,19 @@ async function sendIncomingReply(entry) {
   // that couldn't be resolved (see renderIncomingTab), so this is always
   // populated by the time a send actually fires.
   const targetWaId = entry.isStatus ? entry.authorWaId : entry.waId;
-  const res = await call('sendNowToChat', { waId: targetWaId, name: entry.chatName, items, sendSeparator: true });
+  // Quote the specific message this reply was opened from, so it renders as
+  // a real WhatsApp "reply to" bubble — except for a Status/Story entry,
+  // where this can't actually work: confirmed by live inspection (not just
+  // theory) that a status message's own .to field always points back at
+  // the viewer, never at a real chat, so WhatsApp can't build a valid quote
+  // reference from it for the reply's actual target conversation. In
+  // practice that meant sending fine but silently untagged when the poster
+  // already had an existing chat, and an outright "QuotedMsg can not reply"
+  // rejection when they didn't — worse than just not trying. wa-js's own
+  // status API (WPP.status.*) has no reply-to-status function at all, so
+  // there's no working path here to attempt.
+  const quotedMsgId = entry.isStatus ? null : entry.messageId;
+  const res = await call('sendNowToChat', { waId: targetWaId, name: entry.chatName, items, sendSeparator: true, quotedMsgId });
   if (sendBtn) sendBtn.disabled = false;
   if (!res.ok) {
     showToast(res.error || 'Could not send.', 'error');

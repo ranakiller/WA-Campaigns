@@ -204,6 +204,9 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
       } else if (msg.action === 'openChat') {
         await bridgeRequest('openChat', { waId: msg.waId }, 15000);
         sendResponse({ ok: true });
+      } else if (msg.action === 'openChatAtMessage') {
+        await bridgeRequest('openChatAtMessage', { waId: msg.waId, messageId: msg.messageId }, 15000);
+        sendResponse({ ok: true });
       } else if (msg.action === 'getGroupAdminInfo') {
         // Generous timeout — this checks admin status one group at a time,
         // so a large export can genuinely take a while.
@@ -213,10 +216,30 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
         const result = await bridgeRequest('getGroupMembers', { waId: msg.waId }, 30000);
         sendResponse({ ok: true, ...result });
       } else if (msg.action === 'sendMessage') {
-        const result = await bridgeRequest('sendMessage', { waId: msg.waId, text: msg.text }, 30000);
+        const result = await bridgeRequest('sendMessage', { waId: msg.waId, text: msg.text, quotedMsgId: msg.quotedMsgId }, 30000);
         sendResponse({ ok: true, ...result });
       } else if (msg.action === 'sendMedia') {
-        const result = await bridgeRequest('sendMedia', { waId: msg.waId, media: msg.media, caption: msg.caption }, 45000);
+        const result = await bridgeRequest(
+          'sendMedia',
+          { waId: msg.waId, media: msg.media, caption: msg.caption, quotedMsgId: msg.quotedMsgId },
+          45000
+        );
+        sendResponse({ ok: true, ...result });
+      } else if (msg.action === 'catchUpIncoming') {
+        // timeoutMs is caller-provided (background.js) rather than a fixed
+        // constant here — a manual "full history" catch-up scans every chat
+        // with no time cutoff and a much deeper per-chat pull, so it needs
+        // far longer than the automatic (post-reload, bounded-lookback) one.
+        const result = await bridgeRequest(
+          'catchUpIncoming',
+          {
+            sinceTimestamp: msg.sinceTimestamp,
+            perChatCount: msg.perChatCount,
+            maxChats: msg.maxChats,
+            maxEntries: msg.maxEntries
+          },
+          msg.timeoutMs || 60000
+        );
         sendResponse({ ok: true, ...result });
       } else if (msg.action === 'getMessageMedia') {
         // Generous timeout — downloading/decrypting a large attachment can

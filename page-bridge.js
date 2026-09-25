@@ -495,6 +495,14 @@ async function handleRequest(action, payload) {
       }
       return { chat: { number: phone, name: title || phone, group: !!chat.isGroup }, messages };
     }
+    // Incoming feed backfill — see catchUpMissedActivity's own comment.
+    case 'catchUpIncoming': {
+      return await catchUpMissedActivity(payload.sinceTimestamp || 0, {
+        perChatCount: payload.perChatCount,
+        maxChats: payload.maxChats,
+        maxEntries: payload.maxEntries
+      });
+    }
     case 'getActiveChat': {
       const chat = window.WPP.chat.getActiveChat();
       if (!chat || !chat.id) {
@@ -515,8 +523,34 @@ async function handleRequest(action, payload) {
       }
       return {};
     }
+    // Incoming tab's "go to this message" button — WPP.chat.openChatAt
+    // opens the chat scrolled to (and briefly highlighting) one specific
+    // message, same as clicking a WhatsApp search result does, instead of
+    // just landing at the bottom like openChat above. Only meaningful for a
+    // message that's actually part of a normal chat's own history — the
+    // popup already disables this button entirely for a Status/Story entry,
+    // whose message lives in "status@broadcast", not the chat being opened.
+    case 'openChatAtMessage': {
+      try {
+        await window.WPP.chat.openChatAt(payload.waId, payload.messageId);
+      } catch (e) {
+        throw new Error(
+          "Couldn't jump to that message — it may be too old to still be loaded locally, or the chat may no longer exist on WhatsApp."
+        );
+      }
+      return {};
+    }
+    // quotedMsgId (a serialized wa-js MsgKey string, e.g. from the Incoming
+    // feed's inline reply) makes this render as a real WhatsApp "reply to"
+    // — quoted bubble and all — instead of just landing in the chat
+    // unconnected to whatever it's actually replying to. WPP.chat's send
+    // functions resolve a string quotedMsg via MsgKey.fromString internally
+    // and no-op the whole quoting behavior if it's falsy, so passing
+    // undefined here for an ordinary (non-reply) send is safe.
     case 'sendMessage': {
-      const { result, waId } = await withCommunityRedirect(payload.waId, (id) => window.WPP.chat.sendTextMessage(id, payload.text));
+      const { result, waId } = await withCommunityRedirect(payload.waId, (id) =>
+        window.WPP.chat.sendTextMessage(id, payload.text, { quotedMsg: payload.quotedMsgId || undefined })
+      );
       return { sent: true, msgId: result && result.id, waId: chatIdFromMsgId(result && result.id) || waId };
     }
     case 'sendMedia': {
@@ -525,7 +559,8 @@ async function handleRequest(action, payload) {
           type: 'auto-detect',
           caption: payload.caption || undefined,
           filename: payload.media.filename,
-          mimetype: payload.media.mimeType
+          mimetype: payload.media.mimeType,
+          quotedMsg: payload.quotedMsgId || undefined
         })
       );
       return { sent: true, msgId: result && result.id, waId: chatIdFromMsgId(result && result.id) || waId };
@@ -656,11 +691,19 @@ async function waitForWppReadyForever() {
 // A one-way push, not a request/response round trip — background.js has no
 // way to poll for new messages, so this forwards WPP's own event the
 // instant it fires. `id.fromMe` filters out anything this account sent,
-// including a prior auto-reply itself or a bulk campaign send — WPP's own
-// `chat` getter defines the owning chat as `id.fromMe ? to : from`, so an
-// incoming message (fromMe false) always has its chat in `from`, which for
-// a group is the group's id, not the individual member who actually typed
-// it (exactly the chat auto-replying should go back into).
+// including a prior auto-reply itself or a bulk campaign send.
+//
+// Known fixed bug: this used to take the chat from `msg.from`, on the
+// assumption that a received message's chat always lives there (true for a
+// 1:1, since `.from` is the other party either way) — but for a *group*
+// message, `.from` is the individual participant who posted it, not the
+// group. Confirmed directly: auto-reply (and the Incoming feed's reply
+// button, same underlying bug — see installExternalRelayHook) was sending
+// back into that participant's own 1:1 chat instead of the group the
+// message actually came from. Fixed by reading the chat segment off the
+// message's own id instead (chatIdFromMsgId,
+// `{fromMe}_{chatId}_{uniqueId}[_participant]`), which is unambiguous
+// regardless of sender or direction.
 let incomingMessageHookInstalled = false;
 async function installIncomingMessageHook() {
   if (incomingMessageHookInstalled) return;
@@ -671,7 +714,7 @@ async function installIncomingMessageHook() {
   window.WPP.on('chat.new_message', (msg) => {
     try {
       if (!msg || (msg.id && msg.id.fromMe)) return;
-      const chatId = msg.from && (msg.from._serialized || String(msg.from));
+      const chatId = chatIdFromMsgId(msg.id._serialized) || (msg.from && (msg.from._serialized || String(msg.from)));
       if (!chatId) return;
       // .body on a media message is raw/internal, not user-facing text (see
       // installExternalRelayHook's own comment on this) — only trust it for
@@ -698,6 +741,76 @@ installIncomingMessageHook();
 // typed alongside it), both of which an external caller reading the full
 // conversation needs to see. This one passes everything through as-is and
 // leaves the auto-reply hook completely untouched.
+//
+// buildRelayDetail is shared by the live listener below and
+// catchUpMissedActivity's backfill scan further down — a message caught by
+// the catch-up scan needs to come out shaped identically to one caught
+// live, since they land in the exact same feed. Returns null for anything
+// that shouldn't become a feed entry.
+function buildRelayDetail(msg) {
+  if (!msg || !msg.id) return null;
+  // NOT msg.from — that's the actual sender (a group's individual
+  // participant, or this account itself for anything fromMe), which only
+  // happens to equal the chat for a 1:1 message received from the other
+  // party. For a group message (either direction) or anything fromMe, it's
+  // a different JID entirely — replying to it then went to that sender's
+  // own 1:1 chat instead of back into the group it actually came
+  // from/was posted to. The chat segment of the message's own id
+  // (chatIdFromMsgId, `{fromMe}_{chatId}_{uniqueId}[_participant]`) is
+  // unambiguous regardless of sender or direction.
+  const chatId = chatIdFromMsgId(msg.id._serialized) || (msg.from && (msg.from._serialized || String(msg.from)));
+  if (!chatId) return null;
+  // status@broadcast (a WhatsApp Status/Story update) reports the actual
+  // poster in .author, with .from itself just being the fixed broadcast id
+  // — chatName falling back to that literal id told you nothing about who
+  // actually posted it. Groups carry the same .author shape for their
+  // individual senders too, so this is resolved unconditionally
+  // (getChatExportData resolves it the same way for the same reason).
+  const authorWaId = msg.author ? msg.author._serialized || String(msg.author) : null;
+  let authorName = null;
+  if (msg.author) {
+    try {
+      const c = window.WPP.whatsapp.ContactStore.get(msg.author);
+      authorName = (c && (c.name || c.pushname || c.formattedName)) || null;
+    } catch (_) {
+      authorName = null;
+    }
+  }
+  const isStatus = chatId === 'status@broadcast';
+  const baseName = (msg.chat && (msg.chat.formattedTitle || msg.chat.name)) || chatId;
+  return {
+    waId: chatId,
+    isGroup: !!msg.isGroupMsg,
+    isStatus,
+    // Who to actually open/reply to for a status entry — "chatId" here is
+    // the shared broadcast id, not a real openable chat.
+    authorWaId,
+    // Best-effort — msg.chat isn't guaranteed to carry a resolved name on
+    // every message; falls back to the raw id below. For a status, that
+    // fallback is instead whoever posted it.
+    chatName: isStatus ? authorName || (authorWaId && authorWaId.split('@')[0]) || 'Unknown poster' : baseName,
+    fromMe: !!msg.id.fromMe,
+    messageId: msg.id._serialized,
+    // Passed through exactly as WPP reports it — not reinterpreted or
+    // narrowed to a fixed enum, since this file has no business logic that
+    // depends on the specific value.
+    messageType: msg.type || 'chat',
+    // Whether this message actually has a downloadable attachment — a real
+    // signal (same one getChatExportData uses), not a guess from
+    // messageType string-matching a fixed list, which can miss types that
+    // fixed list doesn't happen to include.
+    hasMedia: !!msg.mimetype,
+    // .body on a media message is raw/internal data (this is what made a
+    // Status image/video show up as a wall of base64-looking text before)
+    // — only trust it for an actual plain-text message; a media message's
+    // real text, if any, is .caption.
+    text: msg.mimetype ? msg.caption || '' : msg.body || '',
+    // msg.t is WhatsApp's own timestamp, in seconds; falls back to "now" on
+    // the rare message that doesn't carry one.
+    timestamp: msg.t ? msg.t * 1000 : Date.now()
+  };
+}
+
 let externalRelayHookInstalled = false;
 async function installExternalRelayHook() {
   if (externalRelayHookInstalled) return;
@@ -711,72 +824,108 @@ async function installExternalRelayHook() {
   // Lets the popup's Incoming tab show a real installed/not-yet status
   // instead of the only signal being "have I happened to see a message
   // yet" (which can't tell "broken" apart from "just no traffic yet").
+  // background.js also uses this exact signal to kick off a catch-up scan
+  // (see catchUpIncomingActivity there) — it fires once per tab load,
+  // which is exactly when a gap from the PC/browser having been off would
+  // need backfilling.
   document.dispatchEvent(new CustomEvent('wa-ext-notify', { detail: { type: 'relayHookReady', at: Date.now() } }));
   window.WPP.on('chat.new_message', (msg) => {
     try {
-      if (!msg || !msg.id) return;
-      const chatId = msg.from && (msg.from._serialized || String(msg.from));
-      if (!chatId) return;
-      // status@broadcast (a WhatsApp Status/Story update) reports the
-      // actual poster in .author, with .from itself just being the fixed
-      // broadcast id — chatName falling back to that literal id told you
-      // nothing about who actually posted it. Groups carry the same
-      // .author shape for their individual senders too, so this is
-      // resolved unconditionally (getChatExportData resolves it the same
-      // way for the same reason).
-      const authorWaId = msg.author ? msg.author._serialized || String(msg.author) : null;
-      let authorName = null;
-      if (msg.author) {
-        try {
-          const c = window.WPP.whatsapp.ContactStore.get(msg.author);
-          authorName = (c && (c.name || c.pushname || c.formattedName)) || null;
-        } catch (_) {
-          authorName = null;
-        }
-      }
-      const isStatus = chatId === 'status@broadcast';
-      const baseName = (msg.chat && (msg.chat.formattedTitle || msg.chat.name)) || chatId;
-      document.dispatchEvent(
-        new CustomEvent('wa-ext-relay', {
-          detail: {
-            waId: chatId,
-            isGroup: !!msg.isGroupMsg,
-            isStatus,
-            // Who to actually open/reply to for a status entry — "chatId"
-            // here is the shared broadcast id, not a real openable chat.
-            authorWaId,
-            // Best-effort — msg.chat isn't guaranteed to carry a resolved
-            // name on every message; falls back to the raw id below. For a
-            // status, that fallback is instead whoever posted it.
-            chatName: isStatus ? authorName || (authorWaId && authorWaId.split('@')[0]) || 'Unknown poster' : baseName,
-            fromMe: !!msg.id.fromMe,
-            messageId: msg.id._serialized,
-            // Passed through exactly as WPP reports it — not reinterpreted
-            // or narrowed to a fixed enum, since this file has no business
-            // logic that depends on the specific value.
-            messageType: msg.type || 'chat',
-            // Whether this message actually has a downloadable attachment —
-            // a real signal (same one getChatExportData uses), not a guess
-            // from messageType string-matching a fixed list, which can miss
-            // types that fixed list doesn't happen to include.
-            hasMedia: !!msg.mimetype,
-            // .body on a media message is raw/internal data (this is what
-            // made a Status image/video show up as a wall of base64-looking
-            // text before) — only trust it for an actual plain-text
-            // message; a media message's real text, if any, is .caption.
-            text: msg.mimetype ? msg.caption || '' : msg.body || '',
-            // msg.t is WhatsApp's own timestamp, in seconds; falls back to
-            // "now" on the rare message that doesn't carry one.
-            timestamp: msg.t ? msg.t * 1000 : Date.now()
-          }
-        })
-      );
+      const detail = buildRelayDetail(msg);
+      if (detail) document.dispatchEvent(new CustomEvent('wa-ext-relay', { detail }));
     } catch (_) {
       // never let a malformed event break WPP's own listener chain
     }
   });
 }
 installExternalRelayHook();
+
+// Backfill for whatever arrived while no WhatsApp Web tab was open to catch
+// it live (PC/browser off, tab closed, etc.) — requested by background.js
+// (case 'catchUpIncoming' below) right after relayHookReady fires above,
+// with sinceTimestamp being the newest entry it already has on file (or a
+// bounded lookback on a fresh install with nothing on file yet). Chats are
+// scanned newest-activity-first and the scan stops as soon as it reaches
+// one that's already older than sinceTimestamp, since nothing later in that
+// order can have anything newer either — keeps a normal (nothing missed)
+// run cheap instead of pulling every chat's history on every single tab
+// load.
+// Status/Story updates are NOT in WPP.chat.list()'s scan above — confirmed
+// directly in the vendored bundle: chat.list() is built entirely off
+// ChatStore, which status@broadcast never enters (statuses live in their
+// own, separate StatusV3Store, exposed the same way ContactStore/MsgStore
+// already are elsewhere in this file, under window.WPP.whatsapp.*). Kept as
+// its own function, and wrapped defensively at every step, since this store
+// isn't something any existing feature in this codebase already reads from
+// — if its shape doesn't match what's assumed here on some WhatsApp Web
+// version, this should degrade to "no statuses this run" rather than break
+// the rest of the catch-up.
+function collectStatusEntries(sinceTimestamp, maxEntries) {
+  const entries = [];
+  let posters;
+  try {
+    posters = window.WPP.whatsapp.StatusV3Store.getModelsArray();
+  } catch (_) {
+    return entries; // this build doesn't expose the store the way expected — skip statuses, not the whole catch-up
+  }
+  for (const poster of posters || []) {
+    if (entries.length >= maxEntries) break;
+    let msgs;
+    try {
+      msgs = poster && poster.msgs && typeof poster.msgs.getModelsArray === 'function' ? poster.msgs.getModelsArray() : [];
+    } catch (_) {
+      continue;
+    }
+    for (const m of msgs || []) {
+      if (!m || !m.t || m.t * 1000 <= sinceTimestamp) continue;
+      try {
+        const detail = buildRelayDetail(m);
+        if (detail) entries.push(detail);
+      } catch (_) {
+        // one malformed status message shouldn't drop the rest
+      }
+    }
+  }
+  return entries;
+}
+
+// options lets a caller (the Incoming tab's manual "Catch up" control, via
+// background.js's manualCatchUpIncoming) pull deeper/wider than the
+// automatic run's defaults — up to and including sinceTimestamp: 0, which
+// disables the "stop once we reach an already-covered chat" bail-out below
+// entirely and scans every chat's own deep history instead.
+async function catchUpMissedActivity(sinceTimestamp, options = {}) {
+  const perChatCount = options.perChatCount || 50; // bounded, not the -1/full-history pull getChatExportData does
+  const maxChats = options.maxChats || 40;
+  const maxEntries = options.maxEntries || 200;
+  let chats;
+  try {
+    chats = await window.WPP.chat.list();
+  } catch (e) {
+    throw new Error(`Could not list chats to catch up on (${(e && e.message) || e}).`);
+  }
+  chats = (chats || [])
+    .filter((c) => c && c.id && typeof c.t === 'number')
+    .sort((a, b) => b.t - a.t);
+  const entries = collectStatusEntries(sinceTimestamp, maxEntries);
+  for (let i = 0; i < chats.length && i < maxChats && entries.length < maxEntries; i++) {
+    const chat = chats[i];
+    if (chat.t * 1000 <= sinceTimestamp) break; // this chat and everything after it is already covered
+    let raw;
+    try {
+      raw = await window.WPP.chat.getMessages(chat.id._serialized, { count: perChatCount });
+    } catch (_) {
+      continue; // one broken/unsynced chat shouldn't abort the whole catch-up
+    }
+    for (const m of raw || []) {
+      if (!m || !m.t || m.t * 1000 <= sinceTimestamp) continue;
+      const detail = buildRelayDetail(m);
+      if (detail) entries.push(detail);
+    }
+  }
+  entries.sort((a, b) => a.timestamp - b.timestamp); // chronological, oldest first
+  return { entries: entries.slice(-maxEntries) };
+}
 
 document.addEventListener('wa-ext-request', async (event) => {
   const { id, action, payload } = event.detail || {};

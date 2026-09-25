@@ -5,12 +5,12 @@
 // chrome.storage.local; it doesn't change what any of the existing send/UI
 // code expects to find there.
 //
-// Model: ONE snapshot per activation key ({messages, lists, settings, log,
-// contacts}),
+// Model: ONE snapshot per activation key ({messages, lists, settings,
+// contacts}) — the log is deliberately local-only (see SYNC_KEYS below),
 // whole-value last-write-wins by a plain timestamp. A local change auto-
-// pushes (debounced, and never more often than once per 30s — a campaign
-// writes to the log every send, and Cloudflare KV's free tier is 1,000
-// writes/day); changes from other devices are picked up by polling once a
+// pushes (debounced, and never more often than once per 30s — Cloudflare
+// KV's free tier is 1,000 writes/day); changes from other devices are picked
+// up by polling once a
 // minute via chrome.alarms (the only thing that reliably survives this
 // service worker being suspended) plus immediately whenever the popup
 // opens. Turning sync on does one forced pull first, so a new device
@@ -25,7 +25,9 @@
 // messages/devices only ever uploads once.
 import { LICENSE_SERVER, licensedHeaders, isDeadKeyError } from './license.js';
 
-export const SYNC_KEYS = ['messages', 'lists', 'settings', 'log', 'contacts'];
+// 'log' is deliberately excluded — the send log is per-device activity, not
+// shared state, and shouldn't leave the machine that produced it.
+export const SYNC_KEYS = ['messages', 'lists', 'settings', 'contacts'];
 export const SYNC_ALARM = 'cloudSyncPoll';
 
 // Per-device settings that must never be overwritten by another device's
@@ -250,7 +252,7 @@ export async function pushNow() {
     await uploadMissingMedia(media, headers);
     const r = await postJson(
       '/sync/push',
-      { data: { messages, lists: local.lists || [], settings, log: local.log || [], contacts: local.contacts || [] } },
+      { data: { messages, lists: local.lists || [], settings, contacts: local.contacts || [] } },
       headers
     );
     if (!r.data || !r.data.ok) throw new Error((r.data && r.data.error) || 'Push failed');
@@ -319,11 +321,10 @@ export async function pollPull(force = false) {
       await setSyncStatus({ inProgress: false });
       return;
     }
-    const local = await chrome.storage.local.get(['messages', 'lists', 'log', 'settings', 'contacts']);
+    const local = await chrome.storage.local.get(['messages', 'lists', 'settings', 'contacts']);
     const remote = d.data;
     const remoteMessages = Array.isArray(remote.messages) ? remote.messages : null;
     const remoteLists = Array.isArray(remote.lists) ? remote.lists : null;
-    const remoteLog = Array.isArray(remote.log) ? remote.log : null;
     const remoteContacts = Array.isArray(remote.contacts) ? remote.contacts : null;
     // Guard against a blank snapshot wiping out real local data. This is
     // what actually happened in the wild: a second device joined a key,
@@ -338,13 +339,9 @@ export async function pollPull(force = false) {
     const remoteLooksBlank =
       (remoteMessages == null || remoteMessages.length === 0) &&
       (remoteLists == null || remoteLists.length === 0) &&
-      (remoteLog == null || remoteLog.length === 0) &&
       (remoteContacts == null || remoteContacts.length === 0);
     const localHasData =
-      (local.messages || []).length > 0 ||
-      (local.lists || []).length > 0 ||
-      (local.log || []).length > 0 ||
-      (local.contacts || []).length > 0;
+      (local.messages || []).length > 0 || (local.lists || []).length > 0 || (local.contacts || []).length > 0;
     if (remoteLooksBlank && localHasData) {
       await setSyncStatus({ lastAt: serverAt, inProgress: false, lastError: '' });
       notifyPopup("Cloud copy looked empty — kept this device's data and re-synced it up.", 'info');
@@ -354,7 +351,6 @@ export async function pollPull(force = false) {
     const next = {};
     if (remoteMessages) next.messages = await fromCloudShape(remoteMessages, local.messages || [], headers);
     if (remoteLists) next.lists = remoteLists;
-    if (remoteLog) next.log = remoteLog;
     if (remoteContacts) next.contacts = remoteContacts;
     if (remote.settings && typeof remote.settings === 'object') {
       const localSettings = local.settings || {};

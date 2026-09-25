@@ -495,6 +495,7 @@
           <option value="audio">Audio</option>
           <option value="document">Documents</option>
           <option value="sticker">Stickers</option>
+          <option value="status">Status</option>
         </select>
         <button id="clearIncomingBtn" class="icon-btn small-icon-btn danger" type="button" data-tooltip="Clear this feed">
           <svg viewBox="0 0 24 24" width="14" height="14"><path fill="currentColor" d="M17.65 6.35A7.958 7.958 0 0 0 12 4c-4.42 0-7.99 3.58-7.99 8s3.57 8 7.99 8c3.73 0 6.84-2.55 7.73-6h-2.08c-.82 2.33-3.04 4-5.65 4-3.31 0-6-2.69-6-6s2.69-6 6-6c1.66 0 3.14.69 4.22 1.78L13 11h7V4l-2.35 2.35z"/></svg>
@@ -504,6 +505,17 @@
         <input id="incomingShowMineCheck" type="checkbox" checked />
         Include messages sent from this account too (not just received)
       </label>
+      <div class="log-filter-row">
+        <select id="incomingCatchUpRange">
+          <option value="48">Catch up: last 48h</option>
+          <option value="96">Catch up: last 96h</option>
+          <option value="full">Catch up: full history</option>
+        </select>
+        <button id="incomingCatchUpBtn" class="small" type="button" data-tooltip="Re-scan chats for anything older than what's already in this feed">
+          Catch up
+        </button>
+      </div>
+      <p class="hint" id="incomingCatchUpHint" style="display:none"></p>
       <ul id="incomingActivityList" class="item-list"></ul>
     </section>
 
@@ -522,7 +534,7 @@
       <hr class="tab-separator" />
       <label class="checkbox-row">
         <input id="syncEnabledCheck" type="checkbox" />
-        Sync messages, lists, log &amp; settings to the cloud under this key
+        Sync messages, lists, contacts &amp; settings to the cloud under this key
       </label>
       <div class="sync-status-row">
         <span id="syncStatusDot" class="wa-status-dot"></span>

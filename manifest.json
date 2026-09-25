@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "WhatsApp Message Scheduler",
-  "version": "7.10.0",
+  "version": "7.16.1",
   "key": "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAyfIccZ++8NSAUnerhOJ8rSHqeGKB3mQHls3bHtMJB/CCFMQ1sKfLb2KIw9tPrVcLbOQSB9r3j1+jDuWUVLxakPc+7xVCN02VRios6OszCXwZnMjrwjtChjflbJPZLP0EI3Qq3Ms3BmkSMsV2asOCdHTL1kh+PDRmYOb0vPYNYHIbTpsGXkvY5+mSRFX6ycu+3vEDpFTqweDF7FS+lwGY2YFkSnYTqqVnPUkqp+is/f3sc7NjaDxNKpvU68Ddv4T1CSqCa3wA4dTAeEz4GoxEX0NfrG+h7zqIJAcA9fFDwZkeF1nOWamvXcwOndpskab45pq9vV4gQuxQWXvfOAVX1QIDAQAB",
   "description": "Save lists of your own WhatsApp groups/contacts, build text/media messages, and schedule them safely, directly from each message — driven by WhatsApp Web's own internal API (via WPPConnect/wa-js) instead of simulated clicks.",
   "permissions": ["storage", "unlimitedStorage", "alarms", "tabs", "notifications", "sidePanel", "downloads"],

@@ -22,7 +22,7 @@ const DEFAULT_SETTINGS = {
   masterEnabled: true, // instant kill switch — off blocks new sends and stops any run in progress
   headerText: '', // global default header — prepended to every item's text/caption, unless overridden per-message or per-thread (see resolveHeaderFooter)
   footerText: '', // global default footer — appended to every item's text/caption, unless overridden per-message or per-thread (see resolveHeaderFooter)
-  syncEnabled: false, // cloud sync of messages/lists/log/settings under this install's activation key — opt-in: a fresh device only starts syncing once the user turns it on (see the Settings tab), so activation alone never triggers a pull/push race
+  syncEnabled: false, // cloud sync of messages/lists/contacts/settings under this install's activation key (log is deliberately local-only, see sync.js) — opt-in: a fresh device only starts syncing once the user turns it on (see the Settings tab), so activation alone never triggers a pull/push race
   privacyBlur: false, // blurs chat names/avatars/message text on the WhatsApp Web page itself, for screen-sharing/public spaces — see content.js
   // Which parts privacyBlur actually covers, how hard, and what style —
   // right-click the eye button in the header to configure. `style` is
@@ -295,12 +295,19 @@ async function getRunControlState() {
   };
 }
 
+// Was 300, chosen back when the log was still synced to the license server
+// (SYNC_MAX_BYTES capped a whole snapshot's size) — now that the log is
+// local-only (see sync.js), that constraint is gone, and there's no way to
+// "load more" beyond whatever's kept here: unlike the Incoming feed, an
+// entry that falls off this cap isn't recoverable from WhatsApp itself
+// afterward (WhatsApp has no record of "sent via this extension"), so a low
+// cap here means real, permanent loss rather than just a shorter view.
+// Raised well past the old value; the extension already holds
+// unlimitedStorage.
+const LOG_MAX = 3000;
 async function appendLog(entry) {
   const log = await getLogOnly();
-  const next = [{ id: crypto.randomUUID(), timestamp: Date.now(), ...entry }, ...log].slice(
-    0,
-    300
-  );
+  const next = [{ id: crypto.randomUUID(), timestamp: Date.now(), ...entry }, ...log].slice(0, LOG_MAX);
   await setState({ log: next });
 }
 
@@ -315,11 +322,14 @@ async function appendLog(entry) {
 // setState(), which would also mark it for cloud sync) — this is
 // high-frequency, device-local, diagnostic data only, same reasoning as
 // autoReplyCooldowns above.
-const INCOMING_ACTIVITY_MAX = 500;
-async function appendIncomingActivity(payload) {
-  const { incomingActivityLog } = await chrome.storage.local.get(['incomingActivityLog']);
-  const list = Array.isArray(incomingActivityLog) ? incomingActivityLog : [];
-  const entry = {
+// Was 500 — raised since a low cap here meant genuinely losing old entries
+// (not just hiding them), and the "Catch up" control (manualCatchUpIncoming)
+// can now re-pull anything the feed itself trimmed as long as WhatsApp's own
+// synced history still has it — a cap that's too low undermines that. The
+// extension already holds unlimitedStorage.
+const INCOMING_ACTIVITY_MAX = 3000;
+function shapeIncomingEntry(payload) {
+  return {
     id: crypto.randomUUID(),
     waId: payload.waId,
     chatName: payload.chatName || payload.waId,
@@ -337,8 +347,77 @@ async function appendIncomingActivity(payload) {
     timestamp: payload.timestamp || Date.now(),
     receivedAt: Date.now()
   };
-  const next = [entry, ...list].slice(0, INCOMING_ACTIVITY_MAX);
+}
+async function appendIncomingActivity(payload) {
+  const { incomingActivityLog } = await chrome.storage.local.get(['incomingActivityLog']);
+  const list = Array.isArray(incomingActivityLog) ? incomingActivityLog : [];
+  // WPP's chat.new_message can legitimately fire more than once for the
+  // same underlying message — seen on media (and apparently some Status
+  // updates too): once as an incomplete placeholder record before .t is
+  // set (falling back to Date.now() below), again once it's fully synced
+  // with real metadata. Without this, each firing became its own separate
+  // feed entry with identical text and only slightly different
+  // timestamps — looked exactly like a duplicate-message bug, but was
+  // really the same message reported twice. Updates the existing entry in
+  // place (keeping its id, so reply-open-state tracking by id stays valid)
+  // rather than skipping the update outright, since the later firing is
+  // usually the more complete one.
+  const existingIndex = payload.messageId ? list.findIndex((e) => e.messageId === payload.messageId) : -1;
+  if (existingIndex !== -1) {
+    const next = [...list];
+    next[existingIndex] = { ...shapeIncomingEntry(payload), id: list[existingIndex].id };
+    await chrome.storage.local.set({ incomingActivityLog: next });
+    return;
+  }
+  const next = [shapeIncomingEntry(payload), ...list].slice(0, INCOMING_ACTIVITY_MAX);
   await chrome.storage.local.set({ incomingActivityLog: next });
+}
+
+// Backfills the feed with whatever arrived while no WhatsApp Web tab was
+// open to catch it live (PC/browser off overnight, tab closed, etc.) — see
+// catchUpIncomingActivity below, which is what actually calls this with a
+// batch from page-bridge.js's own scan of each chat's already-synced recent
+// messages. One storage write for the whole batch rather than one per
+// message, and deduped by messageId in case the live hook's own listener
+// picks up the exact same message in the same race window this runs in.
+async function appendIncomingActivityBatch(payloads) {
+  if (!Array.isArray(payloads) || payloads.length === 0) return 0;
+  const { incomingActivityLog } = await chrome.storage.local.get(['incomingActivityLog']);
+  const list = Array.isArray(incomingActivityLog) ? incomingActivityLog : [];
+  const existingIds = new Set(list.map((e) => e.messageId).filter(Boolean));
+  // Caller hands these oldest-first (chronological scan order) — reversed
+  // here so prepending keeps the merged list newest-first, matching every
+  // other entry point into this log.
+  const fresh = payloads
+    .filter((p) => !(p.messageId && existingIds.has(p.messageId)))
+    .map(shapeIncomingEntry)
+    .reverse();
+  if (fresh.length === 0) return 0;
+  const next = [...fresh, ...list].slice(0, INCOMING_ACTIVITY_MAX);
+  await chrome.storage.local.set({ incomingActivityLog: next });
+  return fresh.length;
+}
+
+// Cap on how far back the very first catch-up (an install with no prior
+// incomingActivityLog entries yet) looks — without this, turning on a
+// WhatsApp Web tab for the first time since installing this feature would
+// try to import a chat's *entire* available synced history instead of just
+// what was actually missed.
+const INCOMING_CATCHUP_MAX_LOOKBACK_MS = 24 * 60 * 60 * 1000;
+
+async function catchUpIncomingActivity(tabId) {
+  try {
+    const { incomingActivityLog } = await chrome.storage.local.get(['incomingActivityLog']);
+    const list = Array.isArray(incomingActivityLog) ? incomingActivityLog : [];
+    const latestKnown = list.reduce((max, e) => Math.max(max, e.timestamp || 0), 0);
+    const sinceTimestamp = Math.max(latestKnown, Date.now() - INCOMING_CATCHUP_MAX_LOOKBACK_MS);
+    const res = await sendToTab(tabId, { action: 'catchUpIncoming', sinceTimestamp }, 45000);
+    if (res && res.ok && Array.isArray(res.entries)) await appendIncomingActivityBatch(res.entries);
+  } catch (_) {
+    // Best-effort only — a failed catch-up just leaves the feed as it was;
+    // the next tab load (relayHookReady fires again on every reload) tries
+    // again from the same high-water mark.
+  }
 }
 
 function uid() {
@@ -619,7 +698,7 @@ async function resolveActiveChatTarget() {
   return { ok: true, chat: chatRes.chat };
 }
 
-async function sendOneItem(waId, item) {
+async function sendOneItem(waId, item, quotedMsgId) {
   const tab = await ensureWaTab();
   const ready = await pingContentScript(tab.id);
   if (!ready) {
@@ -629,9 +708,9 @@ async function sendOneItem(waId, item) {
   }
   let res;
   if (item.kind === 'media' && item.media) {
-    res = await sendToTab(tab.id, { action: 'sendMedia', waId, media: item.media, caption: item.caption || '' }, 45000);
+    res = await sendToTab(tab.id, { action: 'sendMedia', waId, media: item.media, caption: item.caption || '', quotedMsgId }, 45000);
   } else {
-    res = await sendToTab(tab.id, { action: 'sendMessage', waId, text: item.text }, 30000);
+    res = await sendToTab(tab.id, { action: 'sendMessage', waId, text: item.text, quotedMsgId }, 30000);
   }
   if (!res || !res.ok) {
     throw new Error((res && res.error) || 'Unknown send failure.');
@@ -756,7 +835,10 @@ async function runCampaign(campaign) {
         const itemLabel = items.length > 1 ? ` (item ${itemIndex + 1}/${items.length})` : '';
         let itemSent = false;
         try {
-          const sendRes = await sendOneItem(target.waId, item);
+          // Only the first item of a multi-thread send carries the quote —
+          // it's a reply to one specific WhatsApp message, not every
+          // message this run happens to send afterward.
+          const sendRes = await sendOneItem(target.waId, item, itemIndex === 0 ? campaign.quotedMsgId : null);
           itemSent = true;
           sentAnyForTarget = true;
           totalSent++;
@@ -1567,6 +1649,29 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
           break;
         }
 
+        // Incoming tab's "go to this message" button — same shape as
+        // openChatById above, but jumps to (and briefly highlights) the
+        // exact message instead of just opening the chat at its bottom.
+        case 'openChatAtMessage': {
+          const tab = await ensureWaTab();
+          const ready = await pingContentScript(tab.id);
+          if (!ready) {
+            sendResponse({ ok: false, error: 'WhatsApp Web tab is not ready (make sure you are logged in and the page finished loading).' });
+            break;
+          }
+          try {
+            const res = await sendToTab(tab.id, { action: 'openChatAtMessage', waId: msg.waId, messageId: msg.messageId }, 15000);
+            if (!res || !res.ok) throw new Error((res && res.error) || 'Unknown error jumping to that message.');
+          } catch (err) {
+            sendResponse({ ok: false, error: String(err.message || err) });
+            break;
+          }
+          await chrome.tabs.update(tab.id, { active: true });
+          await chrome.windows.update(tab.windowId, { focused: true });
+          sendResponse({ ok: true });
+          break;
+        }
+
         // ---- messages (library) ----
         case 'saveMessage': {
           const { messages } = await getState();
@@ -1912,6 +2017,11 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
             messageOverride: msg.messageOverride,
             explicitTargets: [{ waId: msg.waId, name: msg.name || msg.waId }],
             sendSeparator: msg.sendSeparator !== false,
+            // Set by the Incoming feed's inline reply — quotes that
+            // specific WhatsApp message instead of just landing in the
+            // chat unconnected to whatever it's replying to. Absent for
+            // the quick-send box's own use of this same action.
+            quotedMsgId: msg.quotedMsgId || null,
             useDefaultDelay: true,
             delayBetweenMsMs: settings.defaultDelayBetweenMsMs,
             delayBetweenListsMs: settings.defaultDelayBetweenListsMs
@@ -2180,6 +2290,11 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
         case 'relayHookReady': {
           await chrome.storage.local.set({ relayHookStatus: { installedAt: msg.at || Date.now() } });
           sendResponse({ ok: true });
+          // Fire-and-forget — the popup shouldn't wait on a full chat scan
+          // just to learn the hook installed. Runs once per tab load, so a
+          // gap from the PC/browser being off (or the tab just being
+          // closed) gets backfilled the moment WhatsApp Web comes back.
+          if (sender.tab && sender.tab.id != null) catchUpIncomingActivity(sender.tab.id).catch(() => {});
           break;
         }
 
@@ -2207,6 +2322,51 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
             break;
           }
           sendResponse({ ok: true, dataUrl: res.dataUrl, mimetype: res.mimetype, filename: res.filename });
+          break;
+        }
+
+        // Incoming tab's manual "Catch up" control — same backfill machinery
+        // as the automatic one (catchUpIncomingActivity, run off
+        // relayHookReady), but with a caller-chosen window instead of
+        // "since the feed's own newest entry", for: this feature having just
+        // shipped (nothing to measure the automatic version's cutoff from
+        // yet), a longer gap than the automatic 24h cap covers, or
+        // deliberately reaching back further than what's currently stored at
+        // all (the Incoming feed's storage cap trims old entries off the
+        // bottom — this re-pulls them from WhatsApp's own synced history,
+        // which the storage cap never touched). "full" scans every chat with
+        // no time cutoff and a much deeper per-chat pull, so it can
+        // genuinely take a while — a caller-provided timeoutMs matches the
+        // one actually given to the tab/page-bridge round trip below.
+        case 'manualCatchUpIncoming': {
+          const tab = await ensureWaTab();
+          const ready = await pingContentScript(tab.id);
+          if (!ready) {
+            sendResponse({ ok: false, error: 'WhatsApp Web tab is not ready (make sure you are logged in and the page finished loading).' });
+            break;
+          }
+          const full = msg.range === 'full';
+          const hours = Number(msg.range) || 48;
+          const sinceTimestamp = full ? 0 : Date.now() - hours * 60 * 60 * 1000;
+          const timeoutMs = full ? 240000 : 90000;
+          const res = await sendToTab(
+            tab.id,
+            {
+              action: 'catchUpIncoming',
+              sinceTimestamp,
+              timeoutMs,
+              perChatCount: full ? 500 : 100,
+              maxChats: full ? 300 : 100,
+              maxEntries: full ? 3000 : 500
+            },
+            timeoutMs
+          );
+          if (!res || !res.ok) {
+            sendResponse({ ok: false, error: (res && res.error) || 'Catch-up failed.' });
+            break;
+          }
+          const added = await appendIncomingActivityBatch(res.entries || []);
+          sendResponse({ ok: true, scanned: (res.entries || []).length, added });
           break;
         }
 

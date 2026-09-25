@@ -206,7 +206,10 @@ store review, for the same ToS reasons noted above).
   date/time — so
   searching "8/27", "1:13", or "pm" filters by when it ran, too. A status
   filter (success/error) narrows it further. Both remember their last-used
-  value across popup opens. **Clear log** wipes it. Every successfully sent
+  value across popup opens. Capped at the most recent 3000 entries — unlike
+  the Incoming feed, there's no "load more" possible past that: WhatsApp
+  itself has no record of "sent via this extension," so once an entry falls
+  off this cap it's genuinely gone, not just hidden. **Clear log** wipes it. Every successfully sent
   message gets a **delete-for-everyone** button (WhatsApp's own "delete for
   everyone," not just deleting it from this log) — and if it was part of a
   multi-chat send, a bulk "Delete all N for everyone" button appears once for
@@ -228,29 +231,71 @@ store review, for the same ToS reasons noted above).
   This exists to *prove* the extension is really receiving live events —
   text, images, video, voice notes, documents, stickers — from every chat,
   not just to show what it sent. Search by chat name/text, filter by
-  message type, and toggle whether your own sent messages (fromMe) show up
-  too — they're included by default, since seeing them is part of
-  confirming the pipe carries everything, not just what's addressed to you.
-  Media is **not** downloaded automatically (that would mean fetching every
-  photo from every chat live, which nothing needs by default) — each media
-  entry gets its own **View** button to pull that one attachment on demand
-  and open it in a new tab. Entries are capped at the most recent 500 and
-  never leave this device (not part of cloud sync); **Clear** wipes the
-  local record only, nothing on WhatsApp itself. A small status dot at the
-  top ("Live hook active · installed…") reflects whether the underlying
-  WhatsApp-page hook actually installed on this tab, independent of
-  whether any message has arrived yet — an empty feed and a silently-broken
-  hook otherwise look identical. Each card also has a **Reply** button
+  message type (including a dedicated **Status** filter, for Status/Story
+  updates specifically — separate from the type they were actually posted
+  as, e.g. image/video/text), and toggle whether your own sent messages
+  (fromMe) show up too — they're included by default, since seeing them is
+  part of confirming the pipe carries everything, not just what's addressed
+  to you. Media is **not** downloaded automatically (that would mean
+  fetching every photo from every chat live, which nothing needs by
+  default) — each media entry gets its own **View** button to pull that one
+  attachment on demand and open it in a new tab. Entries are capped at the
+  most recent 3000 and never leave this device (not part of cloud sync);
+  **Clear** wipes the local record only, nothing on WhatsApp itself. A small
+  status dot at the top ("Live hook active · installed…") reflects whether
+  the underlying WhatsApp-page hook actually installed on this tab,
+  independent of whether any message has arrived yet — an empty feed and a
+  silently-broken hook otherwise look identical.
+  The live hook only catches what arrives while a WhatsApp Web tab is
+  actually open, so anything that arrived while your PC/browser was off (or
+  the tab was just closed) would otherwise be a gap — every time the hook
+  (re)installs, it also runs a one-time **catch-up scan** over each chat's
+  already-synced recent messages for anything newer than the feed's own
+  last entry, and backfills it in (capped to the last 24h the very first
+  time this runs, since there's no prior entry yet to measure from). It's a
+  bounded scan (each chat's most recent ~50 messages, stops once it reaches
+  chats with no activity since that cutoff), so an ordinary reload with
+  nothing missed costs almost nothing. Status/Story updates are scanned
+  separately from regular chats in the same pass — WhatsApp keeps them in
+  their own internal store, not among regular chats, so they need their own
+  (best-effort) lookup. A manual **Catch up** control below
+  the filters (last 48h / last 96h / full history) runs the same scan with a
+  caller-chosen window instead — for a longer gap than the automatic one's
+  24h cap covers, or to deliberately pull back in anything the feed's own
+  storage cap already trimmed off the bottom (still sitting in WhatsApp's
+  own synced history either way — the cap only ever trims this feed's local
+  copy, never WhatsApp's). "Full history" scans every chat with no time
+  cutoff and a much deeper per-chat pull (up to 500 messages/chat, 300
+  chats), so it can genuinely take a couple of minutes. Each card also
+  has a **Reply** button
   (top-right of its action row) that opens a small inline compose box —
   text, a fancy-text (Aa) style, and a single attachment, then Send or
   Ctrl+Enter — for replying straight from the feed without switching to
-  the Messages tab or WhatsApp Web itself. Only one card's reply box is
+  the Messages tab or WhatsApp Web itself. The send is a real WhatsApp
+  **quoted reply** to that exact card's message (not just a plain message
+  into the same chat), same as tapping Reply on it in WhatsApp itself — the
+  first item of a multi-item reply carries the quote, any items after it
+  don't (only one reply-to per send makes sense). **Not for a Status/Story
+  card** — confirmed by live inspection that a status message's own
+  metadata always points back at the viewer, never at a real chat, so
+  WhatsApp can't build a valid quote reference from it for wherever the
+  reply actually lands (the poster's 1:1 chat, not "status@broadcast");
+  wa-js's own status API has no reply-to-status function to use instead.
+  A status reply is sent as a plain, untagged message on purpose — quoting
+  isn't attempted for one at all, rather than sending something broken.
+  Only one card's reply box is
   open at a time; while one is open, new incoming traffic keeps updating
   the underlying data but pauses the feed's visible refresh so it doesn't
   wipe out whatever you're mid-typing, catching the view back up the
   moment you send or close it. Every card also has an **Open chat** button
-  (chat-bubble icon) that brings WhatsApp Web to the front already on that
-  conversation. A WhatsApp Status/Story update shows up here too (chat
+  that brings WhatsApp Web to the front already on that conversation
+  (scrolled to its bottom, same as opening it normally), and a **Go to this
+  message** button (map-pin icon) that instead opens it scrolled to —
+  and briefly highlighting — that exact message, same as clicking a result
+  in WhatsApp's own search. Disabled for a Status/Story card, since that
+  message lives in the shared "status@broadcast" slot, not inside a normal
+  chat's own history, so there's nowhere to scroll it into. A WhatsApp
+  Status/Story update shows up here too (chat
   "status@broadcast") — its card shows who actually posted it (a **status**
   badge instead of group/contact) and its own Open/Reply target that
   person's own chat, since a Status update itself isn't an openable
@@ -321,16 +366,19 @@ tier), creating your master key, and the exact storage layout. Nothing in
   (or a device an admin reset) stops working within minutes — scheduled
   sends included. A key holder with `master: true` gets a **Keys** tab in the
   popup to create / edit / reset devices / revoke / delete keys.
-- **Cloud sync** — turn on **"Sync messages, lists, log & settings to the
-  cloud under this key"** (header avatar → panel) and those four things are
-  kept as one snapshot under your key, so a second device activated with the
-  same key gets the same data. Off by default. A message's schedules travel
-  with it as part of the message itself — **note that means both devices
-  will fire them**; keep a schedule's message on one device, or disable it on
-  the other.
+- **Cloud sync** — turn on **"Sync messages, lists, contacts & settings to
+  the cloud under this key"** (header avatar → panel) and those four things
+  are kept as one snapshot under your key, so a second device activated with
+  the same key gets the same data. The **Log tab is deliberately excluded**
+  — send history is per-device activity, not shared state, so it never
+  leaves the machine that produced it. Off by default. A message's schedules
+  travel with it as part of the message itself — **note that means both
+  devices will fire them**; keep a schedule's message on one device, or
+  disable it on the other.
 - **Push is automatic but rate-limited**: a local change uploads ~2s later,
-  never more than once per 30s per device (a running campaign writes to the
-  log every send, and KV's free tier is 1,000 writes/day). **Pull** is by
+  never more than once per 30s per device (a running campaign touches a
+  contact's `lastContactedAt` on every send, and KV's free tier is 1,000
+  writes/day). **Pull** is by
   polling once a minute (`chrome.alarms` — the only thing that reliably
   survives Manifest V3 idling the service worker out) plus immediately when
   the popup opens; "Sync now" in the panel does both on demand. Turning sync
@@ -399,8 +447,8 @@ internal data/functions instead of the rendered page.
   (with the `unlimitedStorage` permission, since saved images/documents can
   be a few MB) — that's still true regardless of sync. With cloud sync
   turned on (off by default — see "Activation keys & cloud sync" above),
-  messages/lists/log/settings additionally get copied to the license
-  server under this install's activation key; `fetchedChats` and
+  messages/lists/contacts/settings additionally get copied to the license
+  server under this install's activation key; `fetchedChats`, the log, and
   in-progress run state stay device-local either way.
 - **`license.js`** and **`sync.js`** are the activation + cloud sync layer —
   every call to the license server (`server/worker.js`, a Cloudflare Worker)
