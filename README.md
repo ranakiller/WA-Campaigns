@@ -486,6 +486,12 @@ internal data/functions instead of the rendered page.
   — searching "Nuskomate" there shows only these. A successful one gets the
   same **Delete for everyone** button as any other logged send, since it's
   logged with the same `waId`/`msgId` shape.
+- **AI Bridge** — a separate card, Settings → **AI Bridge**, just below External API. The other
+  direction from External API above: this extension calling OUT to the separate AI Bridge
+  extension (a shared Gemini gateway CRM Bridge and Nuskomate already use), not answering one.
+  This extension's id is pre-seeded on AI Bridge's own Allowed list. **Test connection** is a
+  plain reachability ping — nothing in WA-Campaigns calls AI Bridge for a real feature yet, this
+  card exists so that connection can be verified ahead of whatever does.
 
 ## Requirements
 

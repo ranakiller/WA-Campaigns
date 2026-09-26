@@ -5999,6 +5999,18 @@ document.getElementById('externalClientAddBtn').addEventListener('click', addExt
   })
 );
 
+document.getElementById('aiBridgeTestBtn').addEventListener('click', async () => {
+  const statusEl = document.getElementById('aiBridgeStatus');
+  const btn = document.getElementById('aiBridgeTestBtn');
+  btn.disabled = true;
+  statusEl.textContent = 'Checking…';
+  const r = await call('pingAiBridge');
+  btn.disabled = false;
+  statusEl.textContent = r.ok
+    ? `Reachable - ${r.name} v${r.version}.`
+    : `Not reachable - ${r.error}`;
+});
+
 document.getElementById('syncEnabledCheck').addEventListener('change', async (e) => {
   await call('saveSettings', { settings: { syncEnabled: e.target.checked } });
   refresh();

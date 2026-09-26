@@ -1429,6 +1429,14 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
           break;
         }
 
+        // Settings' AI Bridge status row - a reachability check only (confirms AI Bridge is
+        // installed and this extension's id is on its Allowed list), not a real AI call.
+        case 'pingAiBridge': {
+          const r = await callAiBridge({ type: 'ping' });
+          sendResponse(r.ok ? { ok: true, name: r.name, version: r.version } : { ok: false, error: r.error });
+          break;
+        }
+
         // External API allow-list (Settings → External API) — see
         // getExternalClients() for what this list gates.
         case 'saveExternalClients': {
@@ -2393,6 +2401,31 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
 const NUSKOMATE_EXTENSION_ID = 'mcikbecdcddegpbonhndegmpjgbangdl';
 const CRM_BRIDGE_EXTENSION_ID = 'jnlakipnjkcpddhbaadmngbmkofcfcgo';
 
+// ---------- AI Bridge (shared LLM gateway, a peer extension like the two above) ----------
+// The other direction from the external API above: THIS extension calling OUT to a sister
+// extension instead of answering one. AI Bridge holds the one shared Gemini key and does the
+// actual HTTP/retry work, so nothing here needs its own copy of either - this extension's id is
+// pre-seeded on AI Bridge's own Allowed extensions list. Plumbing only for now (no feature here
+// calls this yet) - callAiBridge is ready for whichever WA-Campaigns feature ends up wanting it.
+const AI_BRIDGE_EXTENSION_ID = 'jcchaofblhinmenpgkfmdghbkhfkjogf';
+const AI_BRIDGE_TIMEOUT_MS = 70000;
+function callAiBridge(msg) {
+  return new Promise((resolve) => {
+    const timer = setTimeout(() => resolve({ ok: false, error: `AI Bridge didn't answer within ${AI_BRIDGE_TIMEOUT_MS / 1000}s` }), AI_BRIDGE_TIMEOUT_MS);
+    try {
+      chrome.runtime.sendMessage(AI_BRIDGE_EXTENSION_ID, msg, (resp) => {
+        clearTimeout(timer);
+        const err = chrome.runtime.lastError;
+        if (err) resolve({ ok: false, error: `AI Bridge not reachable: ${err.message} (is it installed, and is this extension's id on its Allowed list?)` });
+        else resolve(resp || { ok: false, error: 'Empty response from AI Bridge' });
+      });
+    } catch (e) {
+      clearTimeout(timer);
+      resolve({ ok: false, error: (e && e.message) || String(e) });
+    }
+  });
+}
+
 // Which extensions may talk to this one is a user-editable list (Settings →
 // External API), stored locally only — never synced, since extension ids
 // differ per machine/install. manifest.json's externally_connectable is
@@ -2452,6 +2485,15 @@ getExternalClients().then((clients) => clients.forEach((c) => pingExternalClient
 
 chrome.runtime.onMessageExternal.addListener((msg, sender, sendResponse) => {
   (async () => {
+    // A bare reachability ping is answered from anyone, allow-listed or not (checking both
+    // `action` - this extension's own external API convention - and `type`, since AI Bridge's
+    // generic "Test connection" button sends both to cover whichever convention the target
+    // uses). Reveals nothing sensitive (`{ok:true}`, same as the gated case below), so it's the
+    // one exception - everything else still requires being on the External API allow-list.
+    if (msg && (msg.action === 'ping' || msg.type === 'ping') && !(await getExternalClients()).some((c) => c.id === sender.id)) {
+      sendResponse({ ok: true });
+      return;
+    }
     const client = (await getExternalClients()).find((c) => c.id === sender.id);
     if (!client) {
       sendResponse({
