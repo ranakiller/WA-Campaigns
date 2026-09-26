@@ -163,6 +163,24 @@ own version number matching source, not the older version baked into `dist/`). D
 `dist/` is the reason this bridge isn't working; check that Nuskomate's actual loaded copy (wherever
 Chrome points at it) has been reloaded since any change to its bridge code instead.
 
+### AI Bridge (`background.js`, near the external-client constants)
+
+The other direction from the External API section above: this extension calling OUT to a sibling
+extension instead of answering one. `AI_BRIDGE_EXTENSION_ID` + `callAiBridge(msg)` is plumbing only
+right now - no feature here calls it yet, nothing was specified to build against it - ready for
+whichever WA-Campaigns feature (roadmap phase 2/3: human-paced campaign batches, an in-WhatsApp
+command interface) ends up wanting it. This extension's id is pre-seeded on AI Bridge's own Allowed
+extensions list (see `../AIExt`). Settings → AI Bridge has a **Test connection** button
+(`pingAiBridge` action → `callAiBridge({type:'ping'})`) - a plain reachability check, not a real AI
+call.
+
+Separately, `onMessageExternal`'s allow-list gate has one exception: a bare reachability ping
+(`msg.action === 'ping' || msg.type === 'ping'`, checking both since different callers use different
+conventions) is answered `{ok:true}` from ANY sender, not just ones on the External API allow-list -
+this is what AI Bridge's own "Test connection" button (and Nuskomate's, and CRM Bridge's) needs to
+confirm this extension is installed and listening. Reveals nothing beyond that; everything else
+still requires being on the allow-list, same as before.
+
 ### Incoming activity feed (the "Incoming" tab)
 
 `page-bridge.js`'s `installExternalRelayHook()` already subscribes to `WPP.on('chat.new_message', ...)`
